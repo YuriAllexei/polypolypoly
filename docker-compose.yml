@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: polymarket-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    # Uncomment to use GPU (requires NVIDIA Docker runtime)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # SQLite database container (for persistence and easy backup)
+  # Note: The bot will create markets.db when it runs
+  # Mount this volume when running the bot:
+  # docker run -v polymarket-arb-bot_market_data:/data polymarket-arb-bot
+  sqlite-storage:
+    image: alpine:latest
+    container_name: polymarket-db-storage
+    volumes:
+      - market_data:/data
+    command: tail -f /dev/null  # Keep container alive
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+    driver: local
+  market_data:
+    driver: local
