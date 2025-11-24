@@ -1,12 +1,15 @@
 [workspace]
 members = [
-    "libs/bot-config",
-    "libs/llm-filter",
-    "libs/polymarket-client",
-    "libs/arb-strategy",
-    "libs/market-db",
-    "libs/types",
+    "libs/hypersockets",
+    "libs/polymarket",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["polymarket-arb-bot"]
+license = "MIT"
+repository = "https://github.com/yourusername/polymarket-arb-bot"
 
 [workspace.dependencies]
 # Core async runtime
@@ -43,16 +46,17 @@ async-trait = "0.1"
 # Database
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite"] }
 
-# HyperSockets (local dependency)
-hypersockets = { path = "../hypersockets/libs/hypersockets" }
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+
+# Concurrency
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+futures = "0.3"
 
 # Workspace libraries
-bot-config = { path = "libs/bot-config" }
-llm-filter = { path = "libs/llm-filter" }
-polymarket-client = { path = "libs/polymarket-client" }
-arb-strategy = { path = "libs/arb-strategy" }
-market-db = { path = "libs/market-db" }
-types = { path = "libs/types" }
+hypersockets = { path = "libs/hypersockets" }
+polymarket = { path = "libs/polymarket" }
 
 [package]
 name = "polymarket-arb-bot"
@@ -72,12 +76,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-bot-config = { workspace = true }
-llm-filter = { workspace = true }
-types = { workspace = true }
-polymarket-client = { workspace = true }
-arb-strategy = { workspace = true }
-market-db = { workspace = true }
+polymarket = { workspace = true }
 chrono = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }

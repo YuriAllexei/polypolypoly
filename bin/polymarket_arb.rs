@@ -1,9 +1,10 @@
-use arb_strategy::{ExecutedTrade, MonitoredMarket, OrderExecutor, ResolutionMonitor, RiskConfig, RiskManager, TradingConfig};
-use bot_config::BotConfig;
+use polymarket::strategy::{ExecutedTrade, MonitoredMarket, OrderExecutor, ResolutionMonitor, RiskConfig, RiskManager, TradingConfig};
+use polymarket::config::BotConfig;
 use chrono::{Duration, Utc};
-use llm_filter::{LLMFilter, MarketInfo};
-use market_db::{MarketDatabase, MarketSyncService};
-use polymarket_client::{GammaClient, PolymarketAuth, RestClient};
+use polymarket::filter::{LLMFilter, MarketInfo};
+use polymarket::database::{MarketDatabase, MarketSyncService};
+use polymarket::client::{GammaClient, PolymarketAuth};
+use polymarket::client::clob::RestClient;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::time;
@@ -229,7 +230,7 @@ async fn main() -> anyhow::Result<()> {
                                         // Find full market data
                                         if let Some(db_market) = db_markets.iter().find(|m| m.id == market_info.id) {
                                             // Store in LLM cache
-                                            let cache_entry = market_db::DbLLMCache {
+                                            let cache_entry = polymarket::database::DbLLMCache {
                                                 question: db_market.question.clone(),
                                                 market_id: db_market.id.clone(),
                                                 compatible: true,
@@ -258,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
                                     for market_info in &markets_to_check {
                                         if !compatible_markets.iter().any(|m| m.id == market_info.id) {
                                             if let Some(db_market) = db_markets.iter().find(|m| m.id == market_info.id) {
-                                                let cache_entry = market_db::DbLLMCache {
+                                                let cache_entry = polymarket::database::DbLLMCache {
                                                     question: db_market.question.clone(),
                                                     market_id: db_market.id.clone(),
                                                     compatible: false,
