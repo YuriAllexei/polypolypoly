@@ -71,6 +71,10 @@ path = "bin/polymarket_arb.rs"
 name = "polymarket_events"
 path = "bin/polymarket_events.rs"
 
+[[bin]]
+name = "market_sniper"
+path = "bin/market_sniper.rs"
+
 [dependencies]
 tokio = { workspace = true }
 tracing = { workspace = true }

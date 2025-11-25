@@ -3,3 +3,4 @@
 /.claude
 Cargo.lock
 /target
+/config/sniper_config.yaml

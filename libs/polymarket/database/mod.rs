@@ -143,6 +143,29 @@ impl MarketDatabase {
         Ok(markets)
     }
 
+    /// Get markets expiring within the next X seconds (supports fractional seconds)
+    pub async fn get_markets_expiring_soon(&self, within_seconds: f64) -> Result<Vec<DbMarket>> {
+        let now = Utc::now();
+        let cutoff = now + Duration::milliseconds((within_seconds * 1000.0) as i64);
+
+        let markets = sqlx::query_as::<_, DbMarket>(
+            r#"
+            SELECT * FROM markets
+            WHERE active = 1
+            AND closed = 0
+            AND resolution_time > ?
+            AND resolution_time <= ?
+            ORDER BY resolution_time ASC
+            "#,
+        )
+        .bind(now.to_rfc3339())
+        .bind(cutoff.to_rfc3339())
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(markets)
+    }
+
     /// Get markets updated since timestamp
     pub async fn get_updated_since(&self, since: DateTime<Utc>) -> Result<Vec<DbMarket>> {
         let markets = sqlx::query_as::<_, DbMarket>(
@@ -168,12 +191,11 @@ impl MarketDatabase {
 
     /// Get market by condition ID
     pub async fn get_market_by_condition(&self, condition_id: &str) -> Result<DbMarket> {
-        let market =
-            sqlx::query_as::<_, DbMarket>("SELECT * FROM markets WHERE condition_id = ?")
-                .bind(condition_id)
-                .fetch_optional(&self.pool)
-                .await?
-                .ok_or_else(|| DatabaseError::MarketNotFound(condition_id.to_string()))?;
+        let market = sqlx::query_as::<_, DbMarket>("SELECT * FROM markets WHERE condition_id = ?")
+            .bind(condition_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| DatabaseError::MarketNotFound(condition_id.to_string()))?;
 
         Ok(market)
     }
@@ -220,12 +242,10 @@ impl MarketDatabase {
 
     /// Delete resolved markets older than cutoff date
     pub async fn cleanup_resolved(&self, before: DateTime<Utc>) -> Result<u64> {
-        let result = sqlx::query(
-            "DELETE FROM markets WHERE closed = 1 AND resolution_time < ?",
-        )
-        .bind(before.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query("DELETE FROM markets WHERE closed = 1 AND resolution_time < ?")
+            .bind(before.to_rfc3339())
+            .execute(&self.pool)
+            .await?;
 
         Ok(result.rows_affected())
     }
@@ -263,11 +283,10 @@ impl MarketDatabase {
 
     /// Get all compatible markets from LLM cache
     pub async fn get_compatible_markets(&self) -> Result<Vec<String>> {
-        let ids: Vec<(String,)> = sqlx::query_as(
-            "SELECT market_id FROM llm_cache WHERE compatible = 1",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let ids: Vec<(String,)> =
+            sqlx::query_as("SELECT market_id FROM llm_cache WHERE compatible = 1")
+                .fetch_all(&self.pool)
+                .await?;
 
         Ok(ids.into_iter().map(|(id,)| id).collect())
     }
@@ -278,11 +297,10 @@ impl MarketDatabase {
             .fetch_one(&self.pool)
             .await?;
 
-        let (compatible,) = sqlx::query_as::<_, (i64,)>(
-            "SELECT COUNT(*) FROM llm_cache WHERE compatible = 1",
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let (compatible,) =
+            sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM llm_cache WHERE compatible = 1")
+                .fetch_one(&self.pool)
+                .await?;
 
         let incompatible = total - compatible;
 
@@ -350,13 +368,11 @@ impl MarketDatabase {
     /// Link an event to its markets
     pub async fn link_event_markets(&self, event_id: &str, market_ids: &[String]) -> Result<()> {
         for market_id in market_ids {
-            sqlx::query(
-                "INSERT OR IGNORE INTO event_markets (event_id, market_id) VALUES (?, ?)"
-            )
-            .bind(event_id)
-            .bind(market_id)
-            .execute(&self.pool)
-            .await?;
+            sqlx::query("INSERT OR IGNORE INTO event_markets (event_id, market_id) VALUES (?, ?)")
+                .bind(event_id)
+                .bind(market_id)
+                .execute(&self.pool)
+                .await?;
         }
 
         Ok(())
@@ -417,11 +433,9 @@ impl MarketDatabase {
 
     /// Get active event count
     pub async fn active_event_count(&self) -> Result<i64> {
-        let (count,) = sqlx::query_as::<_, (i64,)>(
-            "SELECT COUNT(*) FROM events WHERE closed = 0",
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let (count,) = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM events WHERE closed = 0")
+            .fetch_one(&self.pool)
+            .await?;
 
         Ok(count)
     }
@@ -440,6 +454,18 @@ impl MarketDatabase {
         .await?;
 
         Ok(markets)
+    }
+
+    /// Get event ID for a specific market (reverse lookup)
+    pub async fn get_market_event_id(&self, market_id: &str) -> Result<Option<String>> {
+        let result = sqlx::query_as::<_, (String,)>(
+            "SELECT event_id FROM event_markets WHERE market_id = ?"
+        )
+        .bind(market_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(result.map(|(event_id,)| event_id))
     }
 
     // ==================== UTILITY ====================
@@ -501,8 +527,12 @@ mod tests {
     async fn test_get_active_markets() {
         let db = create_test_db().await;
 
-        db.upsert_market(create_test_market("active1")).await.unwrap();
-        db.upsert_market(create_test_market("active2")).await.unwrap();
+        db.upsert_market(create_test_market("active1"))
+            .await
+            .unwrap();
+        db.upsert_market(create_test_market("active2"))
+            .await
+            .unwrap();
 
         let active_markets = db.get_active_markets().await.unwrap();
         assert_eq!(active_markets.len(), 2);

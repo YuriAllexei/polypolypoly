@@ -43,7 +43,19 @@ pub struct OrderBook {
     pub asks: Vec<PriceLevel>,
 
     #[serde(default)]
-    pub timestamp: Option<i64>,
+    pub timestamp: Option<String>,
+
+    #[serde(default)]
+    pub hash: Option<String>,
+
+    #[serde(default)]
+    pub min_order_size: Option<String>,
+
+    #[serde(default)]
+    pub tick_size: Option<String>,
+
+    #[serde(default)]
+    pub neg_risk: Option<bool>,
 }
 
 /// Price level in order book
@@ -249,5 +261,18 @@ impl OrderBook {
                 })
             }
         }
+    }
+
+    /// Get the best ask (lowest/cheapest price to buy at)
+    pub fn best_ask(&self) -> Option<&PriceLevel> {
+        self.asks.last()
+    }
+
+    /// Calculate total cost to sweep entire ask side of orderbook
+    /// Returns the sum of (price * size) for all asks
+    pub fn total_ask_sweep_cost(&self) -> f64 {
+        self.asks.iter()
+            .map(|ask| ask.price_f64() * ask.size_f64())
+            .sum()
     }
 }

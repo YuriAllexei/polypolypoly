@@ -1,0 +1,16 @@
+# Market Sniper Configuration
+# This config is used by the market_sniper binary to identify markets close to resolution
+
+# Probability threshold for market opportunities (0.0 to 1.0)
+probability: 0.95
+
+# Time window in seconds before market resolution
+# Markets within this time window will be fetched and logged
+delta_t_seconds: 43200
+
+# Loop interval in seconds - how often to check for new markets
+loop_interval_secs: 60
+
+# Database configuration
+database:
+  path: "./data/markets.db"

@@ -95,6 +95,55 @@ pub struct ScannerConfig {
     pub min_resolution_window_mins: u64,
 }
 
+/// Market Sniper configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SniperConfig {
+    pub probability: f64,
+    pub delta_t_seconds: f64,
+    pub loop_interval_secs: f64,
+    pub database: DatabaseConfig,
+}
+
+impl SniperConfig {
+    /// Load configuration from YAML file
+    pub fn load(config_path: impl AsRef<Path>) -> Result<Self> {
+        // Load YAML config
+        let yaml_content = std::fs::read_to_string(config_path)?;
+        let config: SniperConfig = serde_yaml::from_str(&yaml_content)?;
+
+        // Validate configuration
+        config.validate()?;
+
+        Ok(config)
+    }
+
+    /// Validate configuration values
+    fn validate(&self) -> Result<()> {
+        // Validate probability
+        if self.probability < 0.0 || self.probability > 1.0 {
+            return Err(ConfigError::ValidationError(
+                "probability must be between 0 and 1".to_string()
+            ));
+        }
+
+        // Validate delta_t_seconds
+        if self.delta_t_seconds <= 0.0 {
+            return Err(ConfigError::ValidationError(
+                "delta_t_seconds must be greater than 0".to_string()
+            ));
+        }
+
+        // Validate loop_interval_secs
+        if self.loop_interval_secs <= 0.0 {
+            return Err(ConfigError::ValidationError(
+                "loop_interval_secs must be greater than 0".to_string()
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 impl BotConfig {
     /// Load configuration from YAML file and .env
     pub fn load(config_path: impl AsRef<Path>) -> Result<Self> {
