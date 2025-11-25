@@ -9,7 +9,7 @@ use thiserror::Error;
 use tracing::{debug, info};
 
 // Re-export main types
-pub use models::{DbEvent, DbLLMCache, DbMarket, MarketFilters, SyncStats};
+pub use models::{DbEvent, DbLLMCache, DbMarket, DbOpportunity, MarketFilters, SyncStats};
 pub use schema::{get_schema_version, initialize_schema};
 pub use sync::MarketSyncService;
 
@@ -466,6 +466,51 @@ impl MarketDatabase {
         .await?;
 
         Ok(result.map(|(event_id,)| event_id))
+    }
+
+    // ==================== OPPORTUNITY OPERATIONS ====================
+
+    /// Insert an opportunity record (ignores duplicates based on market_id + token_id)
+    pub async fn insert_opportunity(&self, opp: &models::DbOpportunity) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO opportunities
+            (market_id, event_id, token_id, outcome, ask_price, liquidity, resolution_time, detected_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&opp.market_id)
+        .bind(&opp.event_id)
+        .bind(&opp.token_id)
+        .bind(&opp.outcome)
+        .bind(opp.ask_price)
+        .bind(opp.liquidity)
+        .bind(&opp.resolution_time)
+        .bind(&opp.detected_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get all opportunities
+    pub async fn get_opportunities(&self) -> Result<Vec<models::DbOpportunity>> {
+        let opportunities = sqlx::query_as::<_, models::DbOpportunity>(
+            "SELECT * FROM opportunities ORDER BY detected_at DESC"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(opportunities)
+    }
+
+    /// Get opportunity count
+    pub async fn opportunity_count(&self) -> Result<i64> {
+        let (count,) = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM opportunities")
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok(count)
     }
 
     // ==================== UTILITY ====================

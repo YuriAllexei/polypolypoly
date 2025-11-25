@@ -6,7 +6,9 @@ pub mod client;
 pub mod config;
 pub mod database;
 pub mod filter;
+pub mod sniper;
 pub mod strategy;
+pub mod utils;
 
 // Re-export commonly used items
 pub use client::{
@@ -18,4 +20,6 @@ pub use client::{
 pub use config::BotConfig;
 pub use database::{MarketDatabase, MarketSyncService};
 pub use filter::LLMFilter;
+pub use sniper::SniperMarket;
 pub use strategy::{OrderExecutor, ResolutionMonitor, RiskManager};
+pub use utils::{init_tracing, Heartbeat, ShutdownManager};

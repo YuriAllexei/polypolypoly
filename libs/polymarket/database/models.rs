@@ -119,6 +119,52 @@ pub struct SyncStats {
     pub duration: std::time::Duration,
 }
 
+/// Database representation of a detected opportunity
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct DbOpportunity {
+    pub id: Option<i64>,
+    pub market_id: String,
+    pub event_id: Option<String>,
+    pub token_id: String,
+    pub outcome: String,
+    pub ask_price: f64,
+    pub liquidity: f64,
+    pub resolution_time: String,  // ISO 8601
+    pub detected_at: String,      // ISO 8601
+}
+
+impl DbOpportunity {
+    /// Create a new opportunity record
+    pub fn new(
+        market_id: String,
+        event_id: Option<String>,
+        token_id: String,
+        outcome: String,
+        ask_price: f64,
+        liquidity: f64,
+        resolution_time: String,
+        detected_at: String,
+    ) -> Self {
+        Self {
+            id: None,
+            market_id,
+            event_id,
+            token_id,
+            outcome,
+            ask_price,
+            liquidity,
+            resolution_time,
+            detected_at,
+        }
+    }
+
+    /// Convert detected_at to DateTime
+    pub fn detected_datetime(&self) -> Result<DateTime<Utc>, chrono::ParseError> {
+        DateTime::parse_from_rfc3339(&self.detected_at)
+            .map(|dt| dt.with_timezone(&Utc))
+    }
+}
+
 /// Query filters for markets
 #[derive(Debug, Clone, Default)]
 pub struct MarketFilters {

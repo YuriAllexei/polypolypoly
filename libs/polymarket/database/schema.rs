@@ -10,7 +10,7 @@ pub enum SchemaError {
 pub type Result<T> = std::result::Result<T, SchemaError>;
 
 /// Database schema version
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// Initialize database schema
 pub async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
@@ -158,6 +158,34 @@ pub async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
         .await?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_event_markets_market ON event_markets(market_id)")
+        .execute(pool)
+        .await?;
+
+    // Create opportunities table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS opportunities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_id TEXT NOT NULL,
+            event_id TEXT,
+            token_id TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            ask_price REAL NOT NULL,
+            liquidity REAL NOT NULL,
+            resolution_time TEXT NOT NULL,
+            detected_at TEXT NOT NULL,
+            UNIQUE(market_id, token_id)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_opportunities_market ON opportunities(market_id)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_opportunities_detected ON opportunities(detected_at)")
         .execute(pool)
         .await?;
 

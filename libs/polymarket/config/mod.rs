@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
+use tracing::info;
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -141,6 +142,15 @@ impl SniperConfig {
         }
 
         Ok(())
+    }
+
+    /// Log configuration summary
+    pub fn log(&self) {
+        info!("Configuration loaded:");
+        info!("  Probability threshold: {}", self.probability);
+        info!("  Time window: {} seconds", self.delta_t_seconds);
+        info!("  Loop interval: {} seconds", self.loop_interval_secs);
+        info!("  Database path: {}", self.database.path);
     }
 }
 
