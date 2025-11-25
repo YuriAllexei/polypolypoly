@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
     // HashSet to track logged market IDs
     let mut logged_market_ids: HashSet<String> = HashSet::new();
     let mut iteration = 0;
+    let mut last_heartbeat = Utc::now();
 
     info!("");
     info!("========================================");
@@ -193,9 +194,18 @@ async fn main() -> Result<()> {
             }
         }
 
-        if new_markets_found == 0 && iteration % 50 == 0 {
-            // Log a heartbeat every 50 iterations when no new markets found
-            info!("Iteration #{}: No new markets found (tracking {} markets)", iteration, logged_market_ids.len());
+        // Log heartbeat every 5 minutes if no new markets found
+        if new_markets_found == 0 {
+            let now = Utc::now();
+            let elapsed = now.signed_duration_since(last_heartbeat).num_seconds();
+
+            if elapsed >= 300 {  // 5 minutes = 300 seconds
+                info!("Heartbeat (Iteration #{}): No new markets found in last 5 minutes (tracking {} markets)", iteration, logged_market_ids.len());
+                last_heartbeat = now;
+            }
+        } else {
+            // Reset heartbeat timer when markets are found
+            last_heartbeat = Utc::now();
         }
 
         // Sleep before next iteration, or break on Ctrl+C
