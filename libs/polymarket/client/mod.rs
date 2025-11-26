@@ -1,11 +1,7 @@
-//! Polymarket API clients
+//! Client module - Re-exported from infrastructure layer
 //!
-//! Provides clients for both the Gamma API (market data) and CLOB API (trading).
+//! This maintains backward compatibility while following Clean Architecture.
+//! The actual implementation is in the infrastructure layer.
 
-pub mod auth;
-pub mod gamma;
-pub mod clob;
-
-pub use auth::PolymarketAuth;
-pub use gamma::{GammaClient, GammaEvent, GammaMarket, GammaTag, GammaFilters};
-pub use clob::{RestClient, WebSocketClient, Market, Outcome, OrderBook, PriceLevel, Side, OrderType, OrderArgs};
+// Re-export everything from infrastructure/client for backward compatibility
+pub use crate::infrastructure::client::*;

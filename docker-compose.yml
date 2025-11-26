@@ -1,6 +1,39 @@
 version: '3.8'
 
 services:
+  polymarket-events:
+    build: .
+    container_name: polymarket-events
+    restart: unless-stopped
+    command: [ "./polymarket_events" ]
+    depends_on:
+      - postgres
+      - ollama
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/polymarket
+      - RUST_LOG=info
+    volumes:
+      - ./config.yaml:/etc/polymarket/config.yaml
+
+  market-sniper:
+    build: .
+    container_name: market-sniper
+    restart: unless-stopped
+    command: [ "./market_sniper" ]
+    depends_on:
+      - postgres
+      - ollama
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/polymarket
+      - RUST_LOG=info
+      - SNIPER_CONFIG_PATH=/etc/polymarket/sniper_config.yaml
+    volumes:
+      - ./config/sniper_config.yaml:/etc/polymarket/sniper_config.yaml
+
   ollama:
     image: ollama/ollama:latest
     container_name: polymarket-ollama
@@ -18,20 +51,26 @@ services:
     #           count: 1
     #           capabilities: [gpu]
 
-  # SQLite database container (for persistence and easy backup)
-  # Note: The bot will create markets.db when it runs
-  # Mount this volume when running the bot:
-  # docker run -v polymarket-arb-bot_market_data:/data polymarket-arb-bot
-  sqlite-storage:
-    image: alpine:latest
-    container_name: polymarket-db-storage
-    volumes:
-      - market_data:/data
-    command: tail -f /dev/null  # Keep container alive
+  postgres:
+    image: postgres:16-alpine
+    container_name: polymarket-postgres
     restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=polymarket
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
 volumes:
   ollama_data:
     driver: local
-  market_data:
+  postgres_data:
     driver: local

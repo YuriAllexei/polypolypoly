@@ -1,6 +1,6 @@
 # Database Configuration
 database:
-  path: "./data/markets.db"  # SQLite database path (volume-mounted in Docker)
+  url: "postgres://postgres:postgres@localhost:5432/polymarket"  # Postgres connection URL
 
 # Gamma API Configuration (Market Discovery)
 gamma_api:

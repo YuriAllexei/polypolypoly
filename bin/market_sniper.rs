@@ -3,7 +3,7 @@ use polymarket::client::clob::spawn_market_tracker;
 use polymarket::config::SniperConfig;
 use polymarket::database::MarketDatabase;
 use polymarket::sniper::SniperMarket;
-use polymarket::utils::{init_tracing, Heartbeat, ShutdownManager};
+use polymarket::infrastructure::{init_tracing, Heartbeat, ShutdownManager};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,10 +14,11 @@ async fn main() -> Result<()> {
     init_tracing();
     info!("Starting Market Sniper (Continuous Mode)");
 
-    let config = SniperConfig::load("config/sniper_config.yaml")?;
+    let config_path = std::env::var("SNIPER_CONFIG_PATH").unwrap_or_else(|_| "config/sniper_config.yaml".to_string());
+    let config = SniperConfig::load(&config_path)?;
     config.log();
 
-    let db = Arc::new(MarketDatabase::new(&config.database.path).await?);
+    let db = Arc::new(MarketDatabase::new(&config.database.url).await?);
     let shutdown = ShutdownManager::new();
     shutdown.spawn_signal_handler();
     let probability_threshold = config.probability;

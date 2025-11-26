@@ -2,24 +2,42 @@
 //!
 //! Complete suite for trading on Polymarket prediction markets.
 
+// Core layers (Clean Architecture)
+pub mod domain;
+pub mod infrastructure;
+pub mod application;
+
+// Legacy modules (re-export from new locations for backward compatibility)
 pub mod client;
 pub mod config;
 pub mod database;
 pub mod filter;
 pub mod sniper;
 pub mod strategy;
-pub mod utils;
 
-// Re-export commonly used items
-pub use client::{
+// Re-export commonly used items from infrastructure
+pub use infrastructure::{
     PolymarketAuth,
-    gamma::{GammaClient, GammaEvent, GammaMarket, GammaTag, GammaFilters},
-    clob::{RestClient, WebSocketClient, Market, Outcome, OrderBook, PriceLevel, Side, OrderType, OrderArgs},
+    BotConfig,
+    client::{
+        gamma::{GammaClient, GammaEvent, GammaMarket, GammaTag, GammaFilters},
+        clob::{RestClient, WebSocketClient, Market, Outcome, OrderBook, PriceLevel, Side, OrderType, OrderArgs},
+    },
+    database::MarketDatabase,
 };
 
-pub use config::BotConfig;
-pub use database::{MarketDatabase, MarketSyncService};
-pub use filter::LLMFilter;
-pub use sniper::SniperMarket;
-pub use strategy::{OrderExecutor, ResolutionMonitor, RiskManager};
-pub use utils::{init_tracing, Heartbeat, ShutdownManager};
+// Re-export from application layer
+pub use application::{
+    EventSyncService, 
+    MarketSyncService,
+    LLMFilter,
+    OrderExecutor, 
+    ResolutionMonitor, 
+    RiskManager,
+};
+
+// Re-export from domain layer
+pub use domain::SniperMarket;
+
+// Re-export utils from infrastructure for backward compatibility
+pub use infrastructure::{init_tracing, Heartbeat, ShutdownManager};

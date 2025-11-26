@@ -12,7 +12,7 @@
 use anyhow::Result;
 use polymarket::client::clob::spawn_market_tracker;
 use polymarket::database::MarketDatabase;
-use polymarket::utils::{init_tracing, ShutdownManager};
+use polymarket::infrastructure::{init_tracing, ShutdownManager};
 use std::env;
 use std::sync::Arc;
 use tracing::info;
