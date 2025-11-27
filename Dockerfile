@@ -9,14 +9,14 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/li
 # Copy manifests first to cache dependencies
 COPY Cargo.toml Cargo.lock ./
 COPY libs ./libs
-COPY bin ./bin
+COPY src ./src
 
 # Build the application
-# We build all binaries
+# We build all binaries (now in src/bin/)
 RUN cargo build --release
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM ubuntu
 
 WORKDIR /usr/local/bin
 

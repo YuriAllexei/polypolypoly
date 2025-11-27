@@ -10,16 +10,13 @@
 //!   cargo run --bin test_orderbook -- 123456... 789012... "Up" "Down"
 
 use anyhow::Result;
-use polymarket::client::clob::spawn_market_tracker;
-use polymarket::database::MarketDatabase;
-use polymarket::infrastructure::{init_tracing, ShutdownManager};
+use polymarket::application::SniperApp;
 use std::env;
-use std::sync::Arc;
 use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing();
+    polymarket::application::init_logging();
 
     let args: Vec<String> = env::args().collect();
 
@@ -56,8 +53,8 @@ async fn main() -> Result<()> {
     info!("  [{}] {}", outcomes[1], token_ids[1]);
     info!("");
 
-    let shutdown = ShutdownManager::new();
-    shutdown.spawn_signal_handler();
+    // Create test app with in-memory database
+    let app = SniperApp::new(":memory:", 300, 1.0).await?;
 
     info!("Connecting to WebSocket and subscribing to orderbook...");
     info!("Watch for orderbook snapshots and updates:");
@@ -66,21 +63,23 @@ async fn main() -> Result<()> {
     // Use a far-future resolution time so it doesn't auto-close
     let resolution_time = "2099-12-31T23:59:59Z".to_string();
 
-    // Create in-memory database for testing (opportunities won't be recorded
-    // since we use threshold 1.0 which is unreachable)
-    let db = Arc::new(MarketDatabase::new(":memory:").await?);
-
-    spawn_market_tracker(
-        market_id,
+    // Create test market
+    let market = polymarket::domain::SniperMarket {
+        id: market_id,
+        question: "Test Market".to_string(),
+        resolution_time: chrono::Utc::now() + chrono::Duration::days(365 * 75),
+        resolution_time_str: resolution_time,
         token_ids,
         outcomes,
-        resolution_time,
-        shutdown.flag(),
-        db,
-        1.0,  // High threshold means no opportunities recorded during test
-        None, // No event_id for test
-    )
-    .await?;
+        active: true,
+        closed: false,
+        liquidity: None,
+        volume: None,
+    };
+
+    app.tracker
+        .track_market(&market, app.shutdown.flag(), None)
+        .await?;
 
     info!("");
     info!("Orderbook test completed");

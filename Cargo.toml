@@ -63,17 +63,23 @@ name = "polymarket-arb-bot"
 version = "0.1.0"
 edition = "2021"
 
+# Biblioteca principal que re-exporta workspace members
+[lib]
+name = "polymarket_arb_bot"
+path = "src/lib.rs"
+
+# Binarios en src/bin/ (layout estándar de Rust)
 [[bin]]
 name = "polymarket_events"
-path = "bin/polymarket_events.rs"
+path = "src/bin/polymarket_events.rs"
 
 [[bin]]
 name = "market_sniper"
-path = "bin/market_sniper.rs"
+path = "src/bin/market_sniper.rs"
 
 [[bin]]
 name = "test_orderbook"
-path = "bin/test_orderbook.rs"
+path = "src/bin/test_orderbook.rs"
 
 [dependencies]
 tokio = { workspace = true }
@@ -81,6 +87,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 polymarket = { workspace = true }
+hypersockets = { workspace = true }
 chrono = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }

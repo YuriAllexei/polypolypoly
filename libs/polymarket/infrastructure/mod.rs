@@ -16,7 +16,7 @@ pub mod shutdown;
 pub use client::{
     PolymarketAuth,
     gamma::{GammaClient, GammaEvent, GammaMarket, GammaTag, GammaFilters},
-    clob::{RestClient, WebSocketClient, Market, Outcome, OrderBook, PriceLevel, Side, OrderType, OrderArgs},
+    clob::{RestClient, WebSocketClient, Market, Outcome, OrderBook, PriceLevel, Side, OrderType, OrderArgs, spawn_market_tracker},
 };
 
 // Re-export database types

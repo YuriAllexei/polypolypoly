@@ -1,53 +1,124 @@
-# Polymarket Resolution Arbitrage Bot
+# Polymarket Trading Bot - Clean Architecture
 
-A high-performance Rust bot that exploits market inefficiencies on Polymarket by trading seconds before market resolution when outcomes are nearly certain.
+A high-performance Rust bot for Polymarket built with **Clean Architecture** principles, featuring market monitoring, event synchronization, and real-time trading capabilities.
 
-## Strategy
+## 🏗️ Architecture
 
-This bot implements a low-risk arbitrage strategy:
+This project follows **Clean Architecture** (Arquitectura Limpia) with strict layer separation:
 
-1. **Market Discovery**: Continuously fetches markets approaching resolution
-2. **LLM Filtering**: Uses a local LLM (Ollama) to identify suitable markets based on configurable criteria
-3. **Caching**: Stores LLM decisions to avoid redundant API calls
-4. **Timing**: Waits until X seconds before resolution when outcome is highly probable
-5. **Execution**: Places market orders on the winning side at 98-99¢
-6. **Profit**: Captures 1-2¢ per share when market resolves to $1.00
+```
+┌─────────────────────┐
+│   Presentation      │  bin/ (market_sniper, polymarket_events)
+│   (Binaries)        │  src/ (bin_common utilities)
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│   Application       │  libs/polymarket/application/
+│   (Use Cases)       │  - Facades: SniperApp, EventSyncApp
+└──────┬──────────────┘  - Services: Strategy, Filter, Sync
+       │
+       ▼
+┌─────────────────────┐      ┌─────────────────────┐
+│  Infrastructure     │◄─────│     Domain          │
+│  (External I/O)     │      │  (Business Logic)   │
+│  - Database         │      │  - Entities         │
+│  - API Clients      │      │  - Errors           │
+│  - Config           │      │  - Pure Logic       │
+└─────────────────────┘      └─────────────────────┘
+```
 
-**Key Insight**: The bot doesn't predict outcomes. It only trades when one side reaches the probability threshold (e.g., 98%), indicating near-certainty.
+📖 **See detailed documentation:**
+- [ARCHITECTURE.md](./ARCHITECTURE.md) - Complete project architecture
+- [BIN_ARCHITECTURE.md](./BIN_ARCHITECTURE.md) - Clean Architecture in binaries
 
 ## Features
 
-- 🚀 **High Performance**: Built in Rust with HyperSockets for real-time WebSocket connections
+- 🏗️ **Clean Architecture**: Layered design with clear separation of concerns
+- 🚀 **High Performance**: Built in Rust with async/await and WebSockets
 - 🤖 **LLM-Powered**: Uses local Ollama for intelligent market filtering
-- 💾 **Smart Caching**: Avoids re-checking markets with LLM
-- 🛡️ **Risk Management**: Enforces position limits, max bet sizes, and daily loss limits
-- 📊 **Real-time Monitoring**: Tracks markets sorted by resolution time
+- 💾 **PostgreSQL**: Robust data persistence
+- 🛡️ **Risk Management**: Position limits, max bet sizes, daily loss limits
+- 📊 **Real-time Monitoring**: WebSocket tracking of market orderbooks
 - ⚡ **Fast Execution**: Optimized for low-latency trading
-- 🔐 **Secure**: Uses EIP-712 signatures for Polymarket authentication
+- 🔐 **Secure**: EIP-712 signatures for Polymarket authentication
+- 🐳 **Docker Ready**: Complete containerization with docker-compose
 
-## Architecture
+## Project Structure
+
+## Project Structure
 
 ```
-polymarket-arb-bot/
-├── bin/
-│   └── polymarket_arb.rs         # Main orchestrator
-├── libs/
-│   ├── bot-config/               # Configuration management
-│   ├── polymarket-client/        # Polymarket API & WebSocket
-│   │   ├── auth.rs              # EIP-712 + HMAC signing
-│   │   ├── rest.rs              # REST API client
-│   │   ├── websocket.rs         # HyperSockets WebSocket
-│   │   └── types.rs             # Data structures
-│   ├── llm-filter/              # LLM market filtering
-│   │   ├── cache.rs             # Market cache (JSON)
-│   │   └── ollama.rs            # Ollama API client
-│   └── arb-strategy/            # Trading strategy
-│       ├── monitor.rs           # Resolution time tracker
-│       ├── executor.rs          # Order execution
-│       └── risk.rs              # Risk management
-├── config.yaml                   # Bot configuration
-├── .env                         # Private keys (create from .env.example)
-├── market_cache.json            # Auto-generated LLM cache
+polypolypoly/
+├── src/                          # 📦 Main Package (Standard Rust Layout)
+│   ├── lib.rs                   # Library root: re-exports + bin_common
+│   │
+│   ├── bin/                     # 📱 Binary executables
+│   │   ├── market_sniper.rs    # Market monitoring bot
+│   │   ├── polymarket_events.rs # Event synchronization
+│   │   └── test_orderbook.rs   # WebSocket testing utility
+│   │
+│   └── bin_common/             # 🔧 Shared binary utilities
+│       ├── cli.rs              # Config loading, CLI utilities
+│       └── runner.rs           # Binary execution patterns
+│
+├── examples/                    # 📚 Usage examples
+│   └── simple_config.rs        # Config loading demo
+│
+├── tests/                       # 🧪 Integration tests
+│   └── config_loading.rs       # Config utilities tests
+│
+├── libs/                        # 📦 Workspace members
+│   ├── polymarket/             # 🎯 Core Business Logic (Clean Architecture)
+│   │   ├── domain/             # Entities, business rules (pure)
+│   │   │   ├── models.rs       # DbMarket, DbEvent, SniperMarket
+│   │   │   ├── orderbook.rs    # OrderBook, PriceLevel
+│   │   │   ├── filter.rs       # FilterError, CacheError
+│   │   │   └── strategy.rs     # ExecutedTrade
+│   │   │
+│   │   ├── infrastructure/     # External services implementation
+│   │   │   ├── client/         # API clients (CLOB, Gamma)
+│   │   │   ├── database/       # PostgreSQL access (sqlx)
+│   │   │   ├── config/         # YAML configuration
+│   │   │   ├── cache.rs        # In-memory cache
+│   │   │   ├── ollama.rs       # LLM client
+│   │   │   ├── logging.rs      # Tracing setup
+│   │   │   ├── shutdown.rs     # Graceful shutdown
+│   │   │   └── heartbeat.rs    # Monitoring
+│   │   │
+│   │   └── application/        # Use cases orchestration
+│   │       ├── facade.rs       # 🎯 SniperApp, EventSyncApp
+│   │       ├── sync/           # Event/Market sync services
+│   │       ├── strategy/       # Trading strategy
+│   │       └── filter/         # LLM filtering
+│   │
+│   └── hypersockets/           # 🔌 WebSocket library
+│       ├── core/               # Connection management
+│       ├── manager/            # Multi-connection manager
+│       └── traits/             # Abstractions
+│
+├── config/                      # ⚙️ Configuration Files
+│   ├── sniper_config.yaml      # Market sniper config
+│   └── config.yaml             # Event sync config
+│
+├── docker-compose.yml           # 🐳 Docker services
+├── Dockerfile                   # Container build
+└── Cargo.toml                  # Workspace definition
+```
+
+### Layer Dependencies
+
+```
+bin/ (Presentation)
+  ↓ uses
+src/bin_common (Utilities)
+  ↓ uses
+application/ (Use Cases)
+  ↓ uses
+infrastructure/ (External) ← implements → domain/ (Business Logic)
+```
+
+**Key principle:** Inner layers NEVER depend on outer layers.
 └── docker-compose.yml           # Ollama setup
 ```
 
@@ -131,14 +202,34 @@ docker exec -it polymarket-ollama ollama list
 - `llama3.2:1b` (smaller, faster)
 - `mistral` (alternative)
 
-### 5. Run the Bot
+### 5. Run the Binaries
 
 ```bash
-# Run the bot
-cargo run --release --bin polymarket_arb
+# Market monitoring bot
+cargo run --release --bin market_sniper
 
-# Or run the built binary directly
-./target/release/polymarket_arb
+# Event synchronization
+cargo run --release --bin polymarket_events
+
+# WebSocket orderbook testing
+cargo run --release --bin test_orderbook
+
+# Or run built binaries directly
+./target/release/market_sniper
+./target/release/polymarket_events
+```
+
+### 6. Run Examples & Tests
+
+```bash
+# Run config loading example
+cargo run --example simple_config
+
+# Run integration tests
+cargo test --test config_loading
+
+# Run all tests
+cargo test
 ```
 
 ## How It Works

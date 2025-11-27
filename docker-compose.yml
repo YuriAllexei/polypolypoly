@@ -12,8 +12,8 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/polymarket
-      - RUST_LOG=info
+      - DATABASE_URL=${DATABASE_URL}
+      - RUST_LOG=${RUST_LOG:-info}
     volumes:
       - ./config.yaml:/etc/polymarket/config.yaml
 
@@ -28,9 +28,9 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/polymarket
-      - RUST_LOG=info
-      - SNIPER_CONFIG_PATH=/etc/polymarket/sniper_config.yaml
+      - DATABASE_URL=${DATABASE_URL}
+      - RUST_LOG=${RUST_LOG:-info}
+      - SNIPER_CONFIG_PATH=${SNIPER_CONFIG_PATH:-/etc/polymarket/sniper_config.yaml}
     volumes:
       - ./config/sniper_config.yaml:/etc/polymarket/sniper_config.yaml
 
@@ -38,7 +38,7 @@ services:
     image: ollama/ollama:latest
     container_name: polymarket-ollama
     ports:
-      - "11434:11434"
+      - "${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ollama_data:/root/.ollama
     restart: unless-stopped
@@ -56,11 +56,11 @@ services:
     container_name: polymarket-postgres
     restart: unless-stopped
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=polymarket
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-polymarket}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

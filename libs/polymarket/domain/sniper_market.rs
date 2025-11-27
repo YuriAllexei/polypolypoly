@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use tracing::info;
 
 /// Represents a market ready for sniping with parsed data
+#[derive(Clone)]
 pub struct SniperMarket {
     pub id: String,
     pub question: String,

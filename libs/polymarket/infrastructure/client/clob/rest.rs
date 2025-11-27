@@ -14,7 +14,7 @@ pub enum RestError {
     ApiError(String),
 
     #[error("Authentication failed: {0}")]
-    AuthFailed(#[from] crate::client::auth::AuthError),
+    AuthFailed(#[from] super::super::auth::AuthError),
 
     #[error("Deserialization failed: {0}")]
     DeserializeFailed(String),

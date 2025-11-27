@@ -10,9 +10,9 @@ use chrono::Utc;
 
 /// Event synchronization service
 pub struct EventSyncService {
-    database: Arc<MarketDatabase>,
-    http_client: Client,
-    api_base_url: String,
+    pub database: Arc<MarketDatabase>,
+    pub http_client: Client,
+    pub api_base_url: String,
 }
 
 impl EventSyncService {
@@ -202,7 +202,7 @@ impl EventSyncService {
         Ok(())
     }
 
-    fn event_to_db_event(event: &Event) -> DbEvent {
+    pub fn event_to_db_event(event: &Event) -> DbEvent {
         let now = Utc::now().to_rfc3339();
 
         DbEvent {
@@ -236,7 +236,7 @@ impl EventSyncService {
         }
     }
 
-    fn market_to_db_market(market: &Market) -> anyhow::Result<DbMarket> {
+    pub fn market_to_db_market(market: &Market) -> anyhow::Result<DbMarket> {
         let now = Utc::now().to_rfc3339();
 
         let outcomes_json = market
