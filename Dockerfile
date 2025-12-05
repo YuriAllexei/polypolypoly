@@ -24,12 +24,8 @@ WORKDIR /usr/local/bin
 RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
 
 # Copy binaries from builder
-# Copy binaries from builder
 COPY --from=builder /usr/src/app/target/release/polymarket_events .
 COPY --from=builder /usr/src/app/target/release/market_sniper .
 
-# Copy configuration
-COPY config.yaml /etc/polymarket/config.yaml
-
-# Set environment variable for config
-ENV CONFIG_PATH=/etc/polymarket/config.yaml
+# Create config directory for volume mounts
+RUN mkdir -p /etc/polymarket

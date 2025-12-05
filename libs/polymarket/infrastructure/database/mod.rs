@@ -2,7 +2,7 @@ pub mod models;
 pub mod schema;
 
 use chrono::{DateTime, Duration, Utc};
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{postgres::PgPoolOptions, PgPool, QueryBuilder, Postgres};
 use std::str::FromStr;
 use thiserror::Error;
 use tracing::{debug, info};
@@ -60,6 +60,11 @@ impl MarketDatabase {
 
     /// Insert a single market (or replace if exists)
     pub async fn upsert_market(&self, market: DbMarket) -> Result<()> {
+        debug!(
+            market_id = %market.id,
+            question = %market.question,
+            "Upserting market"
+        );
         sqlx::query(
             r#"
             INSERT INTO markets (
@@ -110,7 +115,7 @@ impl MarketDatabase {
         Ok(())
     }
 
-    /// Batch insert markets
+    /// Batch insert markets (legacy - uses individual upserts)
     pub async fn insert_markets(&self, markets: Vec<DbMarket>) -> Result<usize> {
         let mut count = 0;
 
@@ -121,6 +126,75 @@ impl MarketDatabase {
 
         debug!("Inserted {} markets", count);
         Ok(count)
+    }
+
+    /// Batch upsert multiple markets efficiently using multi-value INSERT
+    /// Returns the number of markets upserted
+    pub async fn batch_upsert_markets(&self, markets: &[DbMarket]) -> Result<usize> {
+        if markets.is_empty() {
+            return Ok(0);
+        }
+
+        // PostgreSQL has a limit on parameters, so we batch in chunks
+        const BATCH_SIZE: usize = 100;
+        let mut total_upserted = 0;
+
+        for chunk in markets.chunks(BATCH_SIZE) {
+            let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
+                r#"INSERT INTO markets (
+                    id, condition_id, question, slug, start_date, end_date, resolution_time,
+                    active, closed, archived, market_type, category, liquidity, volume,
+                    outcomes, token_ids, last_updated, created_at
+                ) "#
+            );
+
+            query_builder.push_values(chunk, |mut b, market| {
+                b.push_bind(&market.id)
+                    .push_bind(&market.condition_id)
+                    .push_bind(&market.question)
+                    .push_bind(&market.slug)
+                    .push_bind(&market.start_date)
+                    .push_bind(&market.end_date)
+                    .push_bind(&market.resolution_time)
+                    .push_bind(market.active)
+                    .push_bind(market.closed)
+                    .push_bind(market.archived)
+                    .push_bind(&market.market_type)
+                    .push_bind(&market.category)
+                    .push_bind(&market.liquidity)
+                    .push_bind(&market.volume)
+                    .push_bind(&market.outcomes)
+                    .push_bind(&market.token_ids)
+                    .push_bind(&market.last_updated)
+                    .push_bind(&market.created_at);
+            });
+
+            query_builder.push(
+                r#" ON CONFLICT (id) DO UPDATE SET
+                    condition_id = EXCLUDED.condition_id,
+                    question = EXCLUDED.question,
+                    slug = EXCLUDED.slug,
+                    start_date = EXCLUDED.start_date,
+                    end_date = EXCLUDED.end_date,
+                    resolution_time = EXCLUDED.resolution_time,
+                    active = EXCLUDED.active,
+                    closed = EXCLUDED.closed,
+                    archived = EXCLUDED.archived,
+                    market_type = EXCLUDED.market_type,
+                    category = EXCLUDED.category,
+                    liquidity = EXCLUDED.liquidity,
+                    volume = EXCLUDED.volume,
+                    outcomes = EXCLUDED.outcomes,
+                    token_ids = EXCLUDED.token_ids,
+                    last_updated = EXCLUDED.last_updated"#
+            );
+
+            let query = query_builder.build();
+            query.execute(&self.pool).await?;
+            total_upserted += chunk.len();
+        }
+
+        Ok(total_upserted)
     }
 
     /// Get all active markets
@@ -340,6 +414,11 @@ impl MarketDatabase {
 
     /// Insert or update an event
     pub async fn upsert_event(&self, event: DbEvent) -> Result<()> {
+        debug!(
+            event_id = %event.id,
+            title = %event.title,
+            "Upserting event"
+        );
         sqlx::query(
             r#"
             INSERT INTO events (
@@ -410,17 +489,159 @@ impl MarketDatabase {
         Ok(())
     }
 
+    /// Batch upsert multiple events efficiently using multi-value INSERT
+    /// Returns the number of events upserted
+    pub async fn batch_upsert_events(&self, events: &[DbEvent]) -> Result<usize> {
+        if events.is_empty() {
+            return Ok(0);
+        }
+
+        // PostgreSQL has a limit on parameters, so we batch in chunks
+        // Events have 27 columns, so use smaller batch size
+        const BATCH_SIZE: usize = 50;
+        let mut total_upserted = 0;
+
+        for chunk in events.chunks(BATCH_SIZE) {
+            let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
+                r#"INSERT INTO events (
+                    id, ticker, slug, title, description, start_date, end_date,
+                    active, closed, archived, featured, restricted,
+                    liquidity, volume, volume_24hr, volume_1wk, volume_1mo, volume_1yr,
+                    open_interest, image, icon, category, competitive, comment_count,
+                    created_at, updated_at, last_synced
+                ) "#
+            );
+
+            query_builder.push_values(chunk, |mut b, event| {
+                b.push_bind(&event.id)
+                    .push_bind(&event.ticker)
+                    .push_bind(&event.slug)
+                    .push_bind(&event.title)
+                    .push_bind(&event.description)
+                    .push_bind(&event.start_date)
+                    .push_bind(&event.end_date)
+                    .push_bind(event.active)
+                    .push_bind(event.closed)
+                    .push_bind(event.archived)
+                    .push_bind(event.featured)
+                    .push_bind(event.restricted)
+                    .push_bind(&event.liquidity)
+                    .push_bind(&event.volume)
+                    .push_bind(&event.volume_24hr)
+                    .push_bind(&event.volume_1wk)
+                    .push_bind(&event.volume_1mo)
+                    .push_bind(&event.volume_1yr)
+                    .push_bind(&event.open_interest)
+                    .push_bind(&event.image)
+                    .push_bind(&event.icon)
+                    .push_bind(&event.category)
+                    .push_bind(&event.competitive)
+                    .push_bind(event.comment_count)
+                    .push_bind(&event.created_at)
+                    .push_bind(&event.updated_at)
+                    .push_bind(&event.last_synced);
+            });
+
+            query_builder.push(
+                r#" ON CONFLICT (id) DO UPDATE SET
+                    ticker = EXCLUDED.ticker,
+                    slug = EXCLUDED.slug,
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    start_date = EXCLUDED.start_date,
+                    end_date = EXCLUDED.end_date,
+                    active = EXCLUDED.active,
+                    closed = EXCLUDED.closed,
+                    archived = EXCLUDED.archived,
+                    featured = EXCLUDED.featured,
+                    restricted = EXCLUDED.restricted,
+                    liquidity = EXCLUDED.liquidity,
+                    volume = EXCLUDED.volume,
+                    volume_24hr = EXCLUDED.volume_24hr,
+                    volume_1wk = EXCLUDED.volume_1wk,
+                    volume_1mo = EXCLUDED.volume_1mo,
+                    volume_1yr = EXCLUDED.volume_1yr,
+                    open_interest = EXCLUDED.open_interest,
+                    image = EXCLUDED.image,
+                    icon = EXCLUDED.icon,
+                    category = EXCLUDED.category,
+                    competitive = EXCLUDED.competitive,
+                    comment_count = EXCLUDED.comment_count,
+                    updated_at = EXCLUDED.updated_at,
+                    last_synced = EXCLUDED.last_synced"#
+            );
+
+            let query = query_builder.build();
+            query.execute(&self.pool).await?;
+            total_upserted += chunk.len();
+        }
+
+        Ok(total_upserted)
+    }
+
     /// Link an event to its markets
+    /// Silently skips markets that don't exist (FK constraint violations)
     pub async fn link_event_markets(&self, event_id: &str, market_ids: &[String]) -> Result<()> {
         for market_id in market_ids {
-            sqlx::query("INSERT INTO event_markets (event_id, market_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+            let result = sqlx::query("INSERT INTO event_markets (event_id, market_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
                 .bind(event_id)
                 .bind(market_id)
                 .execute(&self.pool)
-                .await?;
+                .await;
+
+            // Silently skip FK constraint violations (market doesn't exist yet)
+            if let Err(e) = result {
+                let err_str = e.to_string();
+                if err_str.contains("foreign key constraint") || err_str.contains("violates foreign key") {
+                    debug!("Skipping link for non-existent market: {}", market_id);
+                    continue;
+                }
+                return Err(e.into());
+            }
         }
 
         Ok(())
+    }
+
+    /// Batch link events to their markets efficiently
+    /// Takes a slice of (event_id, market_id) tuples
+    /// Silently ignores FK constraint violations
+    pub async fn batch_link_event_markets(&self, links: &[(String, String)]) -> Result<usize> {
+        if links.is_empty() {
+            return Ok(0);
+        }
+
+        const BATCH_SIZE: usize = 500;
+        let mut total_linked = 0;
+
+        for chunk in links.chunks(BATCH_SIZE) {
+            let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
+                "INSERT INTO event_markets (event_id, market_id) "
+            );
+
+            query_builder.push_values(chunk, |mut b, (event_id, market_id)| {
+                b.push_bind(event_id).push_bind(market_id);
+            });
+
+            query_builder.push(" ON CONFLICT DO NOTHING");
+
+            let query = query_builder.build();
+            let result = query.execute(&self.pool).await;
+
+            // Silently handle FK constraint violations
+            match result {
+                Ok(r) => total_linked += r.rows_affected() as usize,
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if !err_str.contains("foreign key constraint") && !err_str.contains("violates foreign key") {
+                        return Err(e.into());
+                    }
+                    // FK violation - some links failed, but that's expected
+                }
+            }
+        }
+
+        Ok(total_linked)
     }
 
     /// Check if event exists in database

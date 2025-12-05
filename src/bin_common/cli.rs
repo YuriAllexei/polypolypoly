@@ -10,7 +10,9 @@ use std::path::PathBuf;
 pub enum ConfigType {
     /// Sniper configuration (sniper_config.yaml)
     Sniper,
-    /// Bot configuration (config.yaml)
+    /// Events configuration (events_config.yaml)
+    Events,
+    /// Bot configuration (config.yaml) - legacy, use Sniper or Events instead
     Bot,
     /// Custom path
     Custom(String),
@@ -21,6 +23,7 @@ impl ConfigType {
     pub fn default_path(&self) -> &str {
         match self {
             ConfigType::Sniper => "config/sniper_config.yaml",
+            ConfigType::Events => "config/events_config.yaml",
             ConfigType::Bot => "config.yaml",
             ConfigType::Custom(path) => path,
         }
@@ -30,6 +33,7 @@ impl ConfigType {
     pub fn env_var_name(&self) -> &str {
         match self {
             ConfigType::Sniper => "SNIPER_CONFIG_PATH",
+            ConfigType::Events => "EVENTS_CONFIG_PATH",
             ConfigType::Bot => "CONFIG_PATH",
             ConfigType::Custom(_) => "CONFIG_PATH",
         }

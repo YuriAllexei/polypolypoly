@@ -229,7 +229,7 @@ impl EventSyncService {
             icon: event.icon.clone(),
             category: None,
             competitive: event.competitive.map(|v| v.to_string()),
-            comment_count: event.comment_count.unwrap_or(0),
+            comment_count: event.comment_count.map(|v| v as i64).unwrap_or(0),
             created_at: event.created_at.clone().unwrap_or_else(|| now.clone()),
             updated_at: event.updated_at.clone().unwrap_or_else(|| now.clone()),
             last_synced: now,

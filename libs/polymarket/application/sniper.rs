@@ -4,7 +4,7 @@
 //! Encapsulates business logic and orchestrates infrastructure.
 
 use crate::domain::SniperMarket;
-use crate::infrastructure::{MarketDatabase, SniperConfig, BotConfig};
+use crate::infrastructure::{MarketDatabase, SniperConfig, BotConfig, EventsConfig};
 use anyhow::Result;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -64,7 +64,12 @@ impl ConfigService {
         Ok(SniperConfig::load(path)?)
     }
 
-    /// Load bot configuration
+    /// Load events configuration
+    pub fn load_events_config(path: &str) -> Result<EventsConfig> {
+        Ok(EventsConfig::load(path)?)
+    }
+
+    /// Load bot configuration (legacy - use sniper or events config instead)
     pub fn load_bot_config(path: &str) -> Result<BotConfig> {
         Ok(BotConfig::load(path)?)
     }

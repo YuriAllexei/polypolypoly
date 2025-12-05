@@ -9,8 +9,10 @@ use super::{
 };
 use crate::domain::SniperMarket;
 use crate::infrastructure::{
-    Heartbeat, MarketDatabase, ShutdownManager, init_tracing,
+    Heartbeat, MarketDatabase, ShutdownManager, init_tracing, init_tracing_with_level,
+    database::{DbEvent, DbMarket},
 };
+use tracing::{debug, info};
 use std::sync::Arc;
 
 // Note: Configuration and tracking services are now in application::sniper module
@@ -97,11 +99,15 @@ impl EventSyncApp {
         self.shutdown.is_running()
     }
 
-    /// Sync all events from API
+    /// Sync all events from API using batch operations
     pub async fn sync_all_events(&self) -> anyhow::Result<usize> {
         const LIMIT: usize = 500;
-        let mut total_synced = 0;
+        let mut total_events = 0;
+        let mut total_markets = 0;
         let mut offset = 0;
+        let mut page = 1;
+
+        info!("Starting event sync from Gamma API");
 
         loop {
             let url = format!(
@@ -109,78 +115,100 @@ impl EventSyncApp {
                 self.sync_service.api_base_url, LIMIT, offset
             );
 
+            debug!(page = page, offset = offset, limit = LIMIT, "Fetching events page");
+
             let response = self.sync_service.http_client.get(&url).send().await?;
             let text = response.text().await?;
-            let events: Vec<crate::infrastructure::client::gamma::types::Event> =
+            let api_events: Vec<crate::infrastructure::client::gamma::types::Event> =
                 serde_json::from_str(&text)?;
 
-            if events.is_empty() {
+            if api_events.is_empty() {
+                debug!("No more events to fetch");
                 break;
             }
 
-            for event in &events {
-                if let Err(e) = self.sync_event(event).await {
-                    tracing::warn!("Failed to sync event: {}", e);
-                } else {
-                    total_synced += 1;
+            let events_in_page = api_events.len();
+            debug!(count = events_in_page, "Received events in page");
+
+            // Collect all data for batch operations
+            let mut db_events: Vec<DbEvent> = Vec::with_capacity(events_in_page);
+            let mut db_markets: Vec<DbMarket> = Vec::new();
+            let mut event_market_links: Vec<(String, String)> = Vec::new();
+
+            for event in &api_events {
+                let event_id = match &event.id {
+                    Some(id) => id.clone(),
+                    None => continue,
+                };
+
+                let event_title = event.title.as_deref().unwrap_or("Unknown");
+                debug!(event_id = %event_id, title = %event_title, "Processing event");
+
+                // Convert and collect event
+                let db_event = crate::application::sync::EventSyncService::event_to_db_event(event);
+                db_events.push(db_event);
+
+                // Process markets for this event
+                if let Some(markets) = &event.markets {
+                    for market in markets {
+                        if let Ok(db_market) =
+                            crate::application::sync::EventSyncService::market_to_db_market(market)
+                        {
+                            debug!(
+                                market_id = %db_market.id,
+                                question = %db_market.question,
+                                event_id = %event_id,
+                                "Processing market"
+                            );
+
+                            // Collect link
+                            event_market_links.push((event_id.clone(), db_market.id.clone()));
+                            db_markets.push(db_market);
+                        }
+                    }
                 }
             }
 
-            offset += LIMIT;
+            // Batch upsert all events
+            let events_upserted = self.sync_service.database.batch_upsert_events(&db_events).await?;
+            debug!(count = events_upserted, "Batch upserted events");
 
-            if events.len() < LIMIT {
+            // Batch upsert all markets
+            let markets_upserted = self.sync_service.database.batch_upsert_markets(&db_markets).await?;
+            debug!(count = markets_upserted, "Batch upserted markets");
+
+            // Batch link events to markets
+            let links_created = self.sync_service.database.batch_link_event_markets(&event_market_links).await?;
+            debug!(count = links_created, "Batch linked event-markets");
+
+            total_events += events_upserted;
+            total_markets += markets_upserted;
+
+            info!(
+                page = page,
+                events = events_upserted,
+                markets = markets_upserted,
+                "Completed page sync"
+            );
+
+            offset += LIMIT;
+            page += 1;
+
+            if api_events.len() < LIMIT {
                 break;
             }
 
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
 
-        Ok(total_synced)
-    }
+        info!(
+            total_events = total_events,
+            total_markets = total_markets,
+            pages_fetched = page,
+            "Event sync completed"
+        );
 
-    async fn sync_event(
-        &self,
-        event: &crate::infrastructure::client::gamma::types::Event,
-    ) -> anyhow::Result<()> {
-        let event_id = match &event.id {
-            Some(id) => id,
-            None => return Ok(()),
-        };
-
-        if self.sync_service.database.event_exists(event_id).await? {
-            return Ok(());
-        }
-
-        // Use EventSyncService conversion functions
-        let db_event =
-            crate::application::sync::EventSyncService::event_to_db_event(event);
-        self.sync_service.database.upsert_event(db_event).await?;
-
-        // Process markets
-        if let Some(markets) = &event.markets {
-            let market_ids: Vec<String> = markets
-                .iter()
-                .filter_map(|m| m.id.clone())
-                .collect();
-
-            for market in markets {
-                if let Ok(db_market) =
-                    crate::application::sync::EventSyncService::market_to_db_market(market)
-                {
-                    let _ = self.sync_service.database.upsert_market(db_market).await;
-                }
-            }
-
-            if !market_ids.is_empty() {
-                let _ = self
-                    .sync_service
-                    .database
-                    .link_event_markets(event_id, &market_ids)
-                    .await;
-            }
-        }
-
-        Ok(())
+        Ok(total_events)
     }
 
     /// Check if heartbeat should log
@@ -194,9 +222,14 @@ impl EventSyncApp {
     }
 }
 
-/// Initialize tracing for binaries
+/// Initialize tracing for binaries with default (info) level
 pub fn init_logging() {
     init_tracing();
+}
+
+/// Initialize tracing for binaries with a specific log level
+pub fn init_logging_with_level(level: &str) {
+    init_tracing_with_level(level);
 }
 
 /// Helper to convert DB market to domain model

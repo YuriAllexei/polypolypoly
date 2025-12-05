@@ -19,7 +19,7 @@ pub async fn initialize_schema(pool: &PgPool) -> Result<()> {
         r#"
         CREATE TABLE IF NOT EXISTS markets (
             id TEXT PRIMARY KEY,
-            condition_id TEXT UNIQUE,
+            condition_id TEXT,
             question TEXT NOT NULL,
             slug TEXT,
             start_date TEXT NOT NULL,
@@ -56,6 +56,11 @@ pub async fn initialize_schema(pool: &PgPool) -> Result<()> {
         .await?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_markets_condition ON markets(condition_id)")
+        .execute(pool)
+        .await?;
+
+    // Partial unique index on condition_id - only enforces uniqueness for non-empty values
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_markets_condition_id_unique ON markets(condition_id) WHERE condition_id IS NOT NULL AND condition_id != ''")
         .execute(pool)
         .await?;
 

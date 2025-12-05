@@ -10,7 +10,3 @@ delta_t_seconds: 43200
 
 # Loop interval in seconds - how often to check for new markets
 loop_interval_secs: 60
-
-# Database configuration
-database:
-  path: "./data/markets.db"

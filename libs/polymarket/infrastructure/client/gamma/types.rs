@@ -57,7 +57,7 @@ pub struct Event {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub open_interest: Option<i64>,
+    pub open_interest: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,7 +81,7 @@ pub struct Event {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liquidity_clob: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub comment_count: Option<i64>,
+    pub comment_count: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub markets: Option<Vec<Market>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,7 +128,7 @@ pub struct Event {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub election_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub featured_order: Option<i64>,
+    pub featured_order: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -136,9 +136,9 @@ pub struct Event {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub closed_time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub event_week: Option<i64>,
+    pub event_week: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub game_id: Option<i64>,
+    pub game_id: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_creators: Option<Vec<EventCreator>>,
 }
@@ -232,7 +232,7 @@ pub struct Market {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order_price_min_tick_size: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub order_min_size: Option<i64>,
+    pub order_min_size: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume_num: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -278,7 +278,7 @@ pub struct Market {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liquidity_clob: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub custom_liveness: Option<i64>,
+    pub custom_liveness: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepting_orders: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -301,7 +301,7 @@ pub struct Market {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approved: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rewards_min_size: Option<i64>,
+    pub rewards_min_size: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rewards_max_spread: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -362,27 +362,27 @@ pub struct Market {
     pub automatically_resolved: Option<bool>,
     #[serde(rename = "volume24hrAmm")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub volume24_hr_amm: Option<i64>,
+    pub volume24_hr_amm: Option<f64>,
     #[serde(rename = "volume1wkAmm")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub volume1_wk_amm: Option<i64>,
+    pub volume1_wk_amm: Option<f64>,
     #[serde(rename = "volume1moAmm")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub volume1_mo_amm: Option<i64>,
+    pub volume1_mo_amm: Option<f64>,
     #[serde(rename = "volume1yrAmm")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub volume1_yr_amm: Option<i64>,
+    pub volume1_yr_amm: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub volume_amm: Option<i64>,
+    pub volume_amm: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub liquidity_amm: Option<i64>,
+    pub liquidity_amm: Option<f64>,
     #[serde(rename = "negRiskMarketID")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub neg_risk_market_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub one_year_price_change: Option<i64>,
+    pub one_year_price_change: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub seconds_delay: Option<i64>,
+    pub seconds_delay: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sports_market_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -401,9 +401,9 @@ pub struct ClobReward {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asset_address: Option<AssetAddress>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rewards_amount: Option<i64>,
+    pub rewards_amount: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rewards_daily_rate: Option<i64>,
+    pub rewards_daily_rate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -488,7 +488,7 @@ pub struct Series {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liquidity: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub comment_count: Option<i64>,
+    pub comment_count: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<GmpChartMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -505,7 +505,7 @@ pub struct Series {
     pub competitive: Option<String>,
     #[serde(rename = "volume24hr")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub volume24_hr: Option<i64>,
+    pub volume24_hr: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_date: Option<String>,
 }
@@ -536,7 +536,7 @@ pub struct Tag {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub published_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_by: Option<i64>,
+    pub updated_by: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -546,7 +546,7 @@ pub struct Tag {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_carousel: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_by: Option<i64>,
+    pub created_by: Option<f64>,
 }
 
 /// Filters for querying Gamma API

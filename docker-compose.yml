@@ -1,30 +1,30 @@
-version: '3.8'
-
 services:
   polymarket-events:
+    profiles: ["events"]
     build: .
     container_name: polymarket-events
     restart: unless-stopped
     command: [ "./polymarket_events" ]
     depends_on:
-      - postgres
-      - ollama
+      postgres:
+        condition: service_healthy
     env_file:
       - .env
     environment:
       - DATABASE_URL=${DATABASE_URL}
-      - RUST_LOG=${RUST_LOG:-info}
+      - EVENTS_CONFIG_PATH=${EVENTS_CONFIG_PATH:-/etc/polymarket/events_config.yaml}
     volumes:
-      - ./config.yaml:/etc/polymarket/config.yaml
+      - ./config/events_config.yaml:/etc/polymarket/events_config.yaml
 
   market-sniper:
+    profiles: ["sniper"]
     build: .
     container_name: market-sniper
     restart: unless-stopped
     command: [ "./market_sniper" ]
     depends_on:
-      - postgres
-      - ollama
+      postgres:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -33,23 +33,6 @@ services:
       - SNIPER_CONFIG_PATH=${SNIPER_CONFIG_PATH:-/etc/polymarket/sniper_config.yaml}
     volumes:
       - ./config/sniper_config.yaml:/etc/polymarket/sniper_config.yaml
-
-  ollama:
-    image: ollama/ollama:latest
-    container_name: polymarket-ollama
-    ports:
-      - "${OLLAMA_PORT:-11434}:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    restart: unless-stopped
-    # Uncomment to use GPU (requires NVIDIA Docker runtime)
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
 
   postgres:
     image: postgres:16-alpine
@@ -70,7 +53,5 @@ services:
       retries: 5
 
 volumes:
-  ollama_data:
-    driver: local
   postgres_data:
     driver: local

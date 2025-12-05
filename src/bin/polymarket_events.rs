@@ -1,26 +1,28 @@
 use anyhow::Result;
-use polymarket::application::{init_logging, EventSyncApp, ConfigService};
+use polymarket::application::{init_logging_with_level, ConfigService, EventSyncApp};
 use polymarket_arb_bot::bin_common::{load_config_from_env, ConfigType};
 use std::time::Duration;
 use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_logging();
-    
-    let config_path = load_config_from_env(ConfigType::Bot);
-    let config = ConfigService::load_bot_config(config_path.to_str().unwrap())?;
+    // Load config first (before logging is initialized)
+    let config_path = load_config_from_env(ConfigType::Events);
+    let config = ConfigService::load_events_config(config_path.to_str().unwrap())?;
+
+    // Initialize logging with configured level
+    init_logging_with_level(&config.log_level);
+    config.log();
 
     let mut app = EventSyncApp::new(
         &config.database.url,
-        &config.gamma_api.base_url,
+        &config.gamma_api_url,
         300,
-    )
-    .await?;
+    ).await?;
 
-    const SYNC_INTERVAL_SECS: u64 = 60;
+    let sync_interval = config.sync_interval_secs;
 
-    print_banner("Polymarket Events Syncer", SYNC_INTERVAL_SECS);
+    print_banner("Polymarket Events Syncer", sync_interval);
 
     // Run sync loop
     while app.shutdown.is_running() {
@@ -40,7 +42,7 @@ async fn main() -> Result<()> {
         }
 
         app.shutdown
-            .interruptible_sleep(Duration::from_secs(SYNC_INTERVAL_SECS))
+            .interruptible_sleep(Duration::from_secs(sync_interval))
             .await;
     }
 
