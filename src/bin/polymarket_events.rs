@@ -18,6 +18,7 @@ async fn main() -> Result<()> {
         &config.database.url,
         &config.gamma_api_url,
         300,
+        config.closed,
     ).await?;
 
     let sync_interval = config.sync_interval_secs;

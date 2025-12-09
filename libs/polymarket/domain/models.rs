@@ -20,6 +20,7 @@ pub struct DbMarket {
     pub volume: Option<String>,
     pub outcomes: String,     // JSON array
     pub token_ids: String,    // JSON array
+    pub tags: Option<String>, // JSON array of tag objects
     pub last_updated: String, // ISO 8601
     pub created_at: String,   // ISO 8601
 }
@@ -32,13 +33,38 @@ impl DbMarket {
     }
 
     /// Get outcomes as Vec
+    /// Handles both single-encoded and double-encoded JSON strings
     pub fn parse_outcomes(&self) -> Result<Vec<String>, serde_json::Error> {
+        // First try double-encoded (JSON string containing JSON array)
+        // e.g., "\"[\\\"Up\\\", \\\"Down\\\"]\""
+        if let Ok(inner) = serde_json::from_str::<String>(&self.outcomes) {
+            if let Ok(vec) = serde_json::from_str::<Vec<String>>(&inner) {
+                return Ok(vec);
+            }
+        }
+        // Fallback to single-encoded JSON array
         serde_json::from_str(&self.outcomes)
     }
 
     /// Get token IDs as Vec
+    /// Handles both single-encoded and double-encoded JSON strings
     pub fn parse_token_ids(&self) -> Result<Vec<String>, serde_json::Error> {
+        // First try double-encoded (JSON string containing JSON array)
+        if let Ok(inner) = serde_json::from_str::<String>(&self.token_ids) {
+            if let Ok(vec) = serde_json::from_str::<Vec<String>>(&inner) {
+                return Ok(vec);
+            }
+        }
+        // Fallback to single-encoded JSON array
         serde_json::from_str(&self.token_ids)
+    }
+
+    /// Get tags as JSON Value
+    pub fn parse_tags(&self) -> Result<serde_json::Value, serde_json::Error> {
+        match &self.tags {
+            Some(tags) => serde_json::from_str(tags),
+            None => Ok(serde_json::Value::Array(vec![])),
+        }
     }
 }
 
@@ -86,6 +112,7 @@ pub struct DbEvent {
     pub icon: Option<String>,
     pub category: Option<String>,
     pub competitive: Option<String>,
+    pub tags: Option<String>, // JSON array of tag objects
     pub comment_count: i64,
     pub created_at: String,  // ISO 8601
     pub updated_at: String,  // ISO 8601
@@ -107,6 +134,14 @@ impl DbEvent {
             DateTime::parse_from_rfc3339(date)
                 .map(|dt| dt.with_timezone(&Utc))
         })
+    }
+
+    /// Get tags as JSON Value
+    pub fn parse_tags(&self) -> Result<serde_json::Value, serde_json::Error> {
+        match &self.tags {
+            Some(tags) => serde_json::from_str(tags),
+            None => Ok(serde_json::Value::Array(vec![])),
+        }
     }
 }
 
@@ -216,7 +251,6 @@ impl MarketFilters {
         if let Some(ref category) = self.category {
             conditions.push(format!("category = ${}", idx));
             params.push(category.clone());
-            idx += 1;
         }
 
         let where_clause = if conditions.is_empty() {
@@ -248,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_outcomes() {
+    fn test_parse_outcomes_single_encoded() {
         let market = DbMarket {
             id: "test".to_string(),
             condition_id: Some("0x123".to_string()),
@@ -266,6 +300,7 @@ mod tests {
             volume: None,
             outcomes: r#"["Yes","No"]"#.to_string(),
             token_ids: r#"["0x1","0x2"]"#.to_string(),
+            tags: None,
             last_updated: "2025-01-01T00:00:00Z".to_string(),
             created_at: "2025-01-01T00:00:00Z".to_string(),
         };
@@ -275,5 +310,37 @@ mod tests {
 
         let token_ids = market.parse_token_ids().unwrap();
         assert_eq!(token_ids, vec!["0x1", "0x2"]);
+    }
+
+    #[test]
+    fn test_parse_outcomes_double_encoded() {
+        // Double-encoded: the JSON array is itself stored as a JSON string
+        let market = DbMarket {
+            id: "test".to_string(),
+            condition_id: Some("0x123".to_string()),
+            question: "Test?".to_string(),
+            slug: None,
+            start_date: "2025-01-01T00:00:00Z".to_string(),
+            end_date: "2025-01-02T00:00:00Z".to_string(),
+            resolution_time: "2025-01-02T00:00:00Z".to_string(),
+            active: true,
+            closed: false,
+            archived: false,
+            market_type: None,
+            category: None,
+            liquidity: None,
+            volume: None,
+            outcomes: r#""[\"Up\", \"Down\"]""#.to_string(),
+            token_ids: r#""[\"0xabc\", \"0xdef\"]""#.to_string(),
+            tags: None,
+            last_updated: "2025-01-01T00:00:00Z".to_string(),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+        };
+
+        let outcomes = market.parse_outcomes().unwrap();
+        assert_eq!(outcomes, vec!["Up", "Down"]);
+
+        let token_ids = market.parse_token_ids().unwrap();
+        assert_eq!(token_ids, vec!["0xabc", "0xdef"]);
     }
 }

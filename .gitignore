@@ -3,4 +3,7 @@
 /.claude
 Cargo.lock
 /target
-/config/sniper_config.yaml
+bla.json
+/scripts
+/config/strategies_config.yaml
+/config/events_config.yaml

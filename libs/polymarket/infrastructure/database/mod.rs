@@ -3,7 +3,6 @@ pub mod schema;
 
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{postgres::PgPoolOptions, PgPool, QueryBuilder, Postgres};
-use std::str::FromStr;
 use thiserror::Error;
 use tracing::{debug, info};
 
@@ -70,8 +69,8 @@ impl MarketDatabase {
             INSERT INTO markets (
                 id, condition_id, question, slug, start_date, end_date, resolution_time,
                 active, closed, archived, market_type, category, liquidity, volume,
-                outcomes, token_ids, last_updated, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                outcomes, token_ids, tags, last_updated, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
             ON CONFLICT (id) DO UPDATE SET
                 condition_id = EXCLUDED.condition_id,
                 question = EXCLUDED.question,
@@ -88,6 +87,7 @@ impl MarketDatabase {
                 volume = EXCLUDED.volume,
                 outcomes = EXCLUDED.outcomes,
                 token_ids = EXCLUDED.token_ids,
+                tags = EXCLUDED.tags,
                 last_updated = EXCLUDED.last_updated
             "#,
         )
@@ -107,6 +107,7 @@ impl MarketDatabase {
         .bind(&market.volume)
         .bind(&market.outcomes)
         .bind(&market.token_ids)
+        .bind(&market.tags)
         .bind(&market.last_updated)
         .bind(&market.created_at)
         .execute(&self.pool)
@@ -144,7 +145,7 @@ impl MarketDatabase {
                 r#"INSERT INTO markets (
                     id, condition_id, question, slug, start_date, end_date, resolution_time,
                     active, closed, archived, market_type, category, liquidity, volume,
-                    outcomes, token_ids, last_updated, created_at
+                    outcomes, token_ids, tags, last_updated, created_at
                 ) "#
             );
 
@@ -165,6 +166,7 @@ impl MarketDatabase {
                     .push_bind(&market.volume)
                     .push_bind(&market.outcomes)
                     .push_bind(&market.token_ids)
+                    .push_bind(&market.tags)
                     .push_bind(&market.last_updated)
                     .push_bind(&market.created_at);
             });
@@ -186,6 +188,7 @@ impl MarketDatabase {
                     volume = EXCLUDED.volume,
                     outcomes = EXCLUDED.outcomes,
                     token_ids = EXCLUDED.token_ids,
+                    tags = EXCLUDED.tags,
                     last_updated = EXCLUDED.last_updated"#
             );
 
@@ -425,9 +428,9 @@ impl MarketDatabase {
                 id, ticker, slug, title, description, start_date, end_date,
                 active, closed, archived, featured, restricted,
                 liquidity, volume, volume_24hr, volume_1wk, volume_1mo, volume_1yr,
-                open_interest, image, icon, category, competitive, comment_count,
+                open_interest, image, icon, category, competitive, tags, comment_count,
                 created_at, updated_at, last_synced
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
             ON CONFLICT (id) DO UPDATE SET
                 ticker = EXCLUDED.ticker,
                 slug = EXCLUDED.slug,
@@ -451,6 +454,7 @@ impl MarketDatabase {
                 icon = EXCLUDED.icon,
                 category = EXCLUDED.category,
                 competitive = EXCLUDED.competitive,
+                tags = EXCLUDED.tags,
                 comment_count = EXCLUDED.comment_count,
                 updated_at = EXCLUDED.updated_at,
                 last_synced = EXCLUDED.last_synced
@@ -479,6 +483,7 @@ impl MarketDatabase {
         .bind(&event.icon)
         .bind(&event.category)
         .bind(&event.competitive)
+        .bind(&event.tags)
         .bind(event.comment_count)
         .bind(&event.created_at)
         .bind(&event.updated_at)
@@ -507,7 +512,7 @@ impl MarketDatabase {
                     id, ticker, slug, title, description, start_date, end_date,
                     active, closed, archived, featured, restricted,
                     liquidity, volume, volume_24hr, volume_1wk, volume_1mo, volume_1yr,
-                    open_interest, image, icon, category, competitive, comment_count,
+                    open_interest, image, icon, category, competitive, tags, comment_count,
                     created_at, updated_at, last_synced
                 ) "#
             );
@@ -536,6 +541,7 @@ impl MarketDatabase {
                     .push_bind(&event.icon)
                     .push_bind(&event.category)
                     .push_bind(&event.competitive)
+                    .push_bind(&event.tags)
                     .push_bind(event.comment_count)
                     .push_bind(&event.created_at)
                     .push_bind(&event.updated_at)
@@ -566,6 +572,7 @@ impl MarketDatabase {
                     icon = EXCLUDED.icon,
                     category = EXCLUDED.category,
                     competitive = EXCLUDED.competitive,
+                    tags = EXCLUDED.tags,
                     comment_count = EXCLUDED.comment_count,
                     updated_at = EXCLUDED.updated_at,
                     last_synced = EXCLUDED.last_synced"#
@@ -686,6 +693,80 @@ impl MarketDatabase {
         .await?;
 
         Ok(events)
+    }
+
+    /// Get events by tag labels (matches events that have ALL specified tags)
+    pub async fn get_events_by_tags(&self, tag_labels: &[&str]) -> Result<Vec<DbEvent>> {
+        if tag_labels.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Build placeholders: $1, $2, $3, ...
+        let placeholders: Vec<String> = (1..=tag_labels.len())
+            .map(|i| format!("${}", i))
+            .collect();
+        let placeholders_str = placeholders.join(", ");
+
+        let query = format!(
+            r#"
+            SELECT e.*
+            FROM events e
+            WHERE e.closed = false
+              AND e.tags IS NOT NULL
+              AND (SELECT COUNT(DISTINCT tag->>'label')
+                   FROM jsonb_array_elements(e.tags::jsonb) AS tag
+                   WHERE tag->>'label' IN ({})) = ${}
+            ORDER BY e.end_date ASC
+            "#,
+            placeholders_str,
+            tag_labels.len() + 1
+        );
+
+        let mut query_builder = sqlx::query_as::<_, DbEvent>(&query);
+        for label in tag_labels {
+            query_builder = query_builder.bind(*label);
+        }
+        query_builder = query_builder.bind(tag_labels.len() as i64);
+
+        let events = query_builder.fetch_all(&self.pool).await?;
+        Ok(events)
+    }
+
+    /// Get markets by tag labels (matches markets that have ALL specified tags)
+    pub async fn get_markets_by_tags(&self, tag_labels: &[&str]) -> Result<Vec<DbMarket>> {
+        if tag_labels.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Build placeholders: $1, $2, $3, ...
+        let placeholders: Vec<String> = (1..=tag_labels.len())
+            .map(|i| format!("${}", i))
+            .collect();
+        let placeholders_str = placeholders.join(", ");
+
+        let query = format!(
+            r#"
+            SELECT m.*
+            FROM markets m
+            WHERE m.closed = false
+              AND m.tags IS NOT NULL
+              AND (SELECT COUNT(DISTINCT tag->>'label')
+                   FROM jsonb_array_elements(m.tags::jsonb) AS tag
+                   WHERE tag->>'label' IN ({})) = ${}
+            ORDER BY m.end_date ASC
+            "#,
+            placeholders_str,
+            tag_labels.len() + 1
+        );
+
+        let mut query_builder = sqlx::query_as::<_, DbMarket>(&query);
+        for label in tag_labels {
+            query_builder = query_builder.bind(*label);
+        }
+        query_builder = query_builder.bind(tag_labels.len() as i64);
+
+        let markets = query_builder.fetch_all(&self.pool).await?;
+        Ok(markets)
     }
 
     /// Get total event count

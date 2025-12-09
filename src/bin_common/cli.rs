@@ -8,11 +8,11 @@ use std::path::PathBuf;
 /// Type of configuration to load
 #[derive(Debug, Clone)]
 pub enum ConfigType {
-    /// Sniper configuration (sniper_config.yaml)
-    Sniper,
     /// Events configuration (events_config.yaml)
     Events,
-    /// Bot configuration (config.yaml) - legacy, use Sniper or Events instead
+    /// Strategies configuration (strategies_config.yaml)
+    Strategies,
+    /// Bot configuration (config.yaml) - legacy
     Bot,
     /// Custom path
     Custom(String),
@@ -22,8 +22,8 @@ impl ConfigType {
     /// Get the default path for this config type
     pub fn default_path(&self) -> &str {
         match self {
-            ConfigType::Sniper => "config/sniper_config.yaml",
             ConfigType::Events => "config/events_config.yaml",
+            ConfigType::Strategies => "config/strategies_config.yaml",
             ConfigType::Bot => "config.yaml",
             ConfigType::Custom(path) => path,
         }
@@ -32,8 +32,8 @@ impl ConfigType {
     /// Get the environment variable name for this config type
     pub fn env_var_name(&self) -> &str {
         match self {
-            ConfigType::Sniper => "SNIPER_CONFIG_PATH",
             ConfigType::Events => "EVENTS_CONFIG_PATH",
+            ConfigType::Strategies => "STRATEGIES_CONFIG_PATH",
             ConfigType::Bot => "CONFIG_PATH",
             ConfigType::Custom(_) => "CONFIG_PATH",
         }
@@ -53,7 +53,7 @@ impl ConfigType {
 /// use polymarket_bin_common::load_config_from_env;
 /// use polymarket_bin_common::ConfigType;
 ///
-/// let path = load_config_from_env(ConfigType::Sniper);
+/// let path = load_config_from_env(ConfigType::Strategies);
 /// ```
 pub fn load_config_from_env(config_type: ConfigType) -> PathBuf {
     std::env::var(config_type.env_var_name())
@@ -74,16 +74,18 @@ mod tests {
 
     #[test]
     fn test_config_type_paths() {
-        assert_eq!(ConfigType::Sniper.default_path(), "config/sniper_config.yaml");
+        assert_eq!(ConfigType::Events.default_path(), "config/events_config.yaml");
+        assert_eq!(ConfigType::Strategies.default_path(), "config/strategies_config.yaml");
         assert_eq!(ConfigType::Bot.default_path(), "config.yaml");
-        
+
         let custom = ConfigType::Custom("custom/path.yaml".to_string());
         assert_eq!(custom.default_path(), "custom/path.yaml");
     }
 
     #[test]
     fn test_config_type_env_vars() {
-        assert_eq!(ConfigType::Sniper.env_var_name(), "SNIPER_CONFIG_PATH");
+        assert_eq!(ConfigType::Events.env_var_name(), "EVENTS_CONFIG_PATH");
+        assert_eq!(ConfigType::Strategies.env_var_name(), "STRATEGIES_CONFIG_PATH");
         assert_eq!(ConfigType::Bot.env_var_name(), "CONFIG_PATH");
     }
 }

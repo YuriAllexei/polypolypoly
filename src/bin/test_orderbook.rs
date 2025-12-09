@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
     info!("");
 
     // Create test app with in-memory database
-    let app = SniperApp::new(":memory:", 300, 1.0).await?;
+    let app = SniperApp::new(":memory:", 300).await?;
 
     info!("Connecting to WebSocket and subscribing to orderbook...");
     info!("Watch for orderbook snapshots and updates:");

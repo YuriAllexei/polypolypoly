@@ -113,7 +113,7 @@ pub struct Event {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub neg_risk: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub gmp_chart_mode: Option<GmpChartMode>,
+    pub gmp_chart_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_by: Option<SortBy>,
     #[serde(rename = "negRiskMarketID")]
@@ -160,11 +160,6 @@ pub struct EventCreator {
     pub created_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GmpChartMode {
-    Default,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -213,11 +208,11 @@ pub struct Market {
     pub featured: Option<bool>,
     #[serde(rename = "submitted_by")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub submitted_by: Option<SubmittedBy>,
+    pub submitted_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub resolved_by: Option<ResolvedBy>,
+    pub resolved_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restricted: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -357,7 +352,7 @@ pub struct Market {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uma_end_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub uma_resolution_status: Option<UmaResolutionStatus>,
+    pub uma_resolution_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub automatically_resolved: Option<bool>,
     #[serde(rename = "volume24hrAmm")]
@@ -399,7 +394,7 @@ pub struct ClobReward {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub condition_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub asset_address: Option<AssetAddress>,
+    pub asset_address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rewards_amount: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -410,42 +405,9 @@ pub struct ClobReward {
     pub end_date: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AssetAddress {
-    #[serde(rename = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")]
-    The0X2791Bca1F2De4661Ed88A30C99A7A9449Aa84174,
-}
 
 // Outcomes can be any JSON value (array of strings, etc.)
 pub type Outcomes = serde_json::Value;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ResolvedBy {
-    #[serde(rename = "0x157Ce2d672854c848c9b79C49a8Cc6cc89176a49")]
-    The0X157Ce2D672854C848C9B79C49A8Cc6Cc89176A49,
-    #[serde(rename = "0x2F5e3684cb1F318ec51b00Edba38d79Ac2c0aA9d")]
-    The0X2F5E3684Cb1F318Ec51B00Edba38D79Ac2C0AA9D,
-    #[serde(rename = "0x65070BE91477460D8A7AeEb94ef92fe056C2f2A7")]
-    The0X65070Be91477460D8A7AeEb94Ef92Fe056C2F2A7,
-    #[serde(rename = "0x6A9D222616C90FcA5754cd1333cFD9b7fb6a4F74")]
-    The0X6A9D222616C90FcA5754Cd1333CFd9B7Fb6A4F74,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SubmittedBy {
-    #[serde(rename = "")]
-    Empty,
-    #[serde(rename = "0x91430CaD2d3975766499717fA0D66A78D814E5c5")]
-    The0X91430CaD2D3975766499717FA0D66A78D814E5C5,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UmaResolutionStatus {
-    Disputed,
-    Proposed,
-    Resolved,
-}
 
 // UmaResolutionStatuses can be any JSON value (array of status strings)
 pub type UmaResolutionStatuses = serde_json::Value;
@@ -462,7 +424,7 @@ pub struct Series {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub series_type: Option<SeriesType>,
+    pub series_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recurrence: Option<Recurrence>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -490,7 +452,7 @@ pub struct Series {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment_count: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub layout: Option<GmpChartMode>,
+    pub layout: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -513,11 +475,6 @@ pub struct Series {
 // Recurrence can be any string value (annual, daily, monthly, weekly, hourly, etc.)
 pub type Recurrence = String;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SeriesType {
-    Single,
-}
 
 // SortBy can be any string value (price, ascending, etc.)
 pub type SortBy = String;

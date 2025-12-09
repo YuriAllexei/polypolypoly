@@ -17,6 +17,8 @@ pub use client::{
         RestClient, Side, WebSocketClient,
     },
     gamma::{GammaClient, GammaEvent, GammaFilters, GammaMarket, GammaTag},
+    oracle::{spawn_oracle_trackers, OraclePriceManager, OracleType, PriceEntry, SharedOraclePrices},
+    user::{spawn_user_order_tracker, OrderManager, OrderState, OrderStatus, SharedOrderManager, TradeState},
     PolymarketAuth,
 };
 

@@ -190,6 +190,7 @@ impl MarketSyncService {
             volume: gamma.volume.clone(),
             outcomes: outcomes_json,
             token_ids: token_ids_json,
+            tags: None, // Markets synced directly from Gamma don't have tags
             last_updated: now.clone(),
             created_at: now,
         })

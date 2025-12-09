@@ -10,7 +10,7 @@ pub enum SchemaError {
 pub type Result<T> = std::result::Result<T, SchemaError>;
 
 /// Database schema version
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// Initialize database schema
 pub async fn initialize_schema(pool: &PgPool) -> Result<()> {
@@ -34,6 +34,7 @@ pub async fn initialize_schema(pool: &PgPool) -> Result<()> {
             volume TEXT,
             outcomes TEXT,
             token_ids TEXT,
+            tags TEXT,
             last_updated TEXT NOT NULL,
             created_at TEXT NOT NULL
         )
@@ -116,6 +117,7 @@ pub async fn initialize_schema(pool: &PgPool) -> Result<()> {
             icon TEXT,
             category TEXT,
             competitive TEXT,
+            tags TEXT,
             comment_count INTEGER DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -213,6 +215,15 @@ pub async fn initialize_schema(pool: &PgPool) -> Result<()> {
     .bind(SCHEMA_VERSION)
     .execute(pool)
     .await?;
+
+    // Migration: Add tags column to existing tables (v4)
+    sqlx::query("ALTER TABLE markets ADD COLUMN IF NOT EXISTS tags TEXT")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("ALTER TABLE events ADD COLUMN IF NOT EXISTS tags TEXT")
+        .execute(pool)
+        .await?;
 
     Ok(())
 }

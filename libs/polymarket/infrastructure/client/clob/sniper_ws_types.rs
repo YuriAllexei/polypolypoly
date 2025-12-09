@@ -1,4 +1,10 @@
 //! WebSocket message types for market sniper orderbook tracking
+//!
+//! Message types for the Polymarket market WebSocket channel:
+//! - book: Initial orderbook snapshot
+//! - price_change: Incremental orderbook updates
+//! - tick_size_change: Tick size changes (price reaches limits)
+//! - last_trade_price: Trade execution events
 
 use serde::{Deserialize, Serialize};
 use super::types::PriceLevel;
@@ -71,6 +77,33 @@ pub struct PriceChange {
     pub best_ask: String,
 }
 
+/// Tick size change event - emitted when book price reaches limits (>0.96 or <0.04)
+#[derive(Debug, Clone, Deserialize)]
+pub struct TickSizeChangeEvent {
+    pub event_type: String,
+    pub asset_id: String,
+    pub market: String,
+    pub old_tick_size: String,
+    pub new_tick_size: String,
+    #[serde(default)]
+    pub side: Option<String>,
+    pub timestamp: String,
+}
+
+/// Last trade price event - emitted when a maker and taker order are matched
+#[derive(Debug, Clone, Deserialize)]
+pub struct LastTradePriceEvent {
+    pub event_type: String,
+    pub asset_id: String,
+    pub market: String,
+    pub price: String,
+    pub size: String,
+    pub side: String,
+    pub timestamp: String,
+    #[serde(default)]
+    pub fee_rate_bps: Option<String>,
+}
+
 /// Union type for all incoming WebSocket messages
 #[derive(Debug)]
 pub enum SniperMessage {
@@ -78,6 +111,10 @@ pub enum SniperMessage {
     BookSnapshots(Vec<BookSnapshot>),
     /// Price change update
     PriceChange(PriceChangeEvent),
+    /// Tick size change event
+    TickSizeChange(TickSizeChangeEvent),
+    /// Last trade price event
+    LastTradePrice(LastTradePriceEvent),
     /// Pong response to our ping
     Pong,
     /// Unknown/unhandled message

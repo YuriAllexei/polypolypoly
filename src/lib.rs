@@ -30,6 +30,6 @@ pub mod bin_common {
     pub mod cli;
     pub mod runner;
 
-    pub use cli::{load_config_from_env, ConfigType};
+    pub use cli::{load_config_from_env, parse_args, ConfigType};
     pub use runner::{BinaryRunner, RunConfig};
 }

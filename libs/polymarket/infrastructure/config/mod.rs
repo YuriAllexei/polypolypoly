@@ -1,7 +1,11 @@
+pub mod strategies;
+
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 use tracing::info;
+
+pub use strategies::{StrategiesConfig, UpOrDownConfig};
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -99,6 +103,9 @@ pub struct SniperConfig {
     pub probability: f64,
     pub delta_t_seconds: f64,
     pub loop_interval_secs: f64,
+    /// Log level (error, warn, info, debug, trace)
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
     #[serde(default)]
     pub database: DatabaseConfig,
 }
@@ -145,6 +152,14 @@ impl SniperConfig {
             ));
         }
 
+        // Validate log_level
+        let valid_levels = ["error", "warn", "info", "debug", "trace"];
+        if !valid_levels.contains(&self.log_level.to_lowercase().as_str()) {
+            return Err(ConfigError::ValidationError(
+                format!("log_level must be one of: {}", valid_levels.join(", ")),
+            ));
+        }
+
         Ok(())
     }
 
@@ -154,6 +169,7 @@ impl SniperConfig {
         info!("  Probability threshold: {}", self.probability);
         info!("  Time window: {} seconds", self.delta_t_seconds);
         info!("  Loop interval: {} seconds", self.loop_interval_secs);
+        info!("  Log level: {}", self.log_level);
         info!("  Database url: {}", self.database.url);
     }
 }
@@ -172,6 +188,11 @@ pub struct EventsConfig {
     /// Database configuration (loaded from env)
     #[serde(default)]
     pub database: DatabaseConfig,
+    /// Whether to fetch closed events
+    /// false = add closed=false param (fetch only non-closed)
+    /// true = omit closed param (fetch all including closed)
+    #[serde(default)]
+    pub closed: bool,
 }
 
 fn default_sync_interval() -> u64 {
@@ -224,6 +245,7 @@ impl EventsConfig {
         info!("  Gamma API URL: {}", self.gamma_api_url);
         info!("  Sync interval: {} seconds", self.sync_interval_secs);
         info!("  Log level: {}", self.log_level);
+        info!("  Closed filter: {}", if self.closed { "fetch all (no filter)" } else { "fetch non-closed only" });
         info!("  Database URL: {}", self.database.url);
     }
 }

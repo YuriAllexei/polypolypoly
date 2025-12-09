@@ -1,6 +1,6 @@
 services:
   polymarket-events:
-    profiles: ["events"]
+    profiles: ["events", "strategies"]
     build: .
     container_name: polymarket-events
     restart: unless-stopped
@@ -16,23 +16,27 @@ services:
     volumes:
       - ./config/events_config.yaml:/etc/polymarket/events_config.yaml
 
-  market-sniper:
-    profiles: ["sniper"]
+  # Strategy runner - Up or Down
+  # To add more strategies, duplicate this service with a different STRATEGY_NAME
+  sniper-up-or-down:
+    profiles: ["strategies"]
     build: .
-    container_name: market-sniper
+    container_name: sniper-up-or-down
     restart: unless-stopped
-    command: [ "./market_sniper" ]
+    command: [ "./sniper" ]
     depends_on:
       postgres:
         condition: service_healthy
+      polymarket-events:
+        condition: service_started
     env_file:
       - .env
     environment:
       - DATABASE_URL=${DATABASE_URL}
-      - RUST_LOG=${RUST_LOG:-info}
-      - SNIPER_CONFIG_PATH=${SNIPER_CONFIG_PATH:-/etc/polymarket/sniper_config.yaml}
+      - STRATEGY_NAME=up_or_down
+      - STRATEGIES_CONFIG_PATH=${STRATEGIES_CONFIG_PATH:-/etc/polymarket/strategies_config.yaml}
     volumes:
-      - ./config/sniper_config.yaml:/etc/polymarket/sniper_config.yaml
+      - ./config/strategies_config.yaml:/etc/polymarket/strategies_config.yaml
 
   postgres:
     image: postgres:16-alpine

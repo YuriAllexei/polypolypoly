@@ -27,10 +27,10 @@ pub struct SniperApp {
 
 impl SniperApp {
     /// Initialize sniper application
-    pub async fn new(database_url: &str, heartbeat_interval: u64, probability_threshold: f64) -> anyhow::Result<Self> {
+    pub async fn new(database_url: &str, heartbeat_interval: u64) -> anyhow::Result<Self> {
         let database = Arc::new(MarketDatabase::new(database_url).await?);
         let shutdown = ShutdownManager::new();
-        let tracker = MarketTrackerService::new(Arc::clone(&database), probability_threshold);
+        let tracker = MarketTrackerService::new();
         shutdown.spawn_signal_handler();
         let heartbeat = Heartbeat::new(heartbeat_interval);
 
@@ -66,11 +66,17 @@ impl SniperApp {
     }
 }
 
-/// Application facade for event sync use case
+/// Application facade for event sync use case.
+///
+/// Provides a high-level interface for syncing events and markets from the
+/// Polymarket Gamma API to the local database. Supports batch operations
+/// for efficient bulk syncing.
 pub struct EventSyncApp {
     pub sync_service: EventSyncService,
     pub shutdown: ShutdownManager,
     pub heartbeat: Heartbeat,
+    /// Whether to fetch closed events (true = fetch all, false = only non-closed)
+    pub closed: bool,
 }
 
 impl EventSyncApp {
@@ -79,6 +85,7 @@ impl EventSyncApp {
         database_url: &str,
         api_base_url: &str,
         heartbeat_secs: u64,
+        closed: bool,
     ) -> anyhow::Result<Self> {
         let database = Arc::new(MarketDatabase::new(database_url).await?);
         let sync_service = EventSyncService::new(database.clone(), api_base_url.to_string());
@@ -91,6 +98,7 @@ impl EventSyncApp {
             sync_service,
             shutdown,
             heartbeat,
+            closed,
         })
     }
 
@@ -110,10 +118,19 @@ impl EventSyncApp {
         info!("Starting event sync from Gamma API");
 
         loop {
-            let url = format!(
-                "{}/events?closed=false&limit={}&offset={}&ascending=true",
-                self.sync_service.api_base_url, LIMIT, offset
-            );
+            // If closed=false in config, add closed=false param to fetch only non-closed
+            // If closed=true in config, omit closed param to fetch all events
+            let url = if self.closed {
+                format!(
+                    "{}/events?limit={}&offset={}&ascending=true",
+                    self.sync_service.api_base_url, LIMIT, offset
+                )
+            } else {
+                format!(
+                    "{}/events?closed=false&limit={}&offset={}&ascending=true",
+                    self.sync_service.api_base_url, LIMIT, offset
+                )
+            };
 
             debug!(page = page, offset = offset, limit = LIMIT, "Fetching events page");
 
@@ -144,15 +161,21 @@ impl EventSyncApp {
                 let event_title = event.title.as_deref().unwrap_or("Unknown");
                 debug!(event_id = %event_id, title = %event_title, "Processing event");
 
+                // Serialize event tags to pass to markets
+                let event_tags_json = event
+                    .tags
+                    .as_ref()
+                    .map(|tags| serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string()));
+
                 // Convert and collect event
                 let db_event = crate::application::sync::EventSyncService::event_to_db_event(event);
                 db_events.push(db_event);
 
-                // Process markets for this event
+                // Process markets for this event (inheriting tags from parent event)
                 if let Some(markets) = &event.markets {
                     for market in markets {
                         if let Ok(db_market) =
-                            crate::application::sync::EventSyncService::market_to_db_market(market)
+                            crate::application::sync::EventSyncService::market_to_db_market(market, event_tags_json.clone())
                         {
                             debug!(
                                 market_id = %db_market.id,

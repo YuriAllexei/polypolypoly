@@ -49,7 +49,6 @@ impl EventSyncService {
 
             // Statistics for this cycle
             let mut total_fetched = 0;
-            let mut total_new = 0;
             let mut offset = 0;
 
             let start_time = Instant::now();
@@ -164,6 +163,12 @@ impl EventSyncService {
             event.title.as_ref().unwrap_or(&"no title".to_string())
         );
 
+        // Serialize event tags to pass to markets
+        let event_tags_json = event
+            .tags
+            .as_ref()
+            .map(|tags| serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string()));
+
         // Convert to DbEvent
         let db_event = Self::event_to_db_event(event);
 
@@ -184,9 +189,9 @@ impl EventSyncService {
                     event_id
                 );
 
-                // Save each market
+                // Save each market (inheriting tags from parent event)
                 for market in markets {
-                     let db_market = Self::market_to_db_market(market)?;
+                     let db_market = Self::market_to_db_market(market, event_tags_json.clone())?;
                      if let Err(e) = self.database.upsert_market(db_market).await {
                          warn!("Failed to save market: {}", e);
                      }
@@ -204,6 +209,11 @@ impl EventSyncService {
 
     pub fn event_to_db_event(event: &Event) -> DbEvent {
         let now = Utc::now().to_rfc3339();
+
+        let tags_json = event
+            .tags
+            .as_ref()
+            .map(|tags| serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string()));
 
         DbEvent {
             id: event.id.clone().unwrap_or_default(),
@@ -229,6 +239,7 @@ impl EventSyncService {
             icon: event.icon.clone(),
             category: None,
             competitive: event.competitive.map(|v| v.to_string()),
+            tags: tags_json,
             comment_count: event.comment_count.map(|v| v as i64).unwrap_or(0),
             created_at: event.created_at.clone().unwrap_or_else(|| now.clone()),
             updated_at: event.updated_at.clone().unwrap_or_else(|| now.clone()),
@@ -236,7 +247,7 @@ impl EventSyncService {
         }
     }
 
-    pub fn market_to_db_market(market: &Market) -> anyhow::Result<DbMarket> {
+    pub fn market_to_db_market(market: &Market, event_tags: Option<String>) -> anyhow::Result<DbMarket> {
         let now = Utc::now().to_rfc3339();
 
         let outcomes_json = market
@@ -264,6 +275,7 @@ impl EventSyncService {
             volume: market.volume.clone(),
             outcomes: outcomes_json,
             token_ids: token_ids_json,
+            tags: event_tags,
             last_updated: now.clone(),
             created_at: market.created_at.clone().unwrap_or(now),
         })

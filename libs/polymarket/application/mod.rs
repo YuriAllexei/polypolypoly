@@ -5,6 +5,7 @@
 
 pub mod facade;
 pub mod sniper;
+pub mod strategies;
 pub mod strategy;
 pub mod sync;
 
@@ -17,5 +18,11 @@ pub use sniper::{ConfigService, MarketTrackerService};
 // Re-export sync services
 pub use sync::{EventSyncService, MarketSyncService};
 
-// Re-export strategy services
+// Re-export strategy services (legacy)
 pub use strategy::{OrderExecutor, ResolutionMonitor, RiskManager};
+
+// Re-export pluggable strategies system
+pub use strategies::{
+    create_strategy, Strategy, StrategyContext, StrategyError, StrategyResult, StrategyType,
+    UpOrDownStrategy,
+};

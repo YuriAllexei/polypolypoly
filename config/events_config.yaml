@@ -12,4 +12,7 @@ sync_interval_secs: 60
 # RUST_LOG environment variable can override this
 log_level: info
 
-# Database URL is configured via DATABASE_URL environment variable
+# Closed filter for fetching events
+# false = fetch only non-closed/active events (adds closed=false param)
+# true = fetch all events including closed (no closed param)
+closed: false

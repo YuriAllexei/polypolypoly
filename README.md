@@ -8,7 +8,7 @@ This project follows **Clean Architecture** with strict layer separation:
 
 ```
 ┌─────────────────────────┐
-│   Presentation          │  src/bin/ (market_sniper, polymarket_events)
+│   Presentation          │  src/bin/ (sniper, polymarket_events)
 │   (Binaries)            │  src/bin_common/ (shared utilities)
 └──────────┬──────────────┘
            │
@@ -44,8 +44,8 @@ This project follows **Clean Architecture** with strict layer separation:
 polymarket-arb-bot/
 ├── src/
 │   ├── bin/                          # Executable binaries
-│   │   ├── market_sniper.rs          # Market monitoring & opportunity detection
 │   │   ├── polymarket_events.rs      # Event synchronization daemon
+│   │   ├── sniper.rs                 # Pluggable strategy runner
 │   │   └── test_orderbook.rs         # WebSocket diagnostic tool
 │   ├── bin_common/                   # Shared binary utilities
 │   └── lib.rs                        # Library exports
@@ -58,8 +58,8 @@ polymarket-arb-bot/
 │   └── hypersockets/                 # Custom WebSocket library
 │
 ├── config/
-│   ├── sniper_config.yaml            # Sniper configuration
-│   └── sniper_config.example.yaml    # Example config
+│   ├── events_config.yaml            # Events syncer configuration
+│   └── strategies_config.yaml        # Strategies runner configuration
 │
 ├── docker-compose.yml                # Docker services
 ├── Dockerfile                        # Container build
@@ -75,13 +75,27 @@ Synchronizes event data from Polymarket Gamma API to PostgreSQL.
 - Updates `events` table and links to `markets` via `event_markets`
 - Runs continuously with 60-second sync interval
 
-### 2. market_sniper
-Monitors markets approaching resolution and detects trading opportunities.
+### 2. sniper (Strategy Runner)
+Pluggable strategy runner supporting multiple trading strategies.
 
-- Polls database for markets expiring within configured time window
-- Spawns WebSocket trackers for real-time orderbook updates
-- Detects opportunities when ask prices fall below probability threshold
-- Stores detected opportunities in database
+- Runs configurable strategies from `strategies_config.yaml`
+- Strategy selection priority: `STRATEGY_NAME` env var > CLI arg > config file
+- Supports running multiple strategies in parallel (separate containers)
+- Graceful shutdown with Ctrl+C
+
+**Available Strategies:**
+| Strategy | Description |
+|----------|-------------|
+| `up_or_down` | Monitors recurring crypto price prediction markets |
+
+**Usage:**
+```bash
+# Via CLI argument
+./sniper up_or_down
+
+# Via environment variable (Docker-friendly)
+STRATEGY_NAME=up_or_down ./sniper
+```
 
 ### 3. test_orderbook
 Diagnostic tool for testing WebSocket orderbook connections.
@@ -122,25 +136,25 @@ POSTGRES_DB=polymarket
 
 # Logging
 RUST_LOG=info
-
-# Config path (for Docker)
-SNIPER_CONFIG_PATH=/etc/polymarket/sniper_config.yaml
 ```
 
-### 3. Configure Sniper
+### 3. Configure Strategies
 
-Edit `config/sniper_config.yaml`:
+Edit `config/strategies_config.yaml`:
 
 ```yaml
-# Probability threshold for opportunity detection (0.0 to 1.0)
-probability: 0.95
+# Log level: error, warn, info, debug, trace
+log_level: "info"
 
-# Time window in seconds - markets expiring within this window are tracked
-delta_t_seconds: 43200  # 12 hours
-
-# How often to poll database for new markets (seconds)
-loop_interval_secs: 60
+# Up or Down strategy settings
+up_or_down:
+  # Time window in seconds before market ends to trigger alert
+  delta_t_seconds: 300
+  # How often to poll database for new markets (seconds)
+  poll_interval_secs: 60
 ```
+
+**Note:** The strategy to run must be specified via `STRATEGY_NAME` env var or CLI argument.
 
 ### 4. Docker Deployment
 
@@ -149,8 +163,8 @@ The project uses Docker Compose with **profiles** for flexible deployment:
 | Service | Profile | Description |
 |---------|---------|-------------|
 | `postgres` | *(always runs)* | PostgreSQL database |
-| `polymarket-events` | `events` | Event synchronization daemon |
-| `market-sniper` | `sniper` | Market monitoring & tracking |
+| `polymarket-events` | `events`, `strategies` | Event synchronization daemon |
+| `sniper-up-or-down` | `strategies` | Up or Down strategy runner |
 
 **Commands:**
 
@@ -164,14 +178,11 @@ docker compose up -d
 # Start postgres + events syncer
 docker compose --profile events up
 
-# Start postgres + market sniper
-docker compose --profile sniper up
-
-# Start everything
-docker compose --profile events --profile sniper up
+# Start postgres + events syncer + all strategies
+docker compose --profile strategies up
 
 # Build and start
-docker compose --profile events up --build
+docker compose --profile strategies up --build
 
 # Reset database (drops all data)
 docker compose down -v
@@ -180,11 +191,39 @@ docker compose up -d
 
 **Typical workflow:**
 ```bash
-# Terminal 1: Start postgres and events syncer
-docker compose --profile events up
+# Start strategies (includes events syncer automatically)
+docker compose --profile strategies up
+```
 
-# Terminal 2: Start market sniper
-docker compose --profile sniper up
+**Running Multiple Strategies:**
+
+To run multiple strategies in parallel, add more services to `docker-compose.yml`:
+
+```yaml
+# Example: Add a second strategy
+sniper-another-strategy:
+  profiles: ["strategies"]
+  build: .
+  container_name: sniper-another-strategy
+  command: ["./sniper"]
+  depends_on:
+    postgres:
+      condition: service_healthy
+    polymarket-events:
+      condition: service_started
+  env_file:
+    - .env
+  environment:
+    - DATABASE_URL=${DATABASE_URL}
+    - STRATEGY_NAME=another_strategy
+    - STRATEGIES_CONFIG_PATH=/etc/polymarket/strategies_config.yaml
+  volumes:
+    - ./config/strategies_config.yaml:/etc/polymarket/strategies_config.yaml
+```
+
+All services with `profiles: ["strategies"]` will start together when running:
+```bash
+docker compose --profile strategies up
 ```
 
 ### 5. Run Locally (without Docker)
@@ -195,8 +234,11 @@ docker compose --profile sniper up
 # Run event syncer
 cargo run --release --bin polymarket_events
 
-# Run market sniper
-cargo run --release --bin market_sniper
+# Run strategy runner (strategy is required)
+cargo run --release --bin sniper -- up_or_down
+
+# Or via environment variable
+STRATEGY_NAME=up_or_down cargo run --release --bin sniper
 ```
 
 ## Database Schema
@@ -218,21 +260,11 @@ The system uses PostgreSQL with the following tables:
    ├─ Upsert events into database
    └─ Link events to their markets
 
-2. [Market Sniper] (Continuous)
-   ├─ Poll database for markets expiring soon
-   ├─ For each new market:
-   │   ├─ Parse token IDs and outcomes
-   │   ├─ Connect to WebSocket
-   │   └─ Subscribe to orderbook updates
-   ├─ Monitor live orderbook prices
-   ├─ Detect opportunities (ask < threshold)
-   └─ Store opportunities in database
-
-3. [WebSocket Tracker]
-   ├─ Receive real-time orderbook snapshots
-   ├─ Process price level updates
-   ├─ Track best bid/ask per outcome
-   └─ Trigger opportunity detection
+2. [Strategy Runner] (Continuous)
+   ├─ Poll database for markets matching strategy criteria
+   ├─ Track markets approaching resolution
+   ├─ Execute strategy-specific logic
+   └─ Log alerts when markets enter time window
 ```
 
 ## Development
@@ -249,7 +281,7 @@ cargo clippy
 cargo fmt
 
 # Run specific binary
-cargo run --bin market_sniper
+cargo run --bin sniper
 cargo run --bin polymarket_events
 ```
 
@@ -265,19 +297,11 @@ Error: Database connection error
 
 ### No Markets Found
 ```
-No markets found expiring within window
+No markets found matching criteria
 ```
-- Increase `delta_t_seconds` in sniper config
+- Increase `delta_t_seconds` in strategies config
 - Ensure `polymarket_events` has synced data
-- Check database has active markets
-
-### WebSocket Connection Issues
-```
-WebSocket connection failed
-```
-- Check internet connectivity
-- Verify Polymarket CLOB WebSocket is accessible
-- Review logs for specific error messages
+- Check database has active markets with required tags
 
 ## License
 
