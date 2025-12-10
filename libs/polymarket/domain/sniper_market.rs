@@ -10,6 +10,7 @@ use tracing::info;
 pub struct SniperMarket {
     pub id: String,
     pub question: String,
+    pub slug: Option<String>,
     pub resolution_time: DateTime<Utc>,
     pub resolution_time_str: String,
     pub token_ids: Vec<String>,
@@ -30,6 +31,7 @@ impl SniperMarket {
         Ok(Self {
             id: market.id.clone(),
             question: market.question.clone(),
+            slug: market.slug.clone(),
             resolution_time,
             resolution_time_str: market.resolution_time.clone(),
             token_ids,
