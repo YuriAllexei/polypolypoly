@@ -36,6 +36,7 @@ impl MarketTrackerService {
         crate::infrastructure::spawn_market_tracker(
             market.id.clone(),
             market.question.clone(),
+            market.slug.clone(),
             market.token_ids.clone(),
             market.outcomes.clone(),
             market.resolution_time_str.clone(),

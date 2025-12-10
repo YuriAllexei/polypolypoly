@@ -1,9 +1,6 @@
 //! Orderbook domain entities
 //!
-//! High-performance orderbook data structure optimized for speed with:
-//! - Integer price representation (micros) for fast comparison
-//! - Sorted Vec for cache-friendly access
-//! - Binary search for O(log n) updates
+//! Simple orderbook data structure using floats for readability.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,8 +11,8 @@ use serde::{Deserialize, Serialize};
 /// Price level in order book
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceLevel {
-    pub price: String,  // String to avoid float precision issues
-    pub size: String,   // String to avoid float precision issues
+    pub price: String,
+    pub size: String,
 }
 
 impl PriceLevel {
@@ -29,34 +26,16 @@ impl PriceLevel {
 }
 
 // =============================================================================
-// Price Conversion Utilities
-// =============================================================================
-
-/// Convert string price (e.g., "0.75") to integer micros (750000)
-/// Uses 6 decimal places for precision
-#[inline]
-pub fn price_to_micros(price: &str) -> u64 {
-    (price.parse::<f64>().unwrap_or(0.0) * 1_000_000.0) as u64
-}
-
-/// Convert integer micros back to f64 for display
-#[inline]
-pub fn micros_to_f64(micros: u64) -> f64 {
-    micros as f64 / 1_000_000.0
-}
-
-// =============================================================================
 // OrderbookSide - One side of the orderbook (bids or asks)
 // =============================================================================
 
 /// A single side of the orderbook (bids or asks)
-/// Uses sorted Vec for cache-friendly access with small N (~20-100 levels)
 #[derive(Debug, Clone)]
 pub struct OrderbookSide {
-    /// Price levels as (price_micros, size_micros)
+    /// Price levels as (price, size)
     /// Bids: sorted descending (highest first)
     /// Asks: sorted ascending (lowest first)
-    levels: Vec<(u64, u64)>,
+    levels: Vec<(f64, f64)>,
     /// True for bids (descending), false for asks (ascending)
     is_bid: bool,
 }
@@ -65,7 +44,7 @@ impl OrderbookSide {
     /// Create a new empty orderbook side
     pub fn new(is_bid: bool) -> Self {
         Self {
-            levels: Vec::with_capacity(64), // Pre-allocate for typical depth
+            levels: Vec::with_capacity(64),
             is_bid,
         }
     }
@@ -76,9 +55,9 @@ impl OrderbookSide {
         self.levels.reserve(levels.len());
 
         for level in levels {
-            let price = price_to_micros(&level.price);
-            let size = price_to_micros(&level.size);
-            if size > 0 {
+            let price = level.price_f64();
+            let size = level.size_f64();
+            if size > 0.0 {
                 self.levels.push((price, size));
             }
         }
@@ -86,40 +65,46 @@ impl OrderbookSide {
         // Sort based on side type
         if self.is_bid {
             // Bids: highest price first (descending)
-            self.levels.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+            self.levels
+                .sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
         } else {
             // Asks: lowest price first (ascending)
-            self.levels.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            self.levels
+                .sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         }
     }
 
     /// Update a single price level
     /// If size == 0, remove the level
-    pub fn process_update(&mut self, price: u64, size: u64) {
-        // Binary search for the price
-        let search_result = self.levels.binary_search_by(|(p, _)| {
+    pub fn process_update(&mut self, price: f64, size: f64) {
+        // Find position for this price
+        let pos = self.levels.iter().position(|(p, _)| {
             if self.is_bid {
-                // Descending order for bids
-                p.cmp(&price).reverse()
+                *p <= price
             } else {
-                // Ascending order for asks
-                p.cmp(&price)
+                *p >= price
             }
         });
 
-        match search_result {
-            Ok(idx) => {
-                // Price exists
-                if size == 0 {
+        match pos {
+            Some(idx) if (self.levels[idx].0 - price).abs() < 1e-9 => {
+                // Price exists at idx
+                if size == 0.0 {
                     self.levels.remove(idx);
                 } else {
                     self.levels[idx].1 = size;
                 }
             }
-            Err(idx) => {
-                // Price doesn't exist
-                if size > 0 {
+            Some(idx) => {
+                // Price doesn't exist, insert at idx
+                if size > 0.0 {
                     self.levels.insert(idx, (price, size));
+                }
+            }
+            None => {
+                // Insert at end
+                if size > 0.0 {
+                    self.levels.push((price, size));
                 }
             }
         }
@@ -127,13 +112,13 @@ impl OrderbookSide {
 
     /// Get best price level (first element)
     #[inline]
-    pub fn best(&self) -> Option<(u64, u64)> {
+    pub fn best(&self) -> Option<(f64, f64)> {
         self.levels.first().copied()
     }
 
     /// Get all levels as slice
     #[inline]
-    pub fn levels(&self) -> &[(u64, u64)] {
+    pub fn levels(&self) -> &[(f64, f64)] {
         &self.levels
     }
 
@@ -150,7 +135,7 @@ impl OrderbookSide {
     }
 
     /// Get total liquidity (sum of all sizes)
-    pub fn total_liquidity(&self) -> u64 {
+    pub fn total_liquidity(&self) -> f64 {
         self.levels.iter().map(|(_, s)| s).sum()
     }
 }
@@ -186,40 +171,40 @@ impl Orderbook {
     /// Process a price update
     /// side: "BUY" or "SELL" (or "buy"/"sell")
     pub fn process_update(&mut self, side: &str, price: &str, size: &str) {
-        let price_micros = price_to_micros(price);
-        let size_micros = price_to_micros(size);
+        let price_f64 = price.parse().unwrap_or(0.0);
+        let size_f64 = size.parse().unwrap_or(0.0);
 
         match side.to_uppercase().as_str() {
-            "BUY" => self.bids.process_update(price_micros, size_micros),
-            "SELL" => self.asks.process_update(price_micros, size_micros),
-            _ => {} // Ignore unknown sides
+            "BUY" => self.bids.process_update(price_f64, size_f64),
+            "SELL" => self.asks.process_update(price_f64, size_f64),
+            _ => {}
         }
     }
 
     /// Get best bid (highest buy price)
     #[inline]
-    pub fn best_bid(&self) -> Option<(u64, u64)> {
+    pub fn best_bid(&self) -> Option<(f64, f64)> {
         self.bids.best()
     }
 
     /// Get best ask (lowest sell price)
     #[inline]
-    pub fn best_ask(&self) -> Option<(u64, u64)> {
+    pub fn best_ask(&self) -> Option<(f64, f64)> {
         self.asks.best()
     }
 
-    /// Calculate spread in micros (best_ask - best_bid)
-    pub fn spread(&self) -> Option<i64> {
+    /// Calculate spread (best_ask - best_bid)
+    pub fn spread(&self) -> Option<f64> {
         match (self.best_bid(), self.best_ask()) {
-            (Some((bid, _)), Some((ask, _))) => Some(ask as i64 - bid as i64),
+            (Some((bid, _)), Some((ask, _))) => Some(ask - bid),
             _ => None,
         }
     }
 
-    /// Calculate mid price in micros
-    pub fn mid_price(&self) -> Option<u64> {
+    /// Calculate mid price
+    pub fn mid_price(&self) -> Option<f64> {
         match (self.best_bid(), self.best_ask()) {
-            (Some((bid, _)), Some((ask, _))) => Some((bid + ask) / 2),
+            (Some((bid, _)), Some((ask, _))) => Some((bid + ask) / 2.0),
             _ => None,
         }
     }
@@ -228,17 +213,17 @@ impl Orderbook {
     pub fn format_summary(&self) -> String {
         let bid_str = self
             .best_bid()
-            .map(|(p, s)| format!("{:.4} ({:.2})", micros_to_f64(p), micros_to_f64(s)))
+            .map(|(p, s)| format!("{:.4} ({:.2})", p, s))
             .unwrap_or_else(|| "N/A".to_string());
 
         let ask_str = self
             .best_ask()
-            .map(|(p, s)| format!("{:.4} ({:.2})", micros_to_f64(p), micros_to_f64(s)))
+            .map(|(p, s)| format!("{:.4} ({:.2})", p, s))
             .unwrap_or_else(|| "N/A".to_string());
 
         let spread_str = self
             .spread()
-            .map(|s| format!("{:.4}", s as f64 / 1_000_000.0))
+            .map(|s| format!("{:.4}", s))
             .unwrap_or_else(|| "N/A".to_string());
 
         format!(
@@ -251,14 +236,13 @@ impl Orderbook {
     pub fn format_depth(&self, max_levels: usize) -> String {
         let mut output = String::new();
 
-        // Bids
         output.push_str("  Bids: ");
         let bid_levels: Vec<String> = self
             .bids
             .levels()
             .iter()
             .take(max_levels)
-            .map(|(p, s)| format!("{:.4}({:.2})", micros_to_f64(*p), micros_to_f64(*s)))
+            .map(|(p, s)| format!("{:.4}({:.2})", p, s))
             .collect();
         output.push_str(&bid_levels.join(", "));
         if bid_levels.is_empty() {
@@ -271,7 +255,7 @@ impl Orderbook {
             .levels()
             .iter()
             .take(max_levels)
-            .map(|(p, s)| format!("{:.4}({:.2})", micros_to_f64(*p), micros_to_f64(*s)))
+            .map(|(p, s)| format!("{:.4}({:.2})", p, s))
             .collect();
         output.push_str(&ask_levels.join(", "));
         if ask_levels.is_empty() {
@@ -298,14 +282,6 @@ mod tests {
     }
 
     #[test]
-    fn test_price_conversion() {
-        assert_eq!(price_to_micros("0.75"), 750000);
-        assert_eq!(price_to_micros("1.0"), 1000000);
-        assert_eq!(price_to_micros("0.123456"), 123456);
-        assert_eq!(micros_to_f64(750000), 0.75);
-    }
-
-    #[test]
     fn test_orderbook_side_snapshot() {
         let mut bids = OrderbookSide::new(true);
         bids.process_snapshot(&[
@@ -316,28 +292,30 @@ mod tests {
 
         // Bids should be sorted descending
         assert_eq!(bids.levels().len(), 3);
-        assert_eq!(bids.best(), Some((750000, 200000000))); // 0.75 is best bid
+        let best = bids.best().unwrap();
+        assert!((best.0 - 0.75).abs() < 1e-9);
+        assert!((best.1 - 200.0).abs() < 1e-9);
     }
 
     #[test]
     fn test_orderbook_side_update() {
         let mut bids = OrderbookSide::new(true);
-        bids.process_snapshot(&[
-            make_level("0.75", "200"),
-            make_level("0.74", "150"),
-        ]);
+        bids.process_snapshot(&[make_level("0.75", "200"), make_level("0.74", "150")]);
 
         // Update existing level
-        bids.process_update(750000, 300000000);
-        assert_eq!(bids.best(), Some((750000, 300000000)));
+        bids.process_update(0.75, 300.0);
+        let best = bids.best().unwrap();
+        assert!((best.1 - 300.0).abs() < 1e-9);
 
         // Add new level
-        bids.process_update(760000, 100000000);
-        assert_eq!(bids.best(), Some((760000, 100000000))); // New best
+        bids.process_update(0.76, 100.0);
+        let best = bids.best().unwrap();
+        assert!((best.0 - 0.76).abs() < 1e-9);
 
         // Remove level (size = 0)
-        bids.process_update(760000, 0);
-        assert_eq!(bids.best(), Some((750000, 300000000)));
+        bids.process_update(0.76, 0.0);
+        let best = bids.best().unwrap();
+        assert!((best.0 - 0.75).abs() < 1e-9);
     }
 
     #[test]
@@ -348,9 +326,13 @@ mod tests {
             &[make_level("0.76", "100"), make_level("0.77", "200")],
         );
 
-        assert_eq!(ob.best_bid(), Some((740000, 100000000)));
-        assert_eq!(ob.best_ask(), Some((760000, 100000000)));
-        assert_eq!(ob.spread(), Some(20000)); // 0.02 spread
+        let best_bid = ob.best_bid().unwrap();
+        let best_ask = ob.best_ask().unwrap();
+        assert!((best_bid.0 - 0.74).abs() < 1e-9);
+        assert!((best_ask.0 - 0.76).abs() < 1e-9);
+
+        let spread = ob.spread().unwrap();
+        assert!((spread - 0.02).abs() < 1e-9);
     }
 
     #[test]
@@ -360,10 +342,12 @@ mod tests {
 
         // Update bid
         ob.process_update("BUY", "0.75", "200");
-        assert_eq!(ob.best_bid(), Some((750000, 200000000)));
+        let best_bid = ob.best_bid().unwrap();
+        assert!((best_bid.0 - 0.75).abs() < 1e-9);
 
         // Update ask
         ob.process_update("SELL", "0.755", "150");
-        assert_eq!(ob.best_ask(), Some((755000, 150000000)));
+        let best_ask = ob.best_ask().unwrap();
+        assert!((best_ask.0 - 0.755).abs() < 1e-9);
     }
 }

@@ -67,6 +67,7 @@ async fn main() -> Result<()> {
     let market = polymarket::domain::SniperMarket {
         id: market_id,
         question: "Test Market".to_string(),
+        slug: None,
         resolution_time: chrono::Utc::now() + chrono::Duration::days(365 * 75),
         resolution_time_str: resolution_time,
         token_ids,

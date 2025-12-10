@@ -39,6 +39,7 @@ pub struct UpOrDownStrategy {
 struct TrackedMarket {
     id: String,
     question: String,
+    slug: Option<String>,
     end_time: DateTime<Utc>,
     /// Token IDs for the market outcomes (Yes/No or Up/Down)
     token_ids: Vec<String>,
@@ -134,6 +135,7 @@ impl UpOrDownStrategy {
                     let tracked = TrackedMarket {
                         id: market.id.clone(),
                         question: market.question.clone(),
+                        slug: market.slug.clone(),
                         end_time: end_time.with_timezone(&Utc),
                         token_ids,
                         outcomes,
@@ -169,11 +171,16 @@ impl UpOrDownStrategy {
 
             // Check if within delta_t window and hasn't ended yet
             if time_until_end > Duration::zero() && time_until_end <= delta_t {
+                let market_url = market.slug.as_ref()
+                    .map(|s| format!("https://polymarket.com/event/{}", s))
+                    .unwrap_or_else(|| "N/A".to_string());
+
                 info!("════════════════════════════════════════════════════════════════");
                 info!("⏰ MARKET ENTERING TRACKING WINDOW!");
                 info!("════════════════════════════════════════════════════════════════");
                 info!("  Market ID:      {}", market.id);
                 info!("  Question:       {}", market.question);
+                info!("  URL:            {}", market_url);
                 info!("  Time Remaining: {} seconds", time_until_end.num_seconds());
                 info!("  End Time:       {}", market.end_time.format("%Y-%m-%d %H:%M:%S UTC"));
                 info!("  Token IDs:      {:?}", market.token_ids);
@@ -193,6 +200,7 @@ impl UpOrDownStrategy {
         for market in markets {
             let market_id = market.id.clone();
             let market_question = market.question.clone();
+            let slug = market.slug.clone();
             let token_ids = market.token_ids.clone();
             let outcomes = market.outcomes.clone();
             let resolution_time = market.resolution_time_str.clone();
@@ -209,6 +217,7 @@ impl UpOrDownStrategy {
                 match spawn_market_tracker(
                     market_id.clone(),
                     market_question,
+                    slug,
                     token_ids,
                     outcomes,
                     resolution_time,
