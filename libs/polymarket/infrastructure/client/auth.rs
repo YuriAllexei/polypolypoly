@@ -1,5 +1,7 @@
 use super::clob::types::ApiCredentials;
+use base64::{engine::general_purpose::URL_SAFE, Engine};
 use ethers::prelude::*;
+use ethers::types::{H256, Signature};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::collections::HashMap;
@@ -84,6 +86,12 @@ impl PolymarketAuth {
     }
 
     /// Generate L2 HMAC signature for API requests
+    ///
+    /// The signature is computed as:
+    /// 1. Base64-decode the API secret
+    /// 2. Build message: timestamp + method + path + body
+    /// 3. HMAC-SHA256 sign with decoded secret
+    /// 4. Base64-encode the signature
     pub fn sign_l2_request(
         &self,
         timestamp: u64,
@@ -96,11 +104,16 @@ impl PolymarketAuth {
             .as_ref()
             .ok_or_else(|| AuthError::SigningError("No API key set".to_string()))?;
 
+        // Base64 decode the secret (URL-safe base64)
+        let secret_bytes = URL_SAFE
+            .decode(&api_key.secret)
+            .map_err(|e| AuthError::HmacError(format!("Failed to decode secret: {}", e)))?;
+
         // Build signature message: timestamp + method + path + body
         let message = format!("{}{}{}{}", timestamp, method, path, body);
 
         // Compute HMAC-SHA256
-        let mut mac = HmacSha256::new_from_slice(api_key.secret.as_bytes())
+        let mut mac = HmacSha256::new_from_slice(&secret_bytes)
             .map_err(|e| AuthError::HmacError(e.to_string()))?;
 
         mac.update(message.as_bytes());
@@ -108,7 +121,8 @@ impl PolymarketAuth {
         let result = mac.finalize();
         let signature_bytes = result.into_bytes();
 
-        Ok(hex::encode(signature_bytes))
+        // Base64 encode the signature (URL-safe)
+        Ok(URL_SAFE.encode(signature_bytes))
     }
 
     /// Build L1 authentication headers
@@ -116,9 +130,10 @@ impl PolymarketAuth {
         let signature = self.sign_l1_message(timestamp, nonce).await?;
 
         let mut headers = HashMap::new();
+        // Use checksummed address to match Python client
         headers.insert(
             "POLY_ADDRESS".to_string(),
-            format!("{:?}", self.wallet_address),
+            ethers::utils::to_checksum(&self.wallet_address, None),
         );
         headers.insert("POLY_SIGNATURE".to_string(), signature);
         headers.insert("POLY_TIMESTAMP".to_string(), timestamp.to_string());
@@ -143,9 +158,10 @@ impl PolymarketAuth {
         let signature = self.sign_l2_request(timestamp, method, path, body)?;
 
         let mut headers = HashMap::new();
+        // Use checksummed address (ethers to_checksum) to match Python client
         headers.insert(
             "POLY_ADDRESS".to_string(),
-            format!("{:?}", self.wallet_address),
+            ethers::utils::to_checksum(&self.wallet_address, None),
         );
         headers.insert("POLY_SIGNATURE".to_string(), signature);
         headers.insert("POLY_TIMESTAMP".to_string(), timestamp.to_string());
@@ -161,6 +177,32 @@ impl PolymarketAuth {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
             .as_secs()
+    }
+
+    /// Get the wallet reference (for order building)
+    pub fn wallet(&self) -> &LocalWallet {
+        &self.wallet
+    }
+
+    /// Get the chain ID
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    /// Sign a raw message hash (for EIP-712 signing)
+    ///
+    /// This signs the 32-byte hash directly without any prefix.
+    /// Used for EIP-712 typed data signing where the hash is already computed.
+    pub fn sign_hash(&self, hash: H256) -> Result<Signature> {
+        self.wallet
+            .sign_hash(hash)
+            .map_err(|e| AuthError::SigningError(e.to_string()))
+    }
+
+    /// Sign a raw message hash and return as hex string
+    pub fn sign_hash_hex(&self, hash: H256) -> Result<String> {
+        let signature = self.sign_hash(hash)?;
+        Ok(format!("0x{}", hex::encode(signature.to_vec())))
     }
 }
 
@@ -201,10 +243,11 @@ mod tests {
         let private_key = "0x1234567890123456789012345678901234567890123456789012345678901234";
         let mut auth = PolymarketAuth::new(private_key, 137).unwrap();
 
-        // Set mock API credentials
+        // Set mock API credentials with valid base64 secret
+        // "dGVzdF9zZWNyZXRfMTIzNDU2" is base64 for "test_secret_123456"
         auth.set_api_key(ApiCredentials {
             key: "test_key".to_string(),
-            secret: "test_secret".to_string(),
+            secret: "dGVzdF9zZWNyZXRfMTIzNDU2".to_string(),
             passphrase: "test_pass".to_string(),
         });
 

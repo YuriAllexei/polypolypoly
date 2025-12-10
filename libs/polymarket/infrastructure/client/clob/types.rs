@@ -76,6 +76,19 @@ pub enum OrderType {
     GTC,  // Good Till Cancel
     FOK,  // Fill Or Kill
     GTD,  // Good Till Date
+    FAK,  // Fill And Kill (partial fills allowed, rest cancelled)
+}
+
+impl OrderType {
+    /// Convert to API string representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OrderType::GTC => "GTC",
+            OrderType::GTD => "GTD",
+            OrderType::FOK => "FOK",
+            OrderType::FAK => "FAK",
+        }
+    }
 }
 
 /// Order creation request
@@ -86,8 +99,8 @@ pub struct OrderArgs {
     pub size: f64,
     pub side: Side,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub feeRateBps: Option<u64>,
+    #[serde(rename = "feeRateBps", skip_serializing_if = "Option::is_none")]
+    pub fee_rate_bps: Option<u64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<u64>,
@@ -116,7 +129,7 @@ pub struct SignedOrder {
     pub order_type: OrderType,
 }
 
-/// Order response from API
+/// Order response from API (legacy)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderResponse {
     #[serde(rename = "orderID")]
@@ -126,6 +139,54 @@ pub struct OrderResponse {
 
     #[serde(default)]
     pub error_msg: Option<String>,
+}
+
+/// Order placement response from CLOB API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderPlacementResponse {
+    /// Order ID if placement was successful
+    #[serde(rename = "orderID", default)]
+    pub order_id: Option<String>,
+
+    /// Whether the order was successfully placed
+    pub success: bool,
+
+    /// Error message if placement failed
+    #[serde(rename = "errorMsg", default)]
+    pub error_msg: Option<String>,
+
+    /// Order status: "matched", "live", "delayed", "unmatched"
+    #[serde(default)]
+    pub status: Option<String>,
+
+    /// Transaction hashes if order was matched
+    #[serde(rename = "orderHashes", default)]
+    pub order_hashes: Option<Vec<String>>,
+}
+
+/// Batch order placement response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchOrderResponse {
+    /// Individual order responses
+    #[serde(default)]
+    pub orders: Vec<OrderPlacementResponse>,
+
+    /// Overall success status
+    pub success: bool,
+}
+
+/// Nonce response from exchange
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NonceResponse {
+    /// Current nonce value as string
+    pub nonce: String,
+}
+
+/// Neg risk response from exchange
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NegRiskResponse {
+    /// Whether the token uses neg_risk exchange
+    pub neg_risk: bool,
 }
 
 /// User position

@@ -17,7 +17,7 @@ tokio = { version = "1", features = ["full"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 serde_yaml = "0.9"
 
 # HTTP client
@@ -77,6 +77,10 @@ path = "src/bin/polymarket_events.rs"
 name = "test_orderbook"
 path = "src/bin/test_orderbook.rs"
 
+[[bin]]
+name = "test_order"
+path = "src/bin/test_order.rs"
+
 [dependencies]
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -88,3 +92,4 @@ chrono = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 dotenv = { workspace = true }
+ethers = { workspace = true }

@@ -7,3 +7,5 @@ bla.json
 /scripts
 /config/strategies_config.yaml
 /config/events_config.yaml
+/py-clob-client
+/magic-proxy-builder-example
