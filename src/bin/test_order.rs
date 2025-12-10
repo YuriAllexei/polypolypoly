@@ -187,10 +187,15 @@ async fn main() -> Result<()> {
         });
     println!("  Neg Risk:   {}", neg_risk);
 
-    // Check if signer == proxy (EOA mode) or signer != proxy (POLY_PROXY mode)
-    // If the private key derives to the same address as the proxy, use EOA signature type
     let use_eoa = signer_addr == proxy_wallet_addr;
-    println!("  Sig Type:   {}", if use_eoa { "EOA (0)" } else { "POLY_PROXY (1)" });
+
+    // Default to GNOSIS_SAFE (2) for browser wallet users when signer != proxy
+    let sig_type_str = if use_eoa {
+        "EOA (0)"
+    } else {
+        "GNOSIS_SAFE (2)"
+    };
+    println!("  Sig Type:   {}", sig_type_str);
 
     // Create order builder
     // - signer = address derived from private key (signs the order)
@@ -199,7 +204,8 @@ async fn main() -> Result<()> {
     let order_builder = if use_eoa {
         OrderBuilder::new_eoa(signer_addr, POLYGON_CHAIN_ID, neg_risk)
     } else {
-        OrderBuilder::new(signer_addr, proxy_wallet_addr, POLYGON_CHAIN_ID, neg_risk)
+        // Use GNOSIS_SAFE for browser wallet users (most common)
+        OrderBuilder::new_gnosis_safe(signer_addr, proxy_wallet_addr, POLYGON_CHAIN_ID, neg_risk)
     };
 
     println!();

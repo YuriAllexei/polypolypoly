@@ -75,6 +75,16 @@ impl OrderBuilder {
         }
     }
 
+    pub fn new_gnosis_safe(signer: Address, maker: Address, chain_id: u64, neg_risk: bool) -> Self {
+        Self {
+            signer,
+            maker,
+            chain_id,
+            signature_type: SIGNATURE_TYPE_POLY_GNOSIS_SAFE,
+            neg_risk,
+        }
+    }
+
     /// Set signature type
     pub fn with_signature_type(mut self, signature_type: u8) -> Self {
         self.signature_type = signature_type;
