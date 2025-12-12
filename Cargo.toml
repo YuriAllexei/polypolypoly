@@ -1,8 +1,5 @@
 [workspace]
-members = [
-    "libs/hypersockets",
-    "libs/polymarket",
-]
+members = ["libs/hypersockets", "libs/polymarket"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,7 +14,10 @@ tokio = { version = "1", features = ["full"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+serde_json = { version = "1", features = [
+    "arbitrary_precision",
+    "preserve_order",
+] }
 serde_yaml = "0.9"
 
 # HTTP client
@@ -73,9 +73,6 @@ path = "src/lib.rs"
 name = "polymarket_events"
 path = "src/bin/polymarket_events.rs"
 
-[[bin]]
-name = "test_orderbook"
-path = "src/bin/test_orderbook.rs"
 
 [[bin]]
 name = "test_order"

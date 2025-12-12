@@ -19,7 +19,8 @@ async fn main() -> Result<()> {
         &config.gamma_api_url,
         300,
         config.closed,
-    ).await?;
+    )
+    .await?;
 
     let sync_interval = config.sync_interval_secs;
 

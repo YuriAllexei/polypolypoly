@@ -7,10 +7,11 @@ pub struct DbMarket {
     pub id: String,
     pub condition_id: Option<String>,
     pub question: String,
+    pub description: Option<String>, // Inherited from parent event
     pub slug: Option<String>,
-    pub start_date: String,  // ISO 8601
-    pub end_date: String,    // ISO 8601
-    pub resolution_time: String,  // ISO 8601
+    pub start_date: String,      // ISO 8601
+    pub end_date: String,        // ISO 8601
+    pub resolution_time: String, // ISO 8601
     pub active: bool,
     pub closed: bool,
     pub archived: bool,
@@ -28,8 +29,7 @@ pub struct DbMarket {
 impl DbMarket {
     /// Convert to DateTime for resolution_time
     pub fn resolution_datetime(&self) -> Result<DateTime<Utc>, chrono::ParseError> {
-        DateTime::parse_from_rfc3339(&self.resolution_time)
-            .map(|dt| dt.with_timezone(&Utc))
+        DateTime::parse_from_rfc3339(&self.resolution_time).map(|dt| dt.with_timezone(&Utc))
     }
 
     /// Get outcomes as Vec
@@ -68,24 +68,6 @@ impl DbMarket {
     }
 }
 
-/// LLM cache entry in database
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct DbLLMCache {
-    pub question: String,
-    pub market_id: String,
-    pub compatible: bool,
-    pub checked_at: String,  // ISO 8601
-    pub resolution_time: String,  // ISO 8601
-}
-
-impl DbLLMCache {
-    /// Convert checked_at to DateTime
-    pub fn checked_datetime(&self) -> Result<DateTime<Utc>, chrono::ParseError> {
-        DateTime::parse_from_rfc3339(&self.checked_at)
-            .map(|dt| dt.with_timezone(&Utc))
-    }
-}
-
 /// Database representation of an event
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DbEvent {
@@ -94,8 +76,8 @@ pub struct DbEvent {
     pub slug: Option<String>,
     pub title: String,
     pub description: Option<String>,
-    pub start_date: Option<String>,  // ISO 8601
-    pub end_date: Option<String>,    // ISO 8601
+    pub start_date: Option<String>, // ISO 8601
+    pub end_date: Option<String>,   // ISO 8601
     pub active: bool,
     pub closed: bool,
     pub archived: bool,
@@ -122,18 +104,16 @@ pub struct DbEvent {
 impl DbEvent {
     /// Convert end_date to DateTime
     pub fn end_datetime(&self) -> Option<Result<DateTime<Utc>, chrono::ParseError>> {
-        self.end_date.as_ref().map(|date| {
-            DateTime::parse_from_rfc3339(date)
-                .map(|dt| dt.with_timezone(&Utc))
-        })
+        self.end_date
+            .as_ref()
+            .map(|date| DateTime::parse_from_rfc3339(date).map(|dt| dt.with_timezone(&Utc)))
     }
 
     /// Convert start_date to DateTime
     pub fn start_datetime(&self) -> Option<Result<DateTime<Utc>, chrono::ParseError>> {
-        self.start_date.as_ref().map(|date| {
-            DateTime::parse_from_rfc3339(date)
-                .map(|dt| dt.with_timezone(&Utc))
-        })
+        self.start_date
+            .as_ref()
+            .map(|date| DateTime::parse_from_rfc3339(date).map(|dt| dt.with_timezone(&Utc)))
     }
 
     /// Get tags as JSON Value
@@ -152,52 +132,6 @@ pub struct SyncStats {
     pub markets_inserted: usize,
     pub markets_updated: usize,
     pub duration: std::time::Duration,
-}
-
-/// Database representation of a detected opportunity
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct DbOpportunity {
-    pub id: Option<i64>,
-    pub market_id: String,
-    pub event_id: Option<String>,
-    pub token_id: String,
-    pub outcome: String,
-    pub ask_price: f64,
-    pub liquidity: f64,
-    pub resolution_time: String,  // ISO 8601
-    pub detected_at: String,      // ISO 8601
-}
-
-impl DbOpportunity {
-    /// Create a new opportunity record
-    pub fn new(
-        market_id: String,
-        event_id: Option<String>,
-        token_id: String,
-        outcome: String,
-        ask_price: f64,
-        liquidity: f64,
-        resolution_time: String,
-        detected_at: String,
-    ) -> Self {
-        Self {
-            id: None,
-            market_id,
-            event_id,
-            token_id,
-            outcome,
-            ask_price,
-            liquidity,
-            resolution_time,
-            detected_at,
-        }
-    }
-
-    /// Convert detected_at to DateTime
-    pub fn detected_datetime(&self) -> Result<DateTime<Utc>, chrono::ParseError> {
-        DateTime::parse_from_rfc3339(&self.detected_at)
-            .map(|dt| dt.with_timezone(&Utc))
-    }
 }
 
 /// Query filters for markets
@@ -287,6 +221,7 @@ mod tests {
             id: "test".to_string(),
             condition_id: Some("0x123".to_string()),
             question: "Test?".to_string(),
+            description: None,
             slug: None,
             start_date: "2025-01-01T00:00:00Z".to_string(),
             end_date: "2025-01-02T00:00:00Z".to_string(),
@@ -319,6 +254,7 @@ mod tests {
             id: "test".to_string(),
             condition_id: Some("0x123".to_string()),
             question: "Test?".to_string(),
+            description: None,
             slug: None,
             start_date: "2025-01-01T00:00:00Z".to_string(),
             end_date: "2025-01-02T00:00:00Z".to_string(),

@@ -10,7 +10,7 @@ pub enum SchemaError {
 pub type Result<T> = std::result::Result<T, SchemaError>;
 
 /// Database schema version
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 
 /// Initialize database schema
 pub async fn initialize_schema(pool: &PgPool) -> Result<()> {
@@ -21,6 +21,7 @@ pub async fn initialize_schema(pool: &PgPool) -> Result<()> {
             id TEXT PRIMARY KEY,
             condition_id TEXT,
             question TEXT NOT NULL,
+            description TEXT,
             slug TEXT,
             start_date TEXT NOT NULL,
             end_date TEXT NOT NULL,
@@ -222,6 +223,12 @@ pub async fn initialize_schema(pool: &PgPool) -> Result<()> {
         .await?;
 
     sqlx::query("ALTER TABLE events ADD COLUMN IF NOT EXISTS tags TEXT")
+        .execute(pool)
+        .await?;
+
+    // Migration: Add description column to markets table (v5)
+    // This stores the parent event's description for quick access
+    sqlx::query("ALTER TABLE markets ADD COLUMN IF NOT EXISTS description TEXT")
         .execute(pool)
         .await?;
 

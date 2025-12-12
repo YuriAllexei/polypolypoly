@@ -2,14 +2,13 @@ pub mod models;
 pub mod schema;
 
 use chrono::{DateTime, Duration, Utc};
-use sqlx::{postgres::PgPoolOptions, PgPool, QueryBuilder, Postgres};
+use sqlx::{postgres::PgPoolOptions, PgPool, Postgres, QueryBuilder};
 use thiserror::Error;
 use tracing::{debug, info};
 
 // Re-export main types
-pub use models::{DbEvent, DbLLMCache, DbMarket, DbOpportunity, MarketFilters, SyncStats};
+pub use models::{DbEvent, DbMarket, MarketFilters, SyncStats};
 pub use schema::{get_schema_version, initialize_schema};
-
 
 #[derive(Error, Debug)]
 pub enum DatabaseError {
@@ -67,13 +66,14 @@ impl MarketDatabase {
         sqlx::query(
             r#"
             INSERT INTO markets (
-                id, condition_id, question, slug, start_date, end_date, resolution_time,
+                id, condition_id, question, description, slug, start_date, end_date, resolution_time,
                 active, closed, archived, market_type, category, liquidity, volume,
                 outcomes, token_ids, tags, last_updated, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
             ON CONFLICT (id) DO UPDATE SET
                 condition_id = EXCLUDED.condition_id,
                 question = EXCLUDED.question,
+                description = EXCLUDED.description,
                 slug = EXCLUDED.slug,
                 start_date = EXCLUDED.start_date,
                 end_date = EXCLUDED.end_date,
@@ -94,6 +94,7 @@ impl MarketDatabase {
         .bind(&market.id)
         .bind(&market.condition_id)
         .bind(&market.question)
+        .bind(&market.description)
         .bind(&market.slug)
         .bind(&market.start_date)
         .bind(&market.end_date)
@@ -143,16 +144,17 @@ impl MarketDatabase {
         for chunk in markets.chunks(BATCH_SIZE) {
             let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 r#"INSERT INTO markets (
-                    id, condition_id, question, slug, start_date, end_date, resolution_time,
+                    id, condition_id, question, description, slug, start_date, end_date, resolution_time,
                     active, closed, archived, market_type, category, liquidity, volume,
                     outcomes, token_ids, tags, last_updated, created_at
-                ) "#
+                ) "#,
             );
 
             query_builder.push_values(chunk, |mut b, market| {
                 b.push_bind(&market.id)
                     .push_bind(&market.condition_id)
                     .push_bind(&market.question)
+                    .push_bind(&market.description)
                     .push_bind(&market.slug)
                     .push_bind(&market.start_date)
                     .push_bind(&market.end_date)
@@ -175,6 +177,7 @@ impl MarketDatabase {
                 r#" ON CONFLICT (id) DO UPDATE SET
                     condition_id = EXCLUDED.condition_id,
                     question = EXCLUDED.question,
+                    description = EXCLUDED.description,
                     slug = EXCLUDED.slug,
                     start_date = EXCLUDED.start_date,
                     end_date = EXCLUDED.end_date,
@@ -189,7 +192,7 @@ impl MarketDatabase {
                     outcomes = EXCLUDED.outcomes,
                     token_ids = EXCLUDED.token_ids,
                     tags = EXCLUDED.tags,
-                    last_updated = EXCLUDED.last_updated"#
+                    last_updated = EXCLUDED.last_updated"#,
             );
 
             let query = query_builder.build();
@@ -333,82 +336,11 @@ impl MarketDatabase {
 
     /// Delete resolved markets older than cutoff date
     pub async fn cleanup_resolved(&self, before: DateTime<Utc>) -> Result<u64> {
-        let result = sqlx::query("DELETE FROM markets WHERE closed = true AND resolution_time < $1")
-            .bind(before.to_rfc3339())
-            .execute(&self.pool)
-            .await?;
-
-        Ok(result.rows_affected())
-    }
-
-    // ==================== LLM CACHE OPERATIONS ====================
-
-    /// Get LLM cache entry by question
-    pub async fn get_llm_cache(&self, question: &str) -> Result<Option<DbLLMCache>> {
-        let cache = sqlx::query_as::<_, DbLLMCache>("SELECT * FROM llm_cache WHERE question = $1")
-            .bind(question)
-            .fetch_optional(&self.pool)
-            .await?;
-
-        Ok(cache)
-    }
-
-    /// Insert LLM cache entry
-    pub async fn insert_llm_cache(&self, entry: DbLLMCache) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO llm_cache (question, market_id, compatible, checked_at, resolution_time)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (question) DO UPDATE SET
-                market_id = EXCLUDED.market_id,
-                compatible = EXCLUDED.compatible,
-                checked_at = EXCLUDED.checked_at,
-                resolution_time = EXCLUDED.resolution_time
-            "#,
-        )
-        .bind(&entry.question)
-        .bind(&entry.market_id)
-        .bind(entry.compatible)
-        .bind(&entry.checked_at)
-        .bind(&entry.resolution_time)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
-
-    /// Get all compatible markets from LLM cache
-    pub async fn get_compatible_markets(&self) -> Result<Vec<String>> {
-        let ids: Vec<(String,)> =
-            sqlx::query_as("SELECT market_id FROM llm_cache WHERE compatible = true")
-                .fetch_all(&self.pool)
+        let result =
+            sqlx::query("DELETE FROM markets WHERE closed = true AND resolution_time < $1")
+                .bind(before.to_rfc3339())
+                .execute(&self.pool)
                 .await?;
-
-        Ok(ids.into_iter().map(|(id,)| id).collect())
-    }
-
-    /// Get LLM cache statistics
-    pub async fn llm_cache_stats(&self) -> Result<(i64, i64, i64)> {
-        let (total,) = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM llm_cache")
-            .fetch_one(&self.pool)
-            .await?;
-
-        let (compatible,) =
-            sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM llm_cache WHERE compatible = true")
-                .fetch_one(&self.pool)
-                .await?;
-
-        let incompatible = total - compatible;
-
-        Ok((total, compatible, incompatible))
-    }
-
-    /// Cleanup old LLM cache entries
-    pub async fn cleanup_llm_cache(&self, before: DateTime<Utc>) -> Result<u64> {
-        let result = sqlx::query("DELETE FROM llm_cache WHERE checked_at < $1")
-            .bind(before.to_rfc3339())
-            .execute(&self.pool)
-            .await?;
 
         Ok(result.rows_affected())
     }
@@ -514,7 +446,7 @@ impl MarketDatabase {
                     liquidity, volume, volume_24hr, volume_1wk, volume_1mo, volume_1yr,
                     open_interest, image, icon, category, competitive, tags, comment_count,
                     created_at, updated_at, last_synced
-                ) "#
+                ) "#,
             );
 
             query_builder.push_values(chunk, |mut b, event| {
@@ -575,7 +507,7 @@ impl MarketDatabase {
                     tags = EXCLUDED.tags,
                     comment_count = EXCLUDED.comment_count,
                     updated_at = EXCLUDED.updated_at,
-                    last_synced = EXCLUDED.last_synced"#
+                    last_synced = EXCLUDED.last_synced"#,
             );
 
             let query = query_builder.build();
@@ -599,7 +531,9 @@ impl MarketDatabase {
             // Silently skip FK constraint violations (market doesn't exist yet)
             if let Err(e) = result {
                 let err_str = e.to_string();
-                if err_str.contains("foreign key constraint") || err_str.contains("violates foreign key") {
+                if err_str.contains("foreign key constraint")
+                    || err_str.contains("violates foreign key")
+                {
                     debug!("Skipping link for non-existent market: {}", market_id);
                     continue;
                 }
@@ -622,9 +556,8 @@ impl MarketDatabase {
         let mut total_linked = 0;
 
         for chunk in links.chunks(BATCH_SIZE) {
-            let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
-                "INSERT INTO event_markets (event_id, market_id) "
-            );
+            let mut query_builder: QueryBuilder<Postgres> =
+                QueryBuilder::new("INSERT INTO event_markets (event_id, market_id) ");
 
             query_builder.push_values(chunk, |mut b, (event_id, market_id)| {
                 b.push_bind(event_id).push_bind(market_id);
@@ -640,7 +573,9 @@ impl MarketDatabase {
                 Ok(r) => total_linked += r.rows_affected() as usize,
                 Err(e) => {
                     let err_str = e.to_string();
-                    if !err_str.contains("foreign key constraint") && !err_str.contains("violates foreign key") {
+                    if !err_str.contains("foreign key constraint")
+                        && !err_str.contains("violates foreign key")
+                    {
                         return Err(e.into());
                     }
                     // FK violation - some links failed, but that's expected
@@ -702,9 +637,7 @@ impl MarketDatabase {
         }
 
         // Build placeholders: $1, $2, $3, ...
-        let placeholders: Vec<String> = (1..=tag_labels.len())
-            .map(|i| format!("${}", i))
-            .collect();
+        let placeholders: Vec<String> = (1..=tag_labels.len()).map(|i| format!("${}", i)).collect();
         let placeholders_str = placeholders.join(", ");
 
         let query = format!(
@@ -739,9 +672,7 @@ impl MarketDatabase {
         }
 
         // Build placeholders: $1, $2, $3, ...
-        let placeholders: Vec<String> = (1..=tag_labels.len())
-            .map(|i| format!("${}", i))
-            .collect();
+        let placeholders: Vec<String> = (1..=tag_labels.len()).map(|i| format!("${}", i)).collect();
         let placeholders_str = placeholders.join(", ");
 
         let query = format!(
@@ -780,9 +711,10 @@ impl MarketDatabase {
 
     /// Get active event count
     pub async fn active_event_count(&self) -> Result<i64> {
-        let (count,) = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM events WHERE closed = false")
-            .fetch_one(&self.pool)
-            .await?;
+        let (count,) =
+            sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM events WHERE closed = false")
+                .fetch_one(&self.pool)
+                .await?;
 
         Ok(count)
     }
@@ -806,59 +738,13 @@ impl MarketDatabase {
     /// Get event ID for a specific market (reverse lookup)
     pub async fn get_market_event_id(&self, market_id: &str) -> Result<Option<String>> {
         let result = sqlx::query_as::<_, (String,)>(
-            "SELECT event_id FROM event_markets WHERE market_id = $1"
+            "SELECT event_id FROM event_markets WHERE market_id = $1",
         )
         .bind(market_id)
         .fetch_optional(&self.pool)
         .await?;
 
         Ok(result.map(|(event_id,)| event_id))
-    }
-
-    // ==================== OPPORTUNITY OPERATIONS ====================
-
-    /// Insert an opportunity record (ignores duplicates based on market_id + token_id)
-    pub async fn insert_opportunity(&self, opp: &models::DbOpportunity) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO opportunities
-            (market_id, event_id, token_id, outcome, ask_price, liquidity, resolution_time, detected_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT DO NOTHING
-            "#,
-        )
-        .bind(&opp.market_id)
-        .bind(&opp.event_id)
-        .bind(&opp.token_id)
-        .bind(&opp.outcome)
-        .bind(opp.ask_price)
-        .bind(opp.liquidity)
-        .bind(&opp.resolution_time)
-        .bind(&opp.detected_at)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
-
-    /// Get all opportunities
-    pub async fn get_opportunities(&self) -> Result<Vec<models::DbOpportunity>> {
-        let opportunities = sqlx::query_as::<_, models::DbOpportunity>(
-            "SELECT * FROM opportunities ORDER BY detected_at DESC"
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(opportunities)
-    }
-
-    /// Get opportunity count
-    pub async fn opportunity_count(&self) -> Result<i64> {
-        let (count,) = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM opportunities")
-            .fetch_one(&self.pool)
-            .await?;
-
-        Ok(count)
     }
 
     // ==================== UTILITY ====================

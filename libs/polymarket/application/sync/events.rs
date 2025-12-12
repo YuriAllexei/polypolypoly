@@ -169,6 +169,9 @@ impl EventSyncService {
             .as_ref()
             .map(|tags| serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string()));
 
+        // Get event description to pass to markets
+        let event_description = event.description.clone();
+
         // Convert to DbEvent
         let db_event = Self::event_to_db_event(event);
 
@@ -189,9 +192,9 @@ impl EventSyncService {
                     event_id
                 );
 
-                // Save each market (inheriting tags from parent event)
+                // Save each market (inheriting tags and description from parent event)
                 for market in markets {
-                     let db_market = Self::market_to_db_market(market, event_tags_json.clone())?;
+                     let db_market = Self::market_to_db_market(market, event_tags_json.clone(), event_description.clone())?;
                      if let Err(e) = self.database.upsert_market(db_market).await {
                          warn!("Failed to save market: {}", e);
                      }
@@ -247,7 +250,11 @@ impl EventSyncService {
         }
     }
 
-    pub fn market_to_db_market(market: &Market, event_tags: Option<String>) -> anyhow::Result<DbMarket> {
+    pub fn market_to_db_market(
+        market: &Market,
+        event_tags: Option<String>,
+        event_description: Option<String>,
+    ) -> anyhow::Result<DbMarket> {
         let now = Utc::now().to_rfc3339();
 
         let outcomes_json = market
@@ -262,6 +269,7 @@ impl EventSyncService {
             id: market.id.clone().unwrap_or_default(),
             condition_id: market.condition_id.clone(),
             question: market.question.clone().unwrap_or_default(),
+            description: event_description,
             slug: market.slug.clone(),
             start_date: market.start_date.clone().unwrap_or_else(|| now.clone()),
             end_date: market.end_date.clone().unwrap_or_else(|| now.clone()),

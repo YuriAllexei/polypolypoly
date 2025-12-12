@@ -177,6 +177,7 @@ impl MarketSyncService {
             id: gamma.id.clone().unwrap_or_default(),
             condition_id: gamma.condition_id.clone(),
             question: gamma.question.clone().unwrap_or_default(),
+            description: None, // Markets synced directly from Gamma don't have parent event description
             slug: gamma.slug.clone(),
             start_date: gamma.start_date.clone().unwrap_or_else(|| now.clone()),
             end_date: gamma.end_date.clone().unwrap_or_else(|| now.clone()),

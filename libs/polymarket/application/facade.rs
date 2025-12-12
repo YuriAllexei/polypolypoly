@@ -3,68 +3,16 @@
 //! Public API for binaries (presentation layer).
 //! Provides simplified access to application use cases.
 
-use super::{
-    EventSyncService,
-    sniper::MarketTrackerService,
-};
+use super::EventSyncService;
 use crate::domain::SniperMarket;
 use crate::infrastructure::{
-    Heartbeat, MarketDatabase, ShutdownManager, init_tracing, init_tracing_with_level,
     database::{DbEvent, DbMarket},
+    init_tracing, init_tracing_with_level, Heartbeat, MarketDatabase, ShutdownManager,
 };
-use tracing::{debug, info};
 use std::sync::Arc;
+use tracing::{debug, info};
 
 // Note: Configuration and tracking services are now in application::sniper module
-
-/// Application facade for market sniper use case
-pub struct SniperApp {
-    pub database: Arc<MarketDatabase>,
-    pub shutdown: ShutdownManager,
-    pub heartbeat: Heartbeat,
-    pub tracker: MarketTrackerService,
-}
-
-impl SniperApp {
-    /// Initialize sniper application
-    pub async fn new(database_url: &str, heartbeat_interval: u64) -> anyhow::Result<Self> {
-        let database = Arc::new(MarketDatabase::new(database_url).await?);
-        let shutdown = ShutdownManager::new();
-        let tracker = MarketTrackerService::new();
-        shutdown.spawn_signal_handler();
-        let heartbeat = Heartbeat::new(heartbeat_interval);
-
-        Ok(Self {
-            database,
-            shutdown,
-            heartbeat,
-            tracker,
-        })
-    }
-
-    /// Check if app is still running
-    pub fn is_running(&self) -> bool {
-        self.shutdown.is_running()
-    }
-
-    /// Check if heartbeat should log
-    pub fn should_heartbeat(&self) -> bool {
-        self.heartbeat.should_beat()
-    }
-
-    /// Record heartbeat
-    pub fn beat(&mut self) {
-        self.heartbeat.beat();
-    }
-
-    /// Get markets expiring soon
-    pub async fn get_expiring_markets(
-        &self,
-        delta_seconds: f64,
-    ) -> anyhow::Result<Vec<crate::domain::models::DbMarket>> {
-        Ok(self.database.get_markets_expiring_soon(delta_seconds).await?)
-    }
-}
 
 /// Application facade for event sync use case.
 ///
@@ -132,7 +80,12 @@ impl EventSyncApp {
                 )
             };
 
-            debug!(page = page, offset = offset, limit = LIMIT, "Fetching events page");
+            debug!(
+                page = page,
+                offset = offset,
+                limit = LIMIT,
+                "Fetching events page"
+            );
 
             let response = self.sync_service.http_client.get(&url).send().await?;
             let text = response.text().await?;
@@ -167,15 +120,22 @@ impl EventSyncApp {
                     .as_ref()
                     .map(|tags| serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string()));
 
+                // Get event description to pass to markets
+                let event_description = event.description.clone();
+
                 // Convert and collect event
                 let db_event = crate::application::sync::EventSyncService::event_to_db_event(event);
                 db_events.push(db_event);
 
-                // Process markets for this event (inheriting tags from parent event)
+                // Process markets for this event (inheriting tags and description from parent event)
                 if let Some(markets) = &event.markets {
                     for market in markets {
                         if let Ok(db_market) =
-                            crate::application::sync::EventSyncService::market_to_db_market(market, event_tags_json.clone())
+                            crate::application::sync::EventSyncService::market_to_db_market(
+                                market,
+                                event_tags_json.clone(),
+                                event_description.clone(),
+                            )
                         {
                             debug!(
                                 market_id = %db_market.id,
@@ -193,15 +153,27 @@ impl EventSyncApp {
             }
 
             // Batch upsert all events
-            let events_upserted = self.sync_service.database.batch_upsert_events(&db_events).await?;
+            let events_upserted = self
+                .sync_service
+                .database
+                .batch_upsert_events(&db_events)
+                .await?;
             debug!(count = events_upserted, "Batch upserted events");
 
             // Batch upsert all markets
-            let markets_upserted = self.sync_service.database.batch_upsert_markets(&db_markets).await?;
+            let markets_upserted = self
+                .sync_service
+                .database
+                .batch_upsert_markets(&db_markets)
+                .await?;
             debug!(count = markets_upserted, "Batch upserted markets");
 
             // Batch link events to markets
-            let links_created = self.sync_service.database.batch_link_event_markets(&event_market_links).await?;
+            let links_created = self
+                .sync_service
+                .database
+                .batch_link_event_markets(&event_market_links)
+                .await?;
             debug!(count = links_created, "Batch linked event-markets");
 
             total_events += events_upserted;
