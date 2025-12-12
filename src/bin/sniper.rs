@@ -10,6 +10,7 @@ use anyhow::{bail, Result};
 use polymarket::application::{
     create_strategy, init_logging_with_level, Strategy, StrategyContext, StrategyType,
 };
+use polymarket::infrastructure::client::clob::TradingClient;
 use polymarket::infrastructure::config::StrategiesConfig;
 use polymarket::infrastructure::database::MarketDatabase;
 use polymarket::infrastructure::shutdown::ShutdownManager;
@@ -71,8 +72,17 @@ async fn main() -> Result<()> {
     shutdown.spawn_signal_handler();
     let database = Arc::new(MarketDatabase::new(&database_url).await?);
 
+    // Initialize trading client (loads credentials from env)
+    info!("Initializing trading client...");
+    let trading = Arc::new(TradingClient::from_env().await?);
+    info!(
+        "Trading client initialized: signer={:?}, maker={:?}",
+        trading.signer_address(),
+        trading.maker_address()
+    );
+
     // Create strategy context
-    let ctx = StrategyContext::new(database, shutdown.clone());
+    let ctx = StrategyContext::new(database, shutdown.clone(), trading);
 
     // Run strategy lifecycle
     info!("Initializing strategy: {}", strategy.name());

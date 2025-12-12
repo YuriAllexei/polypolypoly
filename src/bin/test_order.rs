@@ -1,10 +1,10 @@
 //! Test binary for order placement
 //!
-//! Tests the EIP-712 signed order placement functionality.
+//! Tests the EIP-712 signed order placement functionality using TradingClient.
 //!
 //! Requires environment variables in `.env`:
 //!   - PRIVATE_KEY (with 0x prefix) - the signer address is derived from this
-//!   - PROXY_WALLET (your Polymarket proxy wallet address from reveal.polymarket.com)
+//!   - PROXY_WALLET (optional - your Polymarket proxy wallet from reveal.polymarket.com)
 //!   - API_KEY, API_SECRET, API_PASSPHRASE (optional - will be derived if not provided)
 //!
 //! Usage:
@@ -17,21 +17,18 @@
 //!   # Place a FOK sell order
 //!   cargo run --bin test_order -- 123456... 0.60 5 sell fok
 
-use anyhow::{bail, Context, Result};
-use ethers::types::Address;
-use polymarket::infrastructure::client::auth::PolymarketAuth;
-use polymarket::infrastructure::client::clob::{
-    OrderBuilder, OrderType, RestClient, Side, POLYGON_CHAIN_ID,
-};
+use anyhow::{bail, Result};
+use polymarket::infrastructure::client::clob::{OrderType, Side, TradingClient};
 use std::env;
-use tracing::{error, info};
-
-const CLOB_URL: &str = "https://clob.polymarket.com";
+use tracing::error;
 
 fn print_usage(program: &str) {
     println!("Order Placement Test");
     println!();
-    println!("Usage: {} <token_id> <price> <size> <side> [order_type]", program);
+    println!(
+        "Usage: {} <token_id> <price> <size> <side> [order_type]",
+        program
+    );
     println!();
     println!("Arguments:");
     println!("  token_id    ERC1155 conditional token ID");
@@ -41,8 +38,10 @@ fn print_usage(program: &str) {
     println!("  order_type  Optional: 'gtc' (default), 'fok', 'gtd', or 'fak'");
     println!();
     println!("Environment Variables (set in .env file):");
-    println!("  PRIVATE_KEY     Your Ethereum private key (0x prefixed) - signer address derived from this");
-    println!("  PROXY_WALLET    Your Polymarket proxy wallet (from reveal.polymarket.com)");
+    println!("  PRIVATE_KEY     Your Ethereum private key (0x prefixed)");
+    println!(
+        "  PROXY_WALLET    Your Polymarket proxy wallet (optional, from reveal.polymarket.com)"
+    );
     println!("  API_KEY         Polymarket API key (optional - will be derived if not provided)");
     println!("  API_SECRET      Polymarket API secret (optional)");
     println!("  API_PASSPHRASE  Polymarket API passphrase (optional)");
@@ -69,15 +68,15 @@ fn parse_order_type(s: &str) -> Result<OrderType> {
         "fok" => Ok(OrderType::FOK),
         "gtd" => Ok(OrderType::GTD),
         "fak" => Ok(OrderType::FAK),
-        _ => bail!("Invalid order type '{}'. Use 'gtc', 'fok', 'gtd', or 'fak'", s),
+        _ => bail!(
+            "Invalid order type '{}'. Use 'gtc', 'fok', 'gtd', or 'fak'",
+            s
+        ),
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load .env file
-    dotenv::dotenv().ok();
-
     // Initialize logging
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -92,26 +91,14 @@ async fn main() -> Result<()> {
 
     // Parse arguments
     let token_id = &args[1];
-    let price: f64 = args[2]
-        .parse()
-        .context("Failed to parse price as number")?;
-    let size: f64 = args[3]
-        .parse()
-        .context("Failed to parse size as number")?;
+    let price: f64 = args[2].parse()?;
+    let size: f64 = args[3].parse()?;
     let side = parse_side(&args[4])?;
     let order_type = if args.len() > 5 {
         parse_order_type(&args[5])?
     } else {
         OrderType::GTC
     };
-
-    // Validate inputs
-    if price <= 0.0 || price >= 1.0 {
-        bail!("Price must be between 0 and 1 (exclusive), got: {}", price);
-    }
-    if size <= 0.0 {
-        bail!("Size must be positive, got: {}", size);
-    }
 
     println!();
     println!("════════════════════════════════════════════════════════════════");
@@ -127,105 +114,23 @@ async fn main() -> Result<()> {
     println!("  Est. Cost:  ${:.4}", price * size);
     println!();
 
-    // Load credentials from environment
-    let private_key = env::var("PRIVATE_KEY")
-        .context("PRIVATE_KEY not found in environment. Check your .env file.")?;
+    // Initialize trading client (handles all auth setup automatically)
+    println!("Initializing trading client...");
+    let client = TradingClient::from_env().await?;
 
-    let proxy_wallet = env::var("PROXY_WALLET")
-        .context("PROXY_WALLET not found. Get your proxy wallet address from reveal.polymarket.com")?;
-
-    info!("Setting up authentication...");
-
-    // Create auth manager
-    let mut auth = PolymarketAuth::new(&private_key, POLYGON_CHAIN_ID)
-        .context("Failed to create auth from private key")?;
-
-    // Signer address is derived from the private key (NOT from WALLET_ADDRESS env var)
-    // This must match the address the API expects for signature verification
-    let signer_addr: Address = auth.address();
-
-    let proxy_wallet_addr: Address = proxy_wallet
-        .parse()
-        .context("Failed to parse PROXY_WALLET as address")?;
-
-    println!("  Signer:     {:?}", signer_addr);
-    println!("  Proxy:      {:?}", proxy_wallet_addr);
-
-    // Create REST client
-    let rest_client = RestClient::new(CLOB_URL);
-
-    // Check if we have API credentials in env, otherwise derive them
-    let api_key = env::var("API_KEY").ok();
-    let api_secret = env::var("API_SECRET").ok();
-    let api_passphrase = env::var("API_PASSPHRASE").ok();
-
-    if let (Some(key), Some(secret), Some(passphrase)) = (api_key, api_secret, api_passphrase) {
-        info!("Using API credentials from environment");
-        auth.set_api_key(polymarket::infrastructure::client::clob::ApiCredentials {
-            key,
-            secret,
-            passphrase,
-        });
-    } else {
-        info!("Deriving API credentials from private key...");
-        let creds = rest_client
-            .get_or_create_api_creds(&auth)
-            .await
-            .context("Failed to get or create API credentials")?;
-        auth.set_api_key(creds);
-        info!("API credentials obtained successfully");
-    }
-
-    // Fetch neg_risk status for this token (affects EIP-712 domain)
-    info!("Checking neg_risk status for token...");
-    let neg_risk = rest_client
-        .get_neg_risk(token_id)
-        .await
-        .unwrap_or_else(|e| {
-            info!("Could not fetch neg_risk ({}), defaulting to false", e);
-            false
-        });
-    println!("  Neg Risk:   {}", neg_risk);
-
-    let use_eoa = signer_addr == proxy_wallet_addr;
-
-    // Default to GNOSIS_SAFE (2) for browser wallet users when signer != proxy
-    let sig_type_str = if use_eoa {
-        "EOA (0)"
-    } else {
-        "GNOSIS_SAFE (2)"
-    };
-    println!("  Sig Type:   {}", sig_type_str);
-
-    // Create order builder
-    // - signer = address derived from private key (signs the order)
-    // - maker = proxy wallet (where funds are held) - same as signer for EOA
-    // - neg_risk = whether market uses neg_risk exchange for EIP-712 domain
-    let order_builder = if use_eoa {
-        OrderBuilder::new_eoa(signer_addr, POLYGON_CHAIN_ID, neg_risk)
-    } else {
-        // Use GNOSIS_SAFE for browser wallet users (most common)
-        OrderBuilder::new_gnosis_safe(signer_addr, proxy_wallet_addr, POLYGON_CHAIN_ID, neg_risk)
-    };
-
+    println!("  Signer:     {:?}", client.signer_address());
+    println!("  Maker:      {:?}", client.maker_address());
+    println!("  Sig Type:   Gnosis Safe (2)");
     println!();
+
     println!("════════════════════════════════════════════════════════════════");
     println!("PLACING ORDER...");
     println!("════════════════════════════════════════════════════════════════");
     println!();
 
     // Place the order
-    let result = rest_client
-        .place_signed_order(
-            &auth,
-            &order_builder,
-            token_id,
-            price,
-            size,
-            side,
-            order_type,
-            None, // default fee rate
-        )
+    let result = client
+        .place_order(token_id, price, size, side, order_type)
         .await;
 
     match result {
@@ -244,9 +149,9 @@ async fn main() -> Result<()> {
                     println!("  Tx Hashes:  {:?}", hashes);
                 }
             }
-            if let Some(error) = &response.error_msg {
-                if !error.is_empty() {
-                    println!("  Error:      {}", error);
+            if let Some(err) = &response.error_msg {
+                if !err.is_empty() {
+                    println!("  Error:      {}", err);
                 }
             }
             println!();

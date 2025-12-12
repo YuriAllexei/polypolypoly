@@ -1,0 +1,471 @@
+//! High-level trading client for Polymarket
+//!
+//! Provides a simplified API for order placement by encapsulating
+//! authentication, credential management, and order building.
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//! use polymarket::infrastructure::client::clob::TradingClient;
+//!
+//! // Initialize once (loads credentials from env)
+//! let client = TradingClient::from_env().await?;
+//!
+//! // Place orders with minimal parameters
+//! let result = client.buy("token_id", 0.50, 10.0).await?;
+//! let result = client.sell("token_id", 0.60, 5.0).await?;
+//!
+//! // Or with more control
+//! let result = client
+//!     .order("token_id")
+//!     .price(0.50)
+//!     .size(10.0)
+//!     .buy()
+//!     .fok()
+//!     .execute()
+//!     .await?;
+//! ```
+
+use super::super::auth::PolymarketAuth;
+use super::order_builder::OrderBuilder;
+use super::rest::{RestClient, RestError};
+use super::types::{ApiCredentials, OrderPlacementResponse, OrderType, Side};
+use super::POLYGON_CHAIN_ID;
+use ethers::types::Address;
+use std::collections::HashMap;
+use std::env;
+use std::sync::RwLock;
+use thiserror::Error;
+use tracing::{debug, info};
+
+const DEFAULT_CLOB_URL: &str = "https://clob.polymarket.com";
+
+#[derive(Error, Debug)]
+pub enum TradingError {
+    #[error("Environment variable '{0}' not set")]
+    EnvVarMissing(String),
+
+    #[error("Invalid address: {0}")]
+    InvalidAddress(String),
+
+    #[error("REST API error: {0}")]
+    RestError(#[from] RestError),
+
+    #[error("Auth error: {0}")]
+    AuthError(#[from] super::super::auth::AuthError),
+
+    #[error("Invalid parameter: {0}")]
+    InvalidParameter(String),
+}
+
+pub type Result<T> = std::result::Result<T, TradingError>;
+
+/// High-level trading client for Polymarket
+///
+/// Encapsulates all the complexity of authentication, credential management,
+/// and order building into a simple API.
+pub struct TradingClient {
+    auth: PolymarketAuth,
+    rest: RestClient,
+    signer_addr: Address,
+    proxy_addr: Option<Address>,
+    /// Cache of neg_risk status per token_id
+    neg_risk_cache: RwLock<HashMap<String, bool>>,
+}
+
+impl TradingClient {
+    /// Create a new trading client from environment variables
+    ///
+    /// Required env vars:
+    /// - `PRIVATE_KEY`: Ethereum private key (0x prefixed)
+    ///
+    /// Optional env vars:
+    /// - `PROXY_WALLET`: Polymarket proxy wallet (if different from signer)
+    /// - `API_KEY`, `API_SECRET`, `API_PASSPHRASE`: Pre-existing API credentials
+    /// - `CLOB_URL`: Custom CLOB endpoint (defaults to mainnet)
+    pub async fn from_env() -> Result<Self> {
+        dotenv::dotenv().ok();
+
+        let private_key = env::var("PRIVATE_KEY")
+            .map_err(|_| TradingError::EnvVarMissing("PRIVATE_KEY".to_string()))?;
+
+        let proxy_wallet = env::var("PROXY_WALLET").ok();
+        let clob_url = env::var("CLOB_URL").unwrap_or_else(|_| DEFAULT_CLOB_URL.to_string());
+
+        let api_key = env::var("API_KEY").ok();
+        let api_secret = env::var("API_SECRET").ok();
+        let api_passphrase = env::var("API_PASSPHRASE").ok();
+
+        let existing_creds = match (api_key, api_secret, api_passphrase) {
+            (Some(key), Some(secret), Some(passphrase)) => Some(ApiCredentials {
+                key,
+                secret,
+                passphrase,
+            }),
+            _ => None,
+        };
+
+        Self::new(&private_key, proxy_wallet.as_deref(), &clob_url, existing_creds).await
+    }
+
+    /// Create a new trading client with explicit parameters
+    ///
+    /// # Arguments
+    /// - `private_key`: Ethereum private key (with or without 0x prefix)
+    /// - `proxy_wallet`: Optional proxy wallet address (if None, uses signer as maker)
+    /// - `clob_url`: CLOB API endpoint
+    /// - `existing_creds`: Optional pre-existing API credentials
+    pub async fn new(
+        private_key: &str,
+        proxy_wallet: Option<&str>,
+        clob_url: &str,
+        existing_creds: Option<ApiCredentials>,
+    ) -> Result<Self> {
+        let mut auth = PolymarketAuth::new(private_key, POLYGON_CHAIN_ID)?;
+        let signer_addr = auth.address();
+
+        let proxy_addr = match proxy_wallet {
+            Some(addr) => Some(
+                addr.parse::<Address>()
+                    .map_err(|_| TradingError::InvalidAddress(addr.to_string()))?,
+            ),
+            None => None,
+        };
+
+        let rest = RestClient::new(clob_url);
+
+        // Set up API credentials
+        if let Some(creds) = existing_creds {
+            info!("Using provided API credentials");
+            auth.set_api_key(creds);
+        } else {
+            info!("Deriving API credentials from private key...");
+            let creds = rest.get_or_create_api_creds(&auth).await?;
+            auth.set_api_key(creds);
+            info!("API credentials obtained successfully");
+        }
+
+        debug!(
+            "TradingClient initialized: signer={:?}, proxy={:?}",
+            signer_addr, proxy_addr
+        );
+
+        Ok(Self {
+            auth,
+            rest,
+            signer_addr,
+            proxy_addr,
+            neg_risk_cache: RwLock::new(HashMap::new()),
+        })
+    }
+
+    /// Get the signer address
+    pub fn signer_address(&self) -> Address {
+        self.signer_addr
+    }
+
+    /// Get the maker address (proxy if set, otherwise signer)
+    pub fn maker_address(&self) -> Address {
+        self.proxy_addr.unwrap_or(self.signer_addr)
+    }
+
+    /// Get neg_risk status for a token, with caching
+    async fn get_neg_risk(&self, token_id: &str) -> bool {
+        // Check cache first
+        {
+            let cache = self.neg_risk_cache.read().unwrap();
+            if let Some(&neg_risk) = cache.get(token_id) {
+                return neg_risk;
+            }
+        }
+
+        // Fetch from API
+        let neg_risk = self.rest.get_neg_risk(token_id).await.unwrap_or_else(|e| {
+            debug!("Could not fetch neg_risk for {}: {}, defaulting to false", token_id, e);
+            false
+        });
+
+        // Cache the result
+        {
+            let mut cache = self.neg_risk_cache.write().unwrap();
+            cache.insert(token_id.to_string(), neg_risk);
+        }
+
+        neg_risk
+    }
+
+    /// Create an OrderBuilder for the given token
+    ///
+    /// Always uses Gnosis Safe signature type (signature_type=2) which is
+    /// required for browser wallet users with proxy wallets.
+    async fn order_builder(&self, token_id: &str) -> OrderBuilder {
+        let neg_risk = self.get_neg_risk(token_id).await;
+        let maker_addr = self.maker_address();
+
+        // Always use Gnosis Safe signature type
+        OrderBuilder::new_gnosis_safe(
+            self.signer_addr,
+            maker_addr,
+            POLYGON_CHAIN_ID,
+            neg_risk,
+        )
+    }
+
+    /// Place a buy order (GTC by default)
+    ///
+    /// # Arguments
+    /// - `token_id`: The token to buy
+    /// - `price`: Price per token (0.01 to 0.99)
+    /// - `size`: Number of tokens to buy
+    pub async fn buy(
+        &self,
+        token_id: &str,
+        price: f64,
+        size: f64,
+    ) -> Result<OrderPlacementResponse> {
+        self.place_order(token_id, price, size, Side::Buy, OrderType::GTC)
+            .await
+    }
+
+    /// Place a sell order (GTC by default)
+    ///
+    /// # Arguments
+    /// - `token_id`: The token to sell
+    /// - `price`: Price per token (0.01 to 0.99)
+    /// - `size`: Number of tokens to sell
+    pub async fn sell(
+        &self,
+        token_id: &str,
+        price: f64,
+        size: f64,
+    ) -> Result<OrderPlacementResponse> {
+        self.place_order(token_id, price, size, Side::Sell, OrderType::GTC)
+            .await
+    }
+
+    /// Place a buy order with FOK (Fill Or Kill)
+    pub async fn buy_fok(
+        &self,
+        token_id: &str,
+        price: f64,
+        size: f64,
+    ) -> Result<OrderPlacementResponse> {
+        self.place_order(token_id, price, size, Side::Buy, OrderType::FOK)
+            .await
+    }
+
+    /// Place a sell order with FOK (Fill Or Kill)
+    pub async fn sell_fok(
+        &self,
+        token_id: &str,
+        price: f64,
+        size: f64,
+    ) -> Result<OrderPlacementResponse> {
+        self.place_order(token_id, price, size, Side::Sell, OrderType::FOK)
+            .await
+    }
+
+    /// Place an order with full control over parameters
+    pub async fn place_order(
+        &self,
+        token_id: &str,
+        price: f64,
+        size: f64,
+        side: Side,
+        order_type: OrderType,
+    ) -> Result<OrderPlacementResponse> {
+        self.place_order_with_fee(token_id, price, size, side, order_type, None)
+            .await
+    }
+
+    /// Place an order with custom fee rate
+    pub async fn place_order_with_fee(
+        &self,
+        token_id: &str,
+        price: f64,
+        size: f64,
+        side: Side,
+        order_type: OrderType,
+        fee_rate_bps: Option<u64>,
+    ) -> Result<OrderPlacementResponse> {
+        // Validate inputs
+        if price <= 0.0 || price >= 1.0 {
+            return Err(TradingError::InvalidParameter(format!(
+                "Price must be between 0 and 1 (exclusive), got: {}",
+                price
+            )));
+        }
+        if size <= 0.0 {
+            return Err(TradingError::InvalidParameter(format!(
+                "Size must be positive, got: {}",
+                size
+            )));
+        }
+
+        let order_builder = self.order_builder(token_id).await;
+
+        let result = self
+            .rest
+            .place_signed_order(
+                &self.auth,
+                &order_builder,
+                token_id,
+                price,
+                size,
+                side,
+                order_type,
+                fee_rate_bps,
+            )
+            .await?;
+
+        Ok(result)
+    }
+
+    /// Place a market buy order at best ask
+    pub async fn market_buy(
+        &self,
+        token_id: &str,
+        amount_usd: f64,
+    ) -> Result<OrderPlacementResponse> {
+        let order_builder = self.order_builder(token_id).await;
+        let result = self
+            .rest
+            .place_signed_market_buy(&self.auth, &order_builder, token_id, amount_usd)
+            .await?;
+        Ok(result)
+    }
+
+    /// Place a market sell order at best bid
+    pub async fn market_sell(
+        &self,
+        token_id: &str,
+        size: f64,
+    ) -> Result<OrderPlacementResponse> {
+        let order_builder = self.order_builder(token_id).await;
+        let result = self
+            .rest
+            .place_signed_market_sell(&self.auth, &order_builder, token_id, size)
+            .await?;
+        Ok(result)
+    }
+
+    /// Get access to the underlying REST client for advanced operations
+    pub fn rest(&self) -> &RestClient {
+        &self.rest
+    }
+
+    /// Get access to the auth manager
+    pub fn auth(&self) -> &PolymarketAuth {
+        &self.auth
+    }
+
+    /// Start building an order with the fluent API
+    pub fn order(&self, token_id: &str) -> OrderRequest<'_> {
+        OrderRequest::new(self, token_id.to_string())
+    }
+}
+
+/// Fluent order builder for more complex order configurations
+pub struct OrderRequest<'a> {
+    client: &'a TradingClient,
+    token_id: String,
+    price: Option<f64>,
+    size: Option<f64>,
+    side: Option<Side>,
+    order_type: OrderType,
+    fee_rate_bps: Option<u64>,
+}
+
+impl<'a> OrderRequest<'a> {
+    fn new(client: &'a TradingClient, token_id: String) -> Self {
+        Self {
+            client,
+            token_id,
+            price: None,
+            size: None,
+            side: None,
+            order_type: OrderType::GTC,
+            fee_rate_bps: None,
+        }
+    }
+
+    /// Set the price
+    pub fn price(mut self, price: f64) -> Self {
+        self.price = Some(price);
+        self
+    }
+
+    /// Set the size
+    pub fn size(mut self, size: f64) -> Self {
+        self.size = Some(size);
+        self
+    }
+
+    /// Set as buy order
+    pub fn buy(mut self) -> Self {
+        self.side = Some(Side::Buy);
+        self
+    }
+
+    /// Set as sell order
+    pub fn sell(mut self) -> Self {
+        self.side = Some(Side::Sell);
+        self
+    }
+
+    /// Set order type to GTC (Good Till Cancel)
+    pub fn gtc(mut self) -> Self {
+        self.order_type = OrderType::GTC;
+        self
+    }
+
+    /// Set order type to FOK (Fill Or Kill)
+    pub fn fok(mut self) -> Self {
+        self.order_type = OrderType::FOK;
+        self
+    }
+
+    /// Set order type to GTD (Good Till Date)
+    pub fn gtd(mut self) -> Self {
+        self.order_type = OrderType::GTD;
+        self
+    }
+
+    /// Set order type to FAK (Fill And Kill)
+    pub fn fak(mut self) -> Self {
+        self.order_type = OrderType::FAK;
+        self
+    }
+
+    /// Set custom fee rate in basis points
+    pub fn fee_bps(mut self, bps: u64) -> Self {
+        self.fee_rate_bps = Some(bps);
+        self
+    }
+
+    /// Execute the order
+    pub async fn execute(self) -> Result<OrderPlacementResponse> {
+        let price = self
+            .price
+            .ok_or_else(|| TradingError::InvalidParameter("Price not set".to_string()))?;
+        let size = self
+            .size
+            .ok_or_else(|| TradingError::InvalidParameter("Size not set".to_string()))?;
+        let side = self
+            .side
+            .ok_or_else(|| TradingError::InvalidParameter("Side not set (use .buy() or .sell())".to_string()))?;
+
+        self.client
+            .place_order_with_fee(&self.token_id, price, size, side, self.order_type, self.fee_rate_bps)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_order_request_builder() {
+        // Just test the builder pattern compiles correctly
+        // Actual execution requires network
+    }
+}

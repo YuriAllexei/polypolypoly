@@ -2,6 +2,7 @@
 //!
 //! Defines the contract that all sniper strategies must implement.
 
+use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::database::{DatabaseError, MarketDatabase};
 use crate::infrastructure::shutdown::ShutdownManager;
 use async_trait::async_trait;
@@ -36,14 +37,21 @@ pub struct StrategyContext {
     pub shutdown_flag: Arc<AtomicBool>,
     /// Shutdown manager for interruptible operations
     pub shutdown: Arc<ShutdownManager>,
+    /// Trading client for order placement
+    pub trading: Arc<TradingClient>,
 }
 
 impl StrategyContext {
-    pub fn new(database: Arc<MarketDatabase>, shutdown: Arc<ShutdownManager>) -> Self {
+    pub fn new(
+        database: Arc<MarketDatabase>,
+        shutdown: Arc<ShutdownManager>,
+        trading: Arc<TradingClient>,
+    ) -> Self {
         Self {
             database,
             shutdown_flag: shutdown.flag(),
             shutdown,
+            trading,
         }
     }
 

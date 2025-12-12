@@ -33,6 +33,14 @@ pub struct UpOrDownConfig {
     /// How often to poll the database for new markets (seconds)
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: f64,
+
+    /// Timer in seconds to wait when no asks are available before taking action
+    #[serde(default = "default_no_ask_timer")]
+    pub no_ask_timer: f64,
+
+    /// Minimum price difference in basis points between oracle and market for trade signal
+    #[serde(default = "default_oracle_bps_threshold")]
+    pub oracle_bps_price_threshold: f64,
 }
 
 fn default_delta_t() -> f64 {
@@ -43,11 +51,21 @@ fn default_poll_interval() -> f64 {
     60.0 // 1 minute
 }
 
+fn default_no_ask_timer() -> f64 {
+    5.0 // 5 seconds
+}
+
+fn default_oracle_bps_threshold() -> f64 {
+    50.0 // 50 basis points (0.5%)
+}
+
 impl Default for UpOrDownConfig {
     fn default() -> Self {
         Self {
             delta_t_seconds: default_delta_t(),
             poll_interval_secs: default_poll_interval(),
+            no_ask_timer: default_no_ask_timer(),
+            oracle_bps_price_threshold: default_oracle_bps_threshold(),
         }
     }
 }
@@ -97,6 +115,11 @@ impl StrategiesConfig {
             "  Poll interval: {} seconds",
             self.up_or_down.poll_interval_secs
         );
+        info!("  No ask timer: {} seconds", self.up_or_down.no_ask_timer);
+        info!(
+            "  Oracle BPS threshold: {} bps",
+            self.up_or_down.oracle_bps_price_threshold
+        );
     }
 }
 
@@ -111,6 +134,18 @@ impl UpOrDownConfig {
         if self.poll_interval_secs <= 0.0 {
             return Err(ConfigError::ValidationError(
                 "up_or_down.poll_interval_secs must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.no_ask_timer < 0.0 {
+            return Err(ConfigError::ValidationError(
+                "up_or_down.no_ask_timer must be >= 0".to_string(),
+            ));
+        }
+
+        if self.oracle_bps_price_threshold < 0.0 {
+            return Err(ConfigError::ValidationError(
+                "up_or_down.oracle_bps_price_threshold must be >= 0".to_string(),
             ));
         }
 
