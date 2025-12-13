@@ -307,23 +307,24 @@ impl UpOrDownStrategy {
                 let crypto_asset = CryptoAsset::from_tags(&tags);
                 let timeframe = Timeframe::from_tags(&tags);
 
-                info!("════════════════════════════════════════════════════════════════");
-                info!("⏰ MARKET ENTERING TRACKING WINDOW!");
-                info!("════════════════════════════════════════════════════════════════");
-                info!("  Market ID:      {}", tracked.market.id);
-                info!("  Question:       {}", tracked.market.question);
-                info!("  URL:            {}", market_url);
-                info!("  Oracle:         {}", oracle_source);
-                info!("  Asset:          {}", crypto_asset);
-                info!("  Timeframe:      {}", timeframe);
-                info!("  Time Remaining: {} seconds", time_until_end.num_seconds());
                 info!(
-                    "  End Time:       {}",
-                    tracked.end_time.format("%Y-%m-%d %H:%M:%S UTC")
+                    "════════════════════════════════════════════════════════════════\n\
+                     ⏰ MARKET ENTERING TRACKING WINDOW!\n\
+                     ════════════════════════════════════════════════════════════════\n\
+                       Market ID:      {}\n\
+                       Question:       {}\n\
+                       URL:            {}\n\
+                       Oracle:         {}\n\
+                       Asset:          {}\n\
+                       Timeframe:      {}\n\
+                       Time Remaining: {} seconds\n\
+                       End Time:       {}\n\
+                       Token IDs:      {:?}\n\
+                       Outcomes:       {:?}\n\
+                     ════════════════════════════════════════════════════════════════",
+                    tracked.market.id, tracked.market.question, market_url, oracle_source, crypto_asset, timeframe,
+                    time_until_end.num_seconds(), tracked.end_time.format("%Y-%m-%d %H:%M:%S UTC"), token_ids, outcomes
                 );
-                info!("  Token IDs:      {:?}", token_ids);
-                info!("  Outcomes:       {:?}", outcomes);
-                info!("════════════════════════════════════════════════════════════════");
 
                 tracked.tracker_spawned = true;
                 markets_to_track.push(tracked.clone());
@@ -481,22 +482,19 @@ impl UpOrDownStrategy {
                             // No asks - start timer if not already running
                             if !no_asks_timers.contains_key(token_id) {
                                 info!(
-                                    "════════════════════════════════════════════════════════════════"
-                                );
-                                info!("🎯 NO ASKS IN ORDERBOOK - STARTING TIMER");
-                                info!(
-                                    "════════════════════════════════════════════════════════════════"
-                                );
-                                info!("  Market ID:    {}", market_id);
-                                info!("  Market:       {}", market_question);
-                                info!("  URL:          {}", market_url);
-                                info!("  Oracle:       {}", oracle_source);
-                                info!("  Asset:        {}", crypto_asset);
-                                info!("  Timeframe:    {}", timeframe);
-                                info!("  Outcome:      {}", outcome_name);
-                                info!("  Token ID:     {}", token_id);
-                                info!(
-                                    "════════════════════════════════════════════════════════════════"
+                                    "════════════════════════════════════════════════════════════════\n\
+                                     🎯 NO ASKS IN ORDERBOOK - STARTING TIMER\n\
+                                     ════════════════════════════════════════════════════════════════\n\
+                                       Market ID:    {}\n\
+                                       Market:       {}\n\
+                                       URL:          {}\n\
+                                       Oracle:       {}\n\
+                                       Asset:        {}\n\
+                                       Timeframe:    {}\n\
+                                       Outcome:      {}\n\
+                                       Token ID:     {}\n\
+                                     ════════════════════════════════════════════════════════════════",
+                                    market_id, market_question, market_url, oracle_source, crypto_asset, timeframe, outcome_name, token_id
                                 );
                                 no_asks_timers.insert(token_id.clone(), Instant::now());
                             }
@@ -509,27 +507,21 @@ impl UpOrDownStrategy {
                                     let elapsed = timer_start.elapsed().as_secs_f64();
                                     if elapsed >= no_ask_threshold_secs {
                                         info!(
-                                            "════════════════════════════════════════════════════════════════"
-                                        );
-                                        info!("⚡ NO-ASK TIME THRESHOLD EXCEEDED");
-                                        info!(
-                                            "════════════════════════════════════════════════════════════════"
-                                        );
-                                        info!("  Market ID:      {}", market_id);
-                                        info!("  Market:         {}", market_question);
-                                        info!("  URL:            {}", market_url);
-                                        info!("  Oracle:         {}", oracle_source);
-                                        info!("  Asset:          {}", crypto_asset);
-                                        info!("  Timeframe:      {}", timeframe);
-                                        info!("  Outcome:        {}", outcome_name);
-                                        info!("  Token ID:       {}", token_id);
-                                        info!("  Elapsed Time:   {:.3} seconds", elapsed);
-                                        info!(
-                                            "  Threshold:      {:.3} seconds",
-                                            no_ask_threshold_secs
-                                        );
-                                        info!(
-                                            "════════════════════════════════════════════════════════════════"
+                                            "════════════════════════════════════════════════════════════════\n\
+                                             ⚡ NO-ASK TIME THRESHOLD EXCEEDED\n\
+                                             ════════════════════════════════════════════════════════════════\n\
+                                               Market ID:      {}\n\
+                                               Market:         {}\n\
+                                               URL:            {}\n\
+                                               Oracle:         {}\n\
+                                               Asset:          {}\n\
+                                               Timeframe:      {}\n\
+                                               Outcome:        {}\n\
+                                               Token ID:       {}\n\
+                                               Elapsed Time:   {:.3} seconds\n\
+                                               Threshold:      {:.3} seconds\n\
+                                             ════════════════════════════════════════════════════════════════",
+                                            market_id, market_question, market_url, oracle_source, crypto_asset, timeframe, outcome_name, token_id, elapsed, no_ask_threshold_secs
                                         );
 
                                         // Collect token for ordering (will place order after releasing lock)
@@ -549,46 +541,55 @@ impl UpOrDownStrategy {
 
             // Place orders outside the lock scope
             for (token_id, outcome_name, elapsed) in tokens_to_order {
-                info!("════════════════════════════════════════════════════════════════");
-                info!("🚀 PLACING BUY ORDER");
-                info!("════════════════════════════════════════════════════════════════");
-                info!("  Market ID:      {}", market_id);
-                info!("  Market:         {}", market_question);
-                info!("  URL:            {}", market_url);
-                info!("  Oracle:         {}", oracle_source);
-                info!("  Asset:          {}", crypto_asset);
-                info!("  Timeframe:      {}", timeframe);
-                info!("  Outcome:        {}", outcome_name);
-                info!("  Token ID:       {}", token_id);
-                info!("  Elapsed Time:   {:.3} seconds", elapsed);
-                info!("  Threshold:      {:.3} seconds", no_ask_threshold_secs);
-                info!("════════════════════════════════════════════════════════════════");
+                info!(
+                    "════════════════════════════════════════════════════════════════\n\
+                     🚀 PLACING BUY ORDER\n\
+                     ════════════════════════════════════════════════════════════════\n\
+                       Market ID:      {}\n\
+                       Market:         {}\n\
+                       URL:            {}\n\
+                       Oracle:         {}\n\
+                       Asset:          {}\n\
+                       Timeframe:      {}\n\
+                       Outcome:        {}\n\
+                       Token ID:       {}\n\
+                       Elapsed Time:   {:.3} seconds\n\
+                       Threshold:      {:.3} seconds\n\
+                     ════════════════════════════════════════════════════════════════",
+                    market_id, market_question, market_url, oracle_source, crypto_asset, timeframe, outcome_name, token_id, elapsed, no_ask_threshold_secs
+                );
 
                 match trading.buy(&token_id, 0.99, 18.0).await {
                     Ok(order_id) => {
-                        info!("════════════════════════════════════════════════════════════════");
-                        info!("✅ ORDER PLACED SUCCESSFULLY");
-                        info!("════════════════════════════════════════════════════════════════");
-                        info!("  Order ID:       {:?}", order_id);
-                        info!("  Market ID:      {}", market_id);
-                        info!("  Market:         {}", market_question);
-                        info!("  URL:            {}", market_url);
-                        info!("  Outcome:        {}", outcome_name);
-                        info!("  Timeframe:      {}", timeframe);
-                        info!("  Token ID:       {}", token_id);
-                        info!("════════════════════════════════════════════════════════════════");
+                        info!(
+                            "════════════════════════════════════════════════════════════════\n\
+                             ✅ ORDER PLACED SUCCESSFULLY\n\
+                             ════════════════════════════════════════════════════════════════\n\
+                               Order ID:       {:?}\n\
+                               Market ID:      {}\n\
+                               Market:         {}\n\
+                               URL:            {}\n\
+                               Outcome:        {}\n\
+                               Timeframe:      {}\n\
+                               Token ID:       {}\n\
+                             ════════════════════════════════════════════════════════════════",
+                            order_id, market_id, market_question, market_url, outcome_name, timeframe, token_id
+                        );
                     }
                     Err(e) => {
-                        error!("════════════════════════════════════════════════════════════════");
-                        error!("❌ ORDER PLACEMENT FAILED");
-                        error!("════════════════════════════════════════════════════════════════");
-                        error!("  Error:          {}", e);
-                        error!("  Market ID:      {}", market_id);
-                        error!("  Market:         {}", market_question);
-                        error!("  URL:            {}", market_url);
-                        error!("  Outcome:        {}", outcome_name);
-                        error!("  Token ID:       {}", token_id);
-                        error!("════════════════════════════════════════════════════════════════");
+                        error!(
+                            "════════════════════════════════════════════════════════════════\n\
+                             ❌ ORDER PLACEMENT FAILED\n\
+                             ════════════════════════════════════════════════════════════════\n\
+                               Error:          {}\n\
+                               Market ID:      {}\n\
+                               Market:         {}\n\
+                               URL:            {}\n\
+                               Outcome:        {}\n\
+                               Token ID:       {}\n\
+                             ════════════════════════════════════════════════════════════════",
+                            e, market_id, market_question, market_url, outcome_name, token_id
+                        );
                     }
                 }
                 order_placed.insert(token_id);
