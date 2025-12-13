@@ -1,24 +1,21 @@
 //! WebSocket client for market sniper orderbook tracking
 //!
-//! This module provides real-time orderbook tracking for markets approaching resolution.
-//! When a price_change message indicates best_ask = 1 for any token, it logs
-//! the event with full market details.
+//! This module provides reusable WebSocket components for tracking Polymarket orderbooks.
+//! The types are designed to be used by strategies that need real-time orderbook data.
 
 use super::orderbook::Orderbook;
 use super::sniper_ws_types::{
     BookSnapshot, LastTradePriceEvent, MarketSubscription, PriceChangeEvent, SniperMessage,
     TickSizeChangeEvent,
 };
-use crate::infrastructure::SharedOraclePrices;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use hypersockets::core::*;
 use hypersockets::{MessageHandler, MessageRouter, WsMessage};
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
-use tokio::time::sleep;
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// Shared orderbooks accessible by both handler and main loop
@@ -240,11 +237,10 @@ impl MessageHandler<SniperMessage> for SniperHandler {
 
 /// Build a WebSocket client for the given market configuration.
 ///
-/// Note: The global shutdown flag is intentionally unused here. Each WebSocket client
-/// uses a local shutdown flag because hypersockets sets the flag to false during
-/// `client.shutdown()`, which would inadvertently trigger global shutdown if shared.
-/// The global flag is checked in the main tracking loop instead.
-async fn build_ws_client(
+/// Note: Each WebSocket client uses a local shutdown flag because hypersockets
+/// sets the flag to false during `client.shutdown()`, which would inadvertently
+/// trigger global shutdown if shared. The global flag should be checked separately.
+pub async fn build_ws_client(
     config: &MarketTrackerConfig,
     orderbooks: SharedOrderbooks,
 ) -> Result<WebSocketClient<SniperRouter, SniperMessage>> {
@@ -273,11 +269,11 @@ async fn build_ws_client(
 }
 
 // =============================================================================
-// Main Tracking Loop
+// Client Event Handling
 // =============================================================================
 
-/// Handle a WebSocket client event
-fn handle_client_event(event: ClientEvent, market_id: &str) -> bool {
+/// Handle a WebSocket client event, returning false if tracking should stop
+pub fn handle_client_event(event: ClientEvent, market_id: &str) -> bool {
     match event {
         ClientEvent::Connected => {
             info!("[WS {}] WebSocket connected", market_id);
@@ -296,169 +292,4 @@ fn handle_client_event(event: ClientEvent, market_id: &str) -> bool {
             true
         }
     }
-}
-
-// =============================================================================
-// Public Entry Point
-// =============================================================================
-
-/// Spawn a WebSocket tracker for a specific market
-///
-/// This function connects to the Polymarket WebSocket, subscribes to the market's
-/// orderbook updates, and tracks until the market resolution time is reached or
-/// the shutdown flag is set.
-///
-/// When a price_change message indicates best_ask = 1 for any token, it logs
-/// the event with full market details.
-pub async fn spawn_market_tracker(
-    market_id: String,
-    market_question: String,
-    slug: Option<String>,
-    token_ids: Vec<String>,
-    outcomes: Vec<String>,
-    resolution_time: String,
-    shutdown_flag: Arc<AtomicBool>,
-    _oracle_prices: Option<SharedOraclePrices>,
-) -> Result<()> {
-    // Build configuration
-    let config = MarketTrackerConfig::new(
-        market_id.clone(),
-        market_question.clone(),
-        slug,
-        token_ids,
-        outcomes,
-        &resolution_time,
-    )?;
-
-    info!("[WS {}] Connecting to orderbook stream...", market_id);
-    info!("[WS {}] Market: {}", market_id, market_question);
-    info!(
-        "[WS {}] Resolution time: {}",
-        market_id, config.resolution_time
-    );
-
-    // Create shared orderbooks - handler writes, this loop reads
-    let orderbooks: SharedOrderbooks = Arc::new(RwLock::new(HashMap::new()));
-
-    // Build and connect WebSocket client with shared orderbooks
-    let client = build_ws_client(&config, Arc::clone(&orderbooks)).await?;
-    info!("[WS {}] Connected and subscribed", market_id);
-
-    // Timer state for tracking no-asks condition
-    let outcome_map = config.build_outcome_map();
-    let market_url = config.slug.as_ref()
-        .map(|s| format!("https://polymarket.com/event/{}", s))
-        .unwrap_or_else(|| "N/A".to_string());
-    let mut no_asks_timers: HashMap<String, Instant> = HashMap::new();
-    let mut bid_triggered: HashSet<String> = HashSet::new();
-
-    const MIN_LIQUIDITY: f64 = 100_000.0; // 10k tokens
-    const TARGET_BID_PRICE: f64 = 0.99;
-
-    // Main tracking loop
-    loop {
-        // Check shutdown flag first (highest priority)
-        if !shutdown_flag.load(Ordering::Acquire) {
-            info!("[WS {}] Shutdown signal received", market_id);
-            break;
-        }
-
-        // Handle WebSocket events
-        match client.try_recv_event() {
-            Some(event) => {
-                if !handle_client_event(event, &market_id) {
-                    break;
-                }
-            }
-            None => {}
-        }
-
-        // Check orderbook state for all tracked tokens (every ~10ms)
-        {
-            let obs = orderbooks.read().unwrap();
-            for token_id in &config.token_ids {
-                if let Some(orderbook) = obs.get(token_id) {
-                    let has_asks = !orderbook.asks.is_empty();
-                    let outcome_name = outcome_map
-                        .get(token_id)
-                        .cloned()
-                        .unwrap_or_else(|| "Unknown".to_string());
-
-                    if has_asks {
-                        // Asks exist - reset timer if it was running
-                        if no_asks_timers.remove(token_id).is_some() {
-                            info!(
-                                "⏹️  Timer RESET for {} ({}) - asks appeared in orderbook",
-                                token_id, outcome_name
-                            );
-                        }
-                    } else {
-                        // No asks - start timer if not already running
-                        if !no_asks_timers.contains_key(token_id) {
-                            info!(
-                                "════════════════════════════════════════════════════════════════"
-                            );
-                            info!("🎯 NO ASKS IN ORDERBOOK - STARTING TIMER");
-                            info!(
-                                "════════════════════════════════════════════════════════════════"
-                            );
-                            info!("  Market ID:    {}", market_id);
-                            info!("  Market:       {}", market_question);
-                            info!("  URL:          {}", market_url);
-                            info!("  Outcome:      {}", outcome_name);
-                            info!("  Token ID:     {}", token_id);
-                            info!(
-                                "════════════════════════════════════════════════════════════════"
-                            );
-                            no_asks_timers.insert(token_id.clone(), Instant::now());
-                        }
-
-                        // Check bid condition (only if not already triggered for this asset)
-                        if !bid_triggered.contains(token_id) {
-                            if let Some((price, size)) = orderbook.best_bid() {
-                                if (price - TARGET_BID_PRICE).abs() < 1e-9 {
-                                    if size >= MIN_LIQUIDITY {
-                                        // Get elapsed time from timer
-                                        let elapsed = no_asks_timers
-                                            .get(token_id)
-                                            .map(|t| t.elapsed())
-                                            .unwrap_or_default();
-
-                                        info!("════════════════════════════════════════════════════════════════");
-                                        info!("✅ 0.99 BID CONDITION MET");
-                                        info!("════════════════════════════════════════════════════════════════");
-                                        info!("  Market ID:      {}", market_id);
-                                        info!("  Market:         {}", market_question);
-                                        info!("  URL:            {}", market_url);
-                                        info!("  Outcome:        {}", outcome_name);
-                                        info!("  Token ID:       {}", token_id);
-                                        info!("  Bid Price:      {:.2}", price);
-                                        info!("  Bid Liquidity:  {:.2} shares", size);
-                                        info!(
-                                            "  TIME DELTA:     {:.3} seconds",
-                                            elapsed.as_secs_f64()
-                                        );
-                                        info!("════════════════════════════════════════════════════════════════");
-
-                                        // Mark as triggered so we don't log again
-                                        bid_triggered.insert(token_id.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Sleep briefly before next iteration
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    info!("[WS {}] Closing connection", market_id);
-    if let Err(e) = client.shutdown().await {
-        warn!("[WS {}] Error during shutdown: {}", market_id, e);
-    }
-    info!("[WS {}] Tracker stopped", market_id);
-    Ok(())
 }

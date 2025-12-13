@@ -34,9 +34,9 @@ pub struct UpOrDownConfig {
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: f64,
 
-    /// Timer in seconds to wait when no asks are available before taking action
-    #[serde(default = "default_no_ask_timer")]
-    pub no_ask_timer: f64,
+    /// Time threshold in seconds - if no asks for longer than this, trigger action
+    #[serde(default = "default_no_ask_time_threshold")]
+    pub no_ask_time_threshold: f64,
 
     /// Minimum price difference in basis points between oracle and market for trade signal
     #[serde(default = "default_oracle_bps_threshold")]
@@ -51,7 +51,7 @@ fn default_poll_interval() -> f64 {
     60.0 // 1 minute
 }
 
-fn default_no_ask_timer() -> f64 {
+fn default_no_ask_time_threshold() -> f64 {
     5.0 // 5 seconds
 }
 
@@ -64,7 +64,7 @@ impl Default for UpOrDownConfig {
         Self {
             delta_t_seconds: default_delta_t(),
             poll_interval_secs: default_poll_interval(),
-            no_ask_timer: default_no_ask_timer(),
+            no_ask_time_threshold: default_no_ask_time_threshold(),
             oracle_bps_price_threshold: default_oracle_bps_threshold(),
         }
     }
@@ -115,7 +115,7 @@ impl StrategiesConfig {
             "  Poll interval: {} seconds",
             self.up_or_down.poll_interval_secs
         );
-        info!("  No ask timer: {} seconds", self.up_or_down.no_ask_timer);
+        info!("  No ask time threshold: {} seconds", self.up_or_down.no_ask_time_threshold);
         info!(
             "  Oracle BPS threshold: {} bps",
             self.up_or_down.oracle_bps_price_threshold
@@ -137,9 +137,9 @@ impl UpOrDownConfig {
             ));
         }
 
-        if self.no_ask_timer < 0.0 {
+        if self.no_ask_time_threshold < 0.0 {
             return Err(ConfigError::ValidationError(
-                "up_or_down.no_ask_timer must be >= 0".to_string(),
+                "up_or_down.no_ask_time_threshold must be >= 0".to_string(),
             ));
         }
 

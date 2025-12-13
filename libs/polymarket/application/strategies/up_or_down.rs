@@ -8,18 +8,160 @@
 
 use super::traits::{Strategy, StrategyContext, StrategyResult};
 use crate::domain::DbMarket;
+use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::config::UpOrDownConfig;
-use crate::infrastructure::{spawn_market_tracker, spawn_oracle_trackers, SharedOraclePrices};
+use crate::infrastructure::{
+    build_ws_client, handle_client_event, spawn_oracle_trackers, MarketTrackerConfig,
+    SharedOraclePrices, SharedOrderbooks,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant};
 use tokio::task::JoinHandle;
+use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 /// Required tags for Up or Down markets
 const REQUIRED_TAGS: &[&str] = &["Up or Down", "Crypto Prices", "Recurring", "Crypto"];
+
+// =============================================================================
+// Market Metadata Types
+// =============================================================================
+
+/// Oracle source detected from market description
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OracleSource {
+    Binance,
+    ChainLink,
+    Unknown,
+}
+
+impl OracleSource {
+    fn from_description(description: &Option<String>) -> Self {
+        match description {
+            Some(desc) => {
+                if desc.contains("www.binance.com") {
+                    OracleSource::Binance
+                } else if desc.contains("data.chain.link") {
+                    OracleSource::ChainLink
+                } else {
+                    OracleSource::Unknown
+                }
+            }
+            None => OracleSource::Unknown,
+        }
+    }
+}
+
+impl std::fmt::Display for OracleSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OracleSource::Binance => write!(f, "Binance"),
+            OracleSource::ChainLink => write!(f, "ChainLink"),
+            OracleSource::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
+/// Cryptocurrency tracked by the market
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CryptoAsset {
+    Bitcoin,
+    Ethereum,
+    Solana,
+    Xrp,
+    Unknown,
+}
+
+impl CryptoAsset {
+    fn from_tags(tags: &serde_json::Value) -> Self {
+        if let serde_json::Value::Array(arr) = tags {
+            for tag in arr {
+                if let Some(label) = tag.get("label").and_then(|l| l.as_str()) {
+                    match label {
+                        "Bitcoin" => return CryptoAsset::Bitcoin,
+                        "Ethereum" => return CryptoAsset::Ethereum,
+                        "Solana" => return CryptoAsset::Solana,
+                        "XRP" => return CryptoAsset::Xrp,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        CryptoAsset::Unknown
+    }
+
+    /// Get the symbol used for oracle price lookup
+    fn oracle_symbol(&self) -> &'static str {
+        match self {
+            CryptoAsset::Bitcoin => "BTC",
+            CryptoAsset::Ethereum => "ETH",
+            CryptoAsset::Solana => "SOL",
+            CryptoAsset::Xrp => "XRP",
+            CryptoAsset::Unknown => "",
+        }
+    }
+}
+
+impl std::fmt::Display for CryptoAsset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CryptoAsset::Bitcoin => write!(f, "Bitcoin (BTC)"),
+            CryptoAsset::Ethereum => write!(f, "Ethereum (ETH)"),
+            CryptoAsset::Solana => write!(f, "Solana (SOL)"),
+            CryptoAsset::Xrp => write!(f, "XRP"),
+            CryptoAsset::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
+/// Timeframe of the market
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Timeframe {
+    FifteenMin, // 15M
+    OneHour,    // 1H
+    FourHour,   // 4H
+    Daily,
+    Unknown,
+}
+
+impl Timeframe {
+    fn from_tags(tags: &serde_json::Value) -> Self {
+        if let serde_json::Value::Array(arr) = tags {
+            for tag in arr {
+                if let Some(label) = tag.get("label").and_then(|l| l.as_str()) {
+                    match label {
+                        "15M" => return Timeframe::FifteenMin,
+                        "1H" => return Timeframe::OneHour,
+                        "4H" => return Timeframe::FourHour,
+                        "Daily" => return Timeframe::Daily,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Timeframe::Unknown
+    }
+}
+
+impl std::fmt::Display for Timeframe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Timeframe::FifteenMin => write!(f, "15M"),
+            Timeframe::OneHour => write!(f, "1H"),
+            Timeframe::FourHour => write!(f, "4H"),
+            Timeframe::Daily => write!(f, "Daily"),
+            Timeframe::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
+// =============================================================================
+// Strategy Implementation
+// =============================================================================
 
 /// Up or Down strategy implementation
 pub struct UpOrDownStrategy {
@@ -37,16 +179,10 @@ pub struct UpOrDownStrategy {
 /// A market being tracked with its parsed end time
 #[derive(Debug, Clone)]
 struct TrackedMarket {
-    id: String,
-    question: String,
-    slug: Option<String>,
+    /// The database market record
+    market: DbMarket,
+    /// Parsed end time for quick access
     end_time: DateTime<Utc>,
-    /// Token IDs for the market outcomes (Yes/No or Up/Down)
-    token_ids: Vec<String>,
-    /// Outcome names corresponding to token_ids
-    outcomes: Vec<String>,
-    /// Resolution time string for tracker
-    resolution_time_str: String,
     /// Whether we've already spawned a WebSocket tracker for this market
     tracker_spawned: bool,
 }
@@ -63,10 +199,7 @@ impl UpOrDownStrategy {
     }
 
     /// Fetch markets matching the required tags
-    async fn fetch_matching_markets(
-        &self,
-        ctx: &StrategyContext,
-    ) -> StrategyResult<Vec<DbMarket>> {
+    async fn fetch_matching_markets(&self, ctx: &StrategyContext) -> StrategyResult<Vec<DbMarket>> {
         let markets = ctx.database.get_markets_by_tags(REQUIRED_TAGS).await?;
         Ok(markets)
     }
@@ -100,54 +233,37 @@ impl UpOrDownStrategy {
             if self.tracked_market_ids.insert(market.id.clone()) {
                 // Parse end time
                 if let Ok(end_time) = DateTime::parse_from_rfc3339(&market.end_date) {
-                    // Parse token_ids and outcomes
+                    // Validate token_ids and outcomes can be parsed
                     let token_ids = match market.parse_token_ids() {
                         Ok(ids) => ids,
                         Err(e) => {
-                            warn!(
-                                "Failed to parse token_ids for market {}: {}",
-                                market.id, e
-                            );
+                            warn!("Failed to parse token_ids for market {}: {}", market.id, e);
                             continue;
                         }
                     };
 
-                    let outcomes = match market.parse_outcomes() {
-                        Ok(o) => o,
-                        Err(e) => {
-                            warn!(
-                                "Failed to parse outcomes for market {}: {}",
-                                market.id, e
-                            );
-                            continue;
-                        }
-                    };
+                    if let Err(e) = market.parse_outcomes() {
+                        warn!("Failed to parse outcomes for market {}: {}", market.id, e);
+                        continue;
+                    }
 
                     // Skip markets without valid token pairs
                     if token_ids.len() < 2 {
-                        warn!(
-                            "Market {} has less than 2 token_ids, skipping",
-                            market.id
-                        );
+                        warn!("Market {} has less than 2 token_ids, skipping", market.id);
                         continue;
                     }
 
                     let tracked = TrackedMarket {
-                        id: market.id.clone(),
-                        question: market.question.clone(),
-                        slug: market.slug.clone(),
                         end_time: end_time.with_timezone(&Utc),
-                        token_ids,
-                        outcomes,
-                        resolution_time_str: market.end_date.clone(),
+                        market,
                         tracker_spawned: false,
                     };
-                    self.active_markets.push(tracked);
-                    added += 1;
                     debug!(
                         "Added market to tracking: {} - {} (ends at {})",
-                        market.id, market.question, market.end_date
+                        tracked.market.id, tracked.market.question, tracked.market.end_date
                     );
+                    self.active_markets.push(tracked);
+                    added += 1;
                 }
             }
         }
@@ -161,34 +277,56 @@ impl UpOrDownStrategy {
         let delta_t = Duration::seconds(self.config.delta_t_seconds as i64);
         let mut markets_to_track = Vec::new();
 
-        for market in &mut self.active_markets {
+        for tracked in &mut self.active_markets {
             // Skip if we've already spawned a tracker for this market
-            if market.tracker_spawned {
+            if tracked.tracker_spawned {
                 continue;
             }
 
-            let time_until_end = market.end_time.signed_duration_since(now);
+            let time_until_end = tracked.end_time.signed_duration_since(now);
 
             // Check if within delta_t window and hasn't ended yet
             if time_until_end > Duration::zero() && time_until_end <= delta_t {
-                let market_url = market.slug.as_ref()
+                let market_url = tracked
+                    .market
+                    .slug
+                    .as_ref()
                     .map(|s| format!("https://polymarket.com/event/{}", s))
                     .unwrap_or_else(|| "N/A".to_string());
+
+                // Get token_ids and outcomes for logging (already validated in add_new_markets)
+                let token_ids = tracked.market.parse_token_ids().unwrap_or_default();
+                let outcomes = tracked.market.parse_outcomes().unwrap_or_default();
+
+                // Parse metadata for logging
+                let tags = tracked
+                    .market
+                    .parse_tags()
+                    .unwrap_or(serde_json::Value::Array(vec![]));
+                let oracle_source = OracleSource::from_description(&tracked.market.description);
+                let crypto_asset = CryptoAsset::from_tags(&tags);
+                let timeframe = Timeframe::from_tags(&tags);
 
                 info!("════════════════════════════════════════════════════════════════");
                 info!("⏰ MARKET ENTERING TRACKING WINDOW!");
                 info!("════════════════════════════════════════════════════════════════");
-                info!("  Market ID:      {}", market.id);
-                info!("  Question:       {}", market.question);
+                info!("  Market ID:      {}", tracked.market.id);
+                info!("  Question:       {}", tracked.market.question);
                 info!("  URL:            {}", market_url);
+                info!("  Oracle:         {}", oracle_source);
+                info!("  Asset:          {}", crypto_asset);
+                info!("  Timeframe:      {}", timeframe);
                 info!("  Time Remaining: {} seconds", time_until_end.num_seconds());
-                info!("  End Time:       {}", market.end_time.format("%Y-%m-%d %H:%M:%S UTC"));
-                info!("  Token IDs:      {:?}", market.token_ids);
-                info!("  Outcomes:       {:?}", market.outcomes);
+                info!(
+                    "  End Time:       {}",
+                    tracked.end_time.format("%Y-%m-%d %H:%M:%S UTC")
+                );
+                info!("  Token IDs:      {:?}", token_ids);
+                info!("  Outcomes:       {:?}", outcomes);
                 info!("════════════════════════════════════════════════════════════════");
 
-                market.tracker_spawned = true;
-                markets_to_track.push(market.clone());
+                tracked.tracker_spawned = true;
+                markets_to_track.push(tracked.clone());
             }
         }
 
@@ -197,46 +335,275 @@ impl UpOrDownStrategy {
 
     /// Spawn WebSocket trackers for the given markets
     async fn spawn_trackers(&mut self, markets: Vec<TrackedMarket>, ctx: &StrategyContext) {
-        for market in markets {
-            let market_id = market.id.clone();
-            let market_question = market.question.clone();
-            let slug = market.slug.clone();
-            let token_ids = market.token_ids.clone();
-            let outcomes = market.outcomes.clone();
-            let resolution_time = market.resolution_time_str.clone();
+        for tracked in markets {
+            let market = tracked.market.clone();
             let shutdown_flag = Arc::clone(&ctx.shutdown_flag);
+            let config = self.config.clone();
+            let trading = Arc::clone(&ctx.trading);
             let oracle_prices = self.oracle_prices.clone();
 
             info!(
                 "[Tracker] Spawning WebSocket tracker for market {}",
-                market_id
+                market.id
             );
 
-            // Spawn the tracker task
+            // Spawn the tracker task with the tracking loop inline
             let handle = tokio::spawn(async move {
-                match spawn_market_tracker(
-                    market_id.clone(),
-                    market_question,
-                    slug,
-                    token_ids,
-                    outcomes,
-                    resolution_time,
+                match UpOrDownStrategy::run_market_tracker(
+                    market,
                     shutdown_flag,
+                    config,
+                    trading,
                     oracle_prices,
                 )
                 .await
                 {
-                    Ok(()) => {
-                        info!("[Tracker] Market {} tracker completed", market_id);
-                    }
+                    Ok(()) => {}
                     Err(e) => {
-                        error!("[Tracker] Market {} tracker failed: {}", market_id, e);
+                        error!("[Tracker] Market tracker failed: {}", e);
                     }
                 }
             });
 
-            self.tracker_tasks.insert(market.id, handle);
+            self.tracker_tasks.insert(tracked.market.id.clone(), handle);
         }
+    }
+
+    /// Run the WebSocket market tracker for a single market
+    ///
+    /// Connects to Polymarket WebSocket, subscribes to orderbook updates,
+    /// and monitors for trading signals until shutdown or market ends.
+    async fn run_market_tracker(
+        market: DbMarket,
+        shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
+        config: UpOrDownConfig,
+        trading: Arc<TradingClient>,
+        _oracle_prices: Option<SharedOraclePrices>,
+    ) -> anyhow::Result<()> {
+        let market_id = market.id.clone();
+        let market_question = market.question.clone();
+
+        // Parse market metadata from description and tags
+        let tags = market
+            .parse_tags()
+            .unwrap_or(serde_json::Value::Array(vec![]));
+        let oracle_source = OracleSource::from_description(&market.description);
+        let crypto_asset = CryptoAsset::from_tags(&tags);
+        let timeframe = Timeframe::from_tags(&tags);
+
+        // Parse token_ids and outcomes from DbMarket
+        let token_ids = market.parse_token_ids()?;
+        let outcomes = market.parse_outcomes()?;
+
+        // Build WebSocket configuration from DbMarket
+        let ws_config = MarketTrackerConfig::new(
+            market_id.clone(),
+            market_question.clone(),
+            market.slug.clone(),
+            token_ids.clone(),
+            outcomes.clone(),
+            &market.end_date,
+        )?;
+
+        info!("[WS {}] Connecting to orderbook stream...", market_id);
+        info!("[WS {}] Market: {}", market_id, market_question);
+        info!("[WS {}] Oracle: {}", market_id, oracle_source);
+        info!("[WS {}] Asset: {}", market_id, crypto_asset);
+        info!("[WS {}] Timeframe: {}", market_id, timeframe);
+        info!(
+            "[WS {}] Resolution time: {}",
+            market_id, ws_config.resolution_time
+        );
+
+        // Create shared orderbooks - handler writes, this loop reads
+        let orderbooks: SharedOrderbooks = Arc::new(std::sync::RwLock::new(HashMap::new()));
+
+        // Build and connect WebSocket client with shared orderbooks
+        let client = build_ws_client(&ws_config, Arc::clone(&orderbooks)).await?;
+        info!("[WS {}] Connected and subscribed", market_id);
+
+        // Timer state for tracking no-asks condition
+        let outcome_map = ws_config.build_outcome_map();
+        let market_url = market
+            .slug
+            .as_ref()
+            .map(|s| format!("https://polymarket.com/event/{}", s))
+            .unwrap_or_else(|| "N/A".to_string());
+        let mut no_asks_timers: HashMap<String, Instant> = HashMap::new();
+        let mut _bid_triggered: HashSet<String> = HashSet::new();
+        let mut threshold_triggered: HashSet<String> = HashSet::new();
+        let mut order_placed: HashSet<String> = HashSet::new();
+
+        // Get threshold from config
+        let no_ask_threshold_secs = config.no_ask_time_threshold;
+
+        const _MIN_LIQUIDITY: f64 = 100_000.0; // 10k tokens
+        const _TARGET_BID_PRICE: f64 = 0.99;
+
+        // Main tracking loop
+        loop {
+            // Check shutdown flag first (highest priority)
+            if !shutdown_flag.load(Ordering::Acquire) {
+                info!("[WS {}] Shutdown signal received", market_id);
+                break;
+            }
+
+            // Handle WebSocket events
+            if let Some(event) = client.try_recv_event() {
+                if !handle_client_event(event, &market_id) {
+                    break;
+                }
+            }
+
+            // Check orderbook state for all tracked tokens
+            // Collect tokens that need orders (to avoid holding lock across await)
+            let mut tokens_to_order: Vec<(String, String, f64)> = Vec::new();
+            {
+                let obs = orderbooks.read().unwrap();
+                for token_id in &token_ids {
+                    if let Some(orderbook) = obs.get(token_id) {
+                        let has_asks = !orderbook.asks.is_empty();
+                        let outcome_name = outcome_map
+                            .get(token_id)
+                            .cloned()
+                            .unwrap_or_else(|| "Unknown".to_string());
+
+                        if has_asks {
+                            // Asks exist - reset timer and threshold state if they were running
+                            if no_asks_timers.remove(token_id).is_some() {
+                                threshold_triggered.remove(token_id);
+                                info!(
+                                    "⏹️  Timer RESET for {} ({}) - asks appeared in orderbook",
+                                    token_id, outcome_name
+                                );
+                            }
+                        } else {
+                            // No asks - start timer if not already running
+                            if !no_asks_timers.contains_key(token_id) {
+                                info!(
+                                    "════════════════════════════════════════════════════════════════"
+                                );
+                                info!("🎯 NO ASKS IN ORDERBOOK - STARTING TIMER");
+                                info!(
+                                    "════════════════════════════════════════════════════════════════"
+                                );
+                                info!("  Market ID:    {}", market_id);
+                                info!("  Market:       {}", market_question);
+                                info!("  URL:          {}", market_url);
+                                info!("  Oracle:       {}", oracle_source);
+                                info!("  Asset:        {}", crypto_asset);
+                                info!("  Timeframe:    {}", timeframe);
+                                info!("  Outcome:      {}", outcome_name);
+                                info!("  Token ID:     {}", token_id);
+                                info!(
+                                    "════════════════════════════════════════════════════════════════"
+                                );
+                                no_asks_timers.insert(token_id.clone(), Instant::now());
+                            }
+
+                            // Check if no-asks time threshold exceeded (only log once per token)
+                            if !threshold_triggered.contains(token_id)
+                                && !order_placed.contains(token_id)
+                            {
+                                if let Some(timer_start) = no_asks_timers.get(token_id) {
+                                    let elapsed = timer_start.elapsed().as_secs_f64();
+                                    if elapsed >= no_ask_threshold_secs {
+                                        info!(
+                                            "════════════════════════════════════════════════════════════════"
+                                        );
+                                        info!("⚡ NO-ASK TIME THRESHOLD EXCEEDED");
+                                        info!(
+                                            "════════════════════════════════════════════════════════════════"
+                                        );
+                                        info!("  Market ID:      {}", market_id);
+                                        info!("  Market:         {}", market_question);
+                                        info!("  URL:            {}", market_url);
+                                        info!("  Oracle:         {}", oracle_source);
+                                        info!("  Asset:          {}", crypto_asset);
+                                        info!("  Timeframe:      {}", timeframe);
+                                        info!("  Outcome:        {}", outcome_name);
+                                        info!("  Token ID:       {}", token_id);
+                                        info!("  Elapsed Time:   {:.3} seconds", elapsed);
+                                        info!(
+                                            "  Threshold:      {:.3} seconds",
+                                            no_ask_threshold_secs
+                                        );
+                                        info!(
+                                            "════════════════════════════════════════════════════════════════"
+                                        );
+
+                                        // Collect token for ordering (will place order after releasing lock)
+                                        tokens_to_order.push((
+                                            token_id.clone(),
+                                            outcome_name.clone(),
+                                            elapsed,
+                                        ));
+                                        threshold_triggered.insert(token_id.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } // Lock released here
+
+            // Place orders outside the lock scope
+            for (token_id, outcome_name, elapsed) in tokens_to_order {
+                info!("════════════════════════════════════════════════════════════════");
+                info!("🚀 PLACING BUY ORDER");
+                info!("════════════════════════════════════════════════════════════════");
+                info!("  Market ID:      {}", market_id);
+                info!("  Market:         {}", market_question);
+                info!("  URL:            {}", market_url);
+                info!("  Oracle:         {}", oracle_source);
+                info!("  Asset:          {}", crypto_asset);
+                info!("  Timeframe:      {}", timeframe);
+                info!("  Outcome:        {}", outcome_name);
+                info!("  Token ID:       {}", token_id);
+                info!("  Elapsed Time:   {:.3} seconds", elapsed);
+                info!("  Threshold:      {:.3} seconds", no_ask_threshold_secs);
+                info!("════════════════════════════════════════════════════════════════");
+
+                match trading.buy(&token_id, 0.99, 18.0).await {
+                    Ok(order_id) => {
+                        info!("════════════════════════════════════════════════════════════════");
+                        info!("✅ ORDER PLACED SUCCESSFULLY");
+                        info!("════════════════════════════════════════════════════════════════");
+                        info!("  Order ID:       {:?}", order_id);
+                        info!("  Market ID:      {}", market_id);
+                        info!("  Market:         {}", market_question);
+                        info!("  URL:            {}", market_url);
+                        info!("  Outcome:        {}", outcome_name);
+                        info!("  Timeframe:      {}", timeframe);
+                        info!("  Token ID:       {}", token_id);
+                        info!("════════════════════════════════════════════════════════════════");
+                    }
+                    Err(e) => {
+                        error!("════════════════════════════════════════════════════════════════");
+                        error!("❌ ORDER PLACEMENT FAILED");
+                        error!("════════════════════════════════════════════════════════════════");
+                        error!("  Error:          {}", e);
+                        error!("  Market ID:      {}", market_id);
+                        error!("  Market:         {}", market_question);
+                        error!("  URL:            {}", market_url);
+                        error!("  Outcome:        {}", outcome_name);
+                        error!("  Token ID:       {}", token_id);
+                        error!("════════════════════════════════════════════════════════════════");
+                    }
+                }
+                order_placed.insert(token_id);
+            }
+
+            // Sleep briefly before next iteration
+            sleep(StdDuration::from_millis(100)).await;
+        }
+
+        info!("[WS {}] Closing connection", market_id);
+        if let Err(e) = client.shutdown().await {
+            warn!("[WS {}] Error during shutdown: {}", market_id, e);
+        }
+        info!("[WS {}] Tracker stopped", market_id);
+        Ok(())
     }
 
     /// Remove completed tracker tasks from the tasks map.
@@ -377,12 +744,17 @@ impl Strategy for UpOrDownStrategy {
 
         // Wait for all tracker tasks to complete (they will stop due to shutdown flag)
         if !self.tracker_tasks.is_empty() {
-            info!(count = self.tracker_tasks.len(), "Waiting for WebSocket trackers to shut down");
+            info!(
+                count = self.tracker_tasks.len(),
+                "Waiting for WebSocket trackers to shut down"
+            );
 
             for (market_id, handle) in self.tracker_tasks.drain() {
                 match handle.await {
                     Ok(()) => debug!(market_id = %market_id, "Tracker task completed"),
-                    Err(e) => warn!(market_id = %market_id, error = %e, "Tracker task failed to join"),
+                    Err(e) => {
+                        warn!(market_id = %market_id, error = %e, "Tracker task failed to join")
+                    }
                 }
             }
 

@@ -3,11 +3,8 @@
 //! Application layer use cases for market sniping.
 //! Encapsulates business logic and orchestrates infrastructure.
 
-use crate::domain::SniperMarket;
-use crate::infrastructure::{BotConfig, EventsConfig, SharedOraclePrices, SniperConfig};
+use crate::infrastructure::{BotConfig, EventsConfig, SniperConfig};
 use anyhow::Result;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
 /// Configuration Service.
 ///

@@ -13,8 +13,9 @@ pub mod shutdown;
 // Re-export commonly used types from client
 pub use client::{
     clob::{
-        spawn_market_tracker, Market, OrderArgs, OrderBook, OrderType, Outcome, PriceLevel,
-        RestClient, Side, WebSocketClient,
+        build_ws_client, handle_client_event, Market, MarketTrackerConfig, OrderArgs, OrderBook,
+        OrderType, Outcome, PriceLevel, RestClient, SharedOrderbooks, Side, SniperHandler,
+        SniperRoute, SniperRouter, WebSocketClient,
     },
     gamma::{GammaClient, GammaEvent, GammaFilters, GammaMarket, GammaTag},
     oracle::{spawn_oracle_trackers, OraclePriceManager, OracleType, PriceEntry, SharedOraclePrices},

@@ -10,7 +10,7 @@
 //! - `rest/`: REST API client (split into mod, orders, auth)
 //! - `order_builder/`: EIP-712 order signing (split into mod, types, signing, encoding, payload)
 //! - `trading`: High-level trading client with simplified API
-//! - `sniper_ws`: WebSocket market tracker
+//! - `sniper_ws`: WebSocket orderbook tracking utilities
 
 pub mod constants;
 mod helpers;
@@ -27,6 +27,9 @@ pub use constants::*;
 pub use hypersockets::WebSocketClient;
 pub use order_builder::{Order, OrderBuilder, SignedOrder};
 pub use rest::RestClient;
-pub use sniper_ws::spawn_market_tracker;
+pub use sniper_ws::{
+    build_ws_client, handle_client_event, MarketTrackerConfig, SharedOrderbooks, SniperHandler,
+    SniperRoute, SniperRouter,
+};
 pub use trading::{TradingClient, TradingError};
 pub use types::*;
