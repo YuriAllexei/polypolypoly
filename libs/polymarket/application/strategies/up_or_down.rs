@@ -459,15 +459,22 @@ impl UpOrDownStrategy {
             // Check orderbook state for all tracked tokens
             // Collect tokens that need orders (to avoid holding lock across await)
             let mut tokens_to_order: Vec<(String, String, f64)> = Vec::new();
+            let mut all_orderbooks_empty = true; // Track if all orderbooks are empty (market ended)
             {
                 let obs = orderbooks.read().unwrap();
                 for token_id in &token_ids {
                     if let Some(orderbook) = obs.get(token_id) {
                         let has_asks = !orderbook.asks.is_empty();
+                        let has_bids = !orderbook.bids.is_empty();
                         let outcome_name = outcome_map
                             .get(token_id)
                             .cloned()
                             .unwrap_or_else(|| "Unknown".to_string());
+
+                        // Check if this orderbook has any activity
+                        if has_asks || has_bids {
+                            all_orderbooks_empty = false;
+                        }
 
                         if has_asks {
                             // Asks exist - reset timer and threshold state if they were running
@@ -539,6 +546,21 @@ impl UpOrDownStrategy {
                 }
             } // Lock released here
 
+            // Check if all orderbooks are empty (market has ended)
+            if all_orderbooks_empty {
+                info!(
+                    "════════════════════════════════════════════════════════════════\n\
+                     🏁 MARKET ENDED - NO BIDS OR ASKS IN ANY ORDERBOOK\n\
+                     ════════════════════════════════════════════════════════════════\n\
+                       Market ID:    {}\n\
+                       Market:       {}\n\
+                       URL:          {}\n\
+                     ════════════════════════════════════════════════════════════════",
+                    market_id, market_question, market_url
+                );
+                break;
+            }
+
             // Place orders outside the lock scope
             for (token_id, outcome_name, elapsed) in tokens_to_order {
                 info!(
@@ -592,7 +614,49 @@ impl UpOrDownStrategy {
                         );
                     }
                 }
-                order_placed.insert(token_id);
+                order_placed.insert(token_id.clone());
+            }
+
+            // Check for false positive risk on all tokens with placed orders
+            if !order_placed.is_empty() {
+                let obs = orderbooks.read().unwrap();
+                for token_id in &order_placed {
+                    if let Some(orderbook) = obs.get(token_id) {
+                        let outcome_name = outcome_map
+                            .get(token_id)
+                            .cloned()
+                            .unwrap_or_else(|| "Unknown".to_string());
+
+                        // Bids are already sorted descending (highest price first) from OrderbookSide
+                        let bid_levels = orderbook.bids.levels();
+
+                        // Skip top bid and take next 4 bids
+                        if bid_levels.len() > 1 {
+                            let other_bids: Vec<f64> = bid_levels.iter().skip(1).take(4).map(|(price, _)| *price).collect();
+                            if !other_bids.is_empty() {
+                                let avg_price: f64 = other_bids.iter().sum::<f64>() / other_bids.len() as f64;
+
+                                if avg_price < 0.90 {
+                                    warn!(
+                                        "════════════════════════════════════════════════════════════════\n\
+                                         ⚠️  FALSE POSITIVE RISK DETECTED\n\
+                                         ════════════════════════════════════════════════════════════════\n\
+                                           Market ID:      {}\n\
+                                           Market:         {}\n\
+                                           URL:            {}\n\
+                                           Outcome:        {}\n\
+                                           Token ID:       {}\n\
+                                           Avg Bid (excl. top): {:.4}\n\
+                                           Other Bids:     {:?}\n\
+                                           Threshold:      0.90\n\
+                                         ════════════════════════════════════════════════════════════════",
+                                        market_id, market_question, market_url, outcome_name, token_id, avg_price, other_bids
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Sleep briefly before next iteration
