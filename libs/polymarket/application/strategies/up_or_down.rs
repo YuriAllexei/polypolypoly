@@ -160,6 +160,496 @@ impl std::fmt::Display for Timeframe {
 }
 
 // =============================================================================
+// Market Tracker Types
+// =============================================================================
+
+/// Context holding immutable market information for the tracker
+struct MarketTrackerContext {
+    market_id: String,
+    market_question: String,
+    market_url: String,
+    oracle_source: OracleSource,
+    crypto_asset: CryptoAsset,
+    timeframe: Timeframe,
+    token_ids: Vec<String>,
+    outcome_map: HashMap<String, String>,
+    /// Market end time for dynamic threshold calculation
+    market_end_time: DateTime<Utc>,
+    /// Minimum threshold in seconds (when close to market end)
+    threshold_min: f64,
+    /// Maximum threshold in seconds (when far from market end)
+    threshold_max: f64,
+    /// Decay time constant in seconds
+    threshold_tau: f64,
+}
+
+impl MarketTrackerContext {
+    fn new(
+        market: &DbMarket,
+        config: &UpOrDownConfig,
+        outcomes: Vec<String>,
+    ) -> anyhow::Result<Self> {
+        let tags = market
+            .parse_tags()
+            .unwrap_or(serde_json::Value::Array(vec![]));
+        let token_ids = market.parse_token_ids()?;
+
+        // Build outcome map (token_id -> outcome name)
+        let outcome_map: HashMap<String, String> = token_ids
+            .iter()
+            .zip(outcomes.iter())
+            .map(|(id, outcome)| (id.clone(), outcome.clone()))
+            .collect();
+
+        let market_url = market
+            .slug
+            .as_ref()
+            .map(|s| format!("https://polymarket.com/event/{}", s))
+            .unwrap_or_else(|| "N/A".to_string());
+
+        // Parse market end time
+        let market_end_time = DateTime::parse_from_rfc3339(&market.end_date)
+            .map_err(|e| anyhow::anyhow!("Failed to parse market end_date: {}", e))?
+            .with_timezone(&Utc);
+
+        Ok(Self {
+            market_id: market.id.clone(),
+            market_question: market.question.clone(),
+            market_url,
+            oracle_source: OracleSource::from_description(&market.description),
+            crypto_asset: CryptoAsset::from_tags(&tags),
+            timeframe: Timeframe::from_tags(&tags),
+            token_ids,
+            outcome_map,
+            market_end_time,
+            threshold_min: config.threshold_min,
+            threshold_max: config.threshold_max,
+            threshold_tau: config.threshold_tau,
+        })
+    }
+
+    fn get_outcome_name(&self, token_id: &str) -> String {
+        self.outcome_map
+            .get(token_id)
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string())
+    }
+}
+
+/// Mutable state for the market tracker
+struct TrackerState {
+    /// Timers tracking how long each token has had no asks
+    no_asks_timers: HashMap<String, Instant>,
+    /// Tokens that have exceeded the no-asks threshold
+    threshold_triggered: HashSet<String>,
+    /// Tokens for which orders have been placed
+    order_placed: HashSet<String>,
+    /// Whether this is the first orderbook check (used for initial delay)
+    first_orderbook_check: bool,
+}
+
+impl TrackerState {
+    fn new() -> Self {
+        Self {
+            no_asks_timers: HashMap::new(),
+            threshold_triggered: HashSet::new(),
+            order_placed: HashSet::new(),
+            first_orderbook_check: true,
+        }
+    }
+}
+
+/// Result of checking orderbook state for a single token
+enum OrderbookCheckResult {
+    /// Asks exist - market is active
+    HasAsks,
+    /// No asks - timer started or continuing
+    NoAsks,
+    /// No asks and threshold exceeded - should place order
+    ThresholdExceeded { elapsed_secs: f64 },
+}
+
+// =============================================================================
+// Market Tracker Helper Functions
+// =============================================================================
+
+/// Calculate dynamic no-ask threshold based on time remaining until market end.
+///
+/// Uses exponential decay formula:
+/// threshold = min + (max - min) * (1 - exp(-time_remaining / tau))
+///
+/// - When far from market end (large time_remaining): threshold approaches max (conservative)
+/// - When close to market end (small time_remaining): threshold approaches min (aggressive)
+fn calculate_dynamic_threshold(ctx: &MarketTrackerContext) -> f64 {
+    let now = Utc::now();
+    let time_remaining = ctx
+        .market_end_time
+        .signed_duration_since(now)
+        .num_milliseconds() as f64
+        / 1000.0;
+
+    // If past market end or at market end, use minimum threshold
+    if time_remaining <= 0.0 {
+        return ctx.threshold_min;
+    }
+
+    // Exponential decay formula
+    ctx.threshold_min
+        + (ctx.threshold_max - ctx.threshold_min)
+            * (1.0 - (-time_remaining / ctx.threshold_tau).exp())
+}
+
+/// Check a single token's orderbook and update timer state
+fn check_token_orderbook(
+    token_id: &str,
+    has_asks: bool,
+    state: &mut TrackerState,
+    ctx: &MarketTrackerContext,
+) -> OrderbookCheckResult {
+    let outcome_name = ctx.get_outcome_name(token_id);
+
+    if has_asks {
+        // Asks exist - reset timer and threshold state
+        if state.no_asks_timers.remove(token_id).is_some() {
+            state.threshold_triggered.remove(token_id);
+            info!(
+                "⏹️  Timer RESET for {} ({}) - asks appeared in orderbook",
+                token_id, outcome_name
+            );
+        }
+        return OrderbookCheckResult::HasAsks;
+    }
+
+    // No asks - start timer if not running
+    if !state.no_asks_timers.contains_key(token_id) {
+        log_no_asks_started(ctx, token_id, &outcome_name);
+        state
+            .no_asks_timers
+            .insert(token_id.to_string(), Instant::now());
+    }
+
+    // Check if threshold exceeded using dynamic threshold
+    if !state.threshold_triggered.contains(token_id) && !state.order_placed.contains(token_id) {
+        if let Some(timer_start) = state.no_asks_timers.get(token_id) {
+            let elapsed = timer_start.elapsed().as_secs_f64();
+            let dynamic_threshold = calculate_dynamic_threshold(ctx);
+            if elapsed >= dynamic_threshold {
+                state.threshold_triggered.insert(token_id.to_string());
+                return OrderbookCheckResult::ThresholdExceeded {
+                    elapsed_secs: elapsed,
+                };
+            }
+        }
+    }
+
+    OrderbookCheckResult::NoAsks
+}
+
+/// Check all orderbooks and return tokens that need orders placed
+async fn check_all_orderbooks(
+    orderbooks: &SharedOrderbooks,
+    state: &mut TrackerState,
+    ctx: &MarketTrackerContext,
+) -> (Vec<(String, String, f64)>, bool) {
+    // Sleep on first call to allow orderbook data to populate
+    if state.first_orderbook_check {
+        sleep(StdDuration::from_secs(2)).await;
+        state.first_orderbook_check = false;
+    }
+
+    let mut tokens_to_order = Vec::new();
+    let mut all_empty = true;
+
+    let obs = orderbooks.read().unwrap();
+    for token_id in &ctx.token_ids {
+        if let Some(orderbook) = obs.get(token_id) {
+            let has_asks = !orderbook.asks.is_empty();
+            let has_bids = !orderbook.bids.is_empty();
+
+            if has_asks || has_bids {
+                all_empty = false;
+            }
+
+            match check_token_orderbook(token_id, has_asks, state, ctx) {
+                OrderbookCheckResult::ThresholdExceeded { elapsed_secs } => {
+                    let outcome_name = ctx.get_outcome_name(token_id);
+                    let dynamic_threshold = calculate_dynamic_threshold(ctx);
+                    log_threshold_exceeded(
+                        ctx,
+                        token_id,
+                        &outcome_name,
+                        elapsed_secs,
+                        dynamic_threshold,
+                    );
+                    tokens_to_order.push((token_id.clone(), outcome_name, elapsed_secs));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (tokens_to_order, all_empty)
+}
+
+/// Place a buy order for a token
+async fn place_order(
+    trading: &TradingClient,
+    token_id: &str,
+    outcome_name: &str,
+    elapsed: f64,
+    ctx: &MarketTrackerContext,
+) -> bool {
+    let dynamic_threshold = calculate_dynamic_threshold(ctx);
+    log_placing_order(ctx, token_id, outcome_name, elapsed, dynamic_threshold);
+
+    match trading.buy(token_id, 0.99, 18.0).await {
+        Ok(order_id) => {
+            log_order_success(ctx, token_id, outcome_name, &order_id);
+            true
+        }
+        Err(e) => {
+            log_order_failed(ctx, token_id, outcome_name, &e);
+            false
+        }
+    }
+}
+
+/// Check for false positive risk on tokens with placed orders
+fn check_false_positive_risk(
+    orderbooks: &SharedOrderbooks,
+    state: &TrackerState,
+    ctx: &MarketTrackerContext,
+) {
+    if state.order_placed.is_empty() {
+        return;
+    }
+
+    let obs = orderbooks.read().unwrap();
+    for token_id in &state.order_placed {
+        if let Some(orderbook) = obs.get(token_id) {
+            let bid_levels = orderbook.bids.levels();
+
+            // Need at least 2 bids to analyze (skip top bid, check others)
+            if bid_levels.len() > 1 {
+                let other_bids: Vec<f64> = bid_levels
+                    .iter()
+                    .skip(1)
+                    .take(4)
+                    .map(|(price, _)| *price)
+                    .collect();
+
+                if !other_bids.is_empty() {
+                    let avg_price: f64 = other_bids.iter().sum::<f64>() / other_bids.len() as f64;
+
+                    if avg_price < 0.90 {
+                        let outcome_name = ctx.get_outcome_name(token_id);
+                        log_false_positive_risk(
+                            ctx,
+                            token_id,
+                            &outcome_name,
+                            avg_price,
+                            &other_bids,
+                        );
+                        //TODO Order cancellation logic could go here
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Logging Helper Functions
+// =============================================================================
+
+fn log_no_asks_started(ctx: &MarketTrackerContext, token_id: &str, outcome_name: &str) {
+    info!(
+        "════════════════════════════════════════════════════════════════\n\
+         🎯 NO ASKS IN ORDERBOOK - STARTING TIMER\n\
+         ════════════════════════════════════════════════════════════════\n\
+           Market ID:    {}\n\
+           Market:       {}\n\
+           URL:          {}\n\
+           Oracle:       {}\n\
+           Asset:        {}\n\
+           Timeframe:    {}\n\
+           Outcome:      {}\n\
+           Token ID:     {}\n\
+         ════════════════════════════════════════════════════════════════",
+        ctx.market_id,
+        ctx.market_question,
+        ctx.market_url,
+        ctx.oracle_source,
+        ctx.crypto_asset,
+        ctx.timeframe,
+        outcome_name,
+        token_id
+    );
+}
+
+fn log_threshold_exceeded(
+    ctx: &MarketTrackerContext,
+    token_id: &str,
+    outcome_name: &str,
+    elapsed: f64,
+    dynamic_threshold: f64,
+) {
+    info!(
+        "════════════════════════════════════════════════════════════════\n\
+         ⚡ NO-ASK TIME THRESHOLD EXCEEDED\n\
+         ════════════════════════════════════════════════════════════════\n\
+           Market ID:      {}\n\
+           Market:         {}\n\
+           URL:            {}\n\
+           Oracle:         {}\n\
+           Asset:          {}\n\
+           Timeframe:      {}\n\
+           Outcome:        {}\n\
+           Token ID:       {}\n\
+           Elapsed Time:   {:.3} seconds\n\
+           Threshold:      {:.3} seconds (dynamic)\n\
+         ════════════════════════════════════════════════════════════════",
+        ctx.market_id,
+        ctx.market_question,
+        ctx.market_url,
+        ctx.oracle_source,
+        ctx.crypto_asset,
+        ctx.timeframe,
+        outcome_name,
+        token_id,
+        elapsed,
+        dynamic_threshold
+    );
+}
+
+fn log_placing_order(
+    ctx: &MarketTrackerContext,
+    token_id: &str,
+    outcome_name: &str,
+    elapsed: f64,
+    dynamic_threshold: f64,
+) {
+    info!(
+        "════════════════════════════════════════════════════════════════\n\
+         🚀 PLACING BUY ORDER\n\
+         ════════════════════════════════════════════════════════════════\n\
+           Market ID:      {}\n\
+           Market:         {}\n\
+           URL:            {}\n\
+           Oracle:         {}\n\
+           Asset:          {}\n\
+           Timeframe:      {}\n\
+           Outcome:        {}\n\
+           Token ID:       {}\n\
+           Elapsed Time:   {:.3} seconds\n\
+           Threshold:      {:.3} seconds (dynamic)\n\
+         ════════════════════════════════════════════════════════════════",
+        ctx.market_id,
+        ctx.market_question,
+        ctx.market_url,
+        ctx.oracle_source,
+        ctx.crypto_asset,
+        ctx.timeframe,
+        outcome_name,
+        token_id,
+        elapsed,
+        dynamic_threshold
+    );
+}
+
+fn log_order_success<T: std::fmt::Debug>(
+    ctx: &MarketTrackerContext,
+    token_id: &str,
+    outcome_name: &str,
+    order_id: &T,
+) {
+    info!(
+        "════════════════════════════════════════════════════════════════\n\
+         ✅ ORDER PLACED SUCCESSFULLY\n\
+         ════════════════════════════════════════════════════════════════\n\
+           Order ID:       {:?}\n\
+           Market ID:      {}\n\
+           Market:         {}\n\
+           URL:            {}\n\
+           Outcome:        {}\n\
+           Timeframe:      {}\n\
+           Token ID:       {}\n\
+         ════════════════════════════════════════════════════════════════",
+        order_id,
+        ctx.market_id,
+        ctx.market_question,
+        ctx.market_url,
+        outcome_name,
+        ctx.timeframe,
+        token_id
+    );
+}
+
+fn log_order_failed<E: std::fmt::Display>(
+    ctx: &MarketTrackerContext,
+    token_id: &str,
+    outcome_name: &str,
+    error: &E,
+) {
+    error!(
+        "════════════════════════════════════════════════════════════════\n\
+         ❌ ORDER PLACEMENT FAILED\n\
+         ════════════════════════════════════════════════════════════════\n\
+           Error:          {}\n\
+           Market ID:      {}\n\
+           Market:         {}\n\
+           URL:            {}\n\
+           Outcome:        {}\n\
+           Token ID:       {}\n\
+         ════════════════════════════════════════════════════════════════",
+        error, ctx.market_id, ctx.market_question, ctx.market_url, outcome_name, token_id
+    );
+}
+
+fn log_false_positive_risk(
+    ctx: &MarketTrackerContext,
+    token_id: &str,
+    outcome_name: &str,
+    avg_price: f64,
+    other_bids: &[f64],
+) {
+    warn!(
+        "════════════════════════════════════════════════════════════════\n\
+         ⚠️  FALSE POSITIVE RISK DETECTED\n\
+         ════════════════════════════════════════════════════════════════\n\
+           Market ID:      {}\n\
+           Market:         {}\n\
+           URL:            {}\n\
+           Outcome:        {}\n\
+           Token ID:       {}\n\
+           Avg Bid (excl. top): {:.4}\n\
+           Other Bids:     {:?}\n\
+           Threshold:      0.90\n\
+         ════════════════════════════════════════════════════════════════",
+        ctx.market_id,
+        ctx.market_question,
+        ctx.market_url,
+        outcome_name,
+        token_id,
+        avg_price,
+        other_bids
+    );
+}
+
+fn log_market_ended(ctx: &MarketTrackerContext) {
+    info!(
+        "════════════════════════════════════════════════════════════════\n\
+         🏁 MARKET ENDED - NO BIDS OR ASKS IN ANY ORDERBOOK\n\
+         ════════════════════════════════════════════════════════════════\n\
+           Market ID:    {}\n\
+           Market:       {}\n\
+           URL:          {}\n\
+         ════════════════════════════════════════════════════════════════",
+        ctx.market_id, ctx.market_question, ctx.market_url
+    );
+}
+
+// =============================================================================
 // Strategy Implementation
 // =============================================================================
 
@@ -322,8 +812,16 @@ impl UpOrDownStrategy {
                        Token IDs:      {:?}\n\
                        Outcomes:       {:?}\n\
                      ════════════════════════════════════════════════════════════════",
-                    tracked.market.id, tracked.market.question, market_url, oracle_source, crypto_asset, timeframe,
-                    time_until_end.num_seconds(), tracked.end_time.format("%Y-%m-%d %H:%M:%S UTC"), token_ids, outcomes
+                    tracked.market.id,
+                    tracked.market.question,
+                    market_url,
+                    oracle_source,
+                    crypto_asset,
+                    timeframe,
+                    time_until_end.num_seconds(),
+                    tracked.end_time.format("%Y-%m-%d %H:%M:%S UTC"),
+                    token_ids,
+                    outcomes
                 );
 
                 tracked.tracker_spawned = true;
@@ -381,293 +879,80 @@ impl UpOrDownStrategy {
         trading: Arc<TradingClient>,
         _oracle_prices: Option<SharedOraclePrices>,
     ) -> anyhow::Result<()> {
-        let market_id = market.id.clone();
-        let market_question = market.question.clone();
-
-        // Parse market metadata from description and tags
-        let tags = market
-            .parse_tags()
-            .unwrap_or(serde_json::Value::Array(vec![]));
-        let oracle_source = OracleSource::from_description(&market.description);
-        let crypto_asset = CryptoAsset::from_tags(&tags);
-        let timeframe = Timeframe::from_tags(&tags);
-
-        // Parse token_ids and outcomes from DbMarket
-        let token_ids = market.parse_token_ids()?;
+        // Initialize context and state
         let outcomes = market.parse_outcomes()?;
+        let ctx = MarketTrackerContext::new(&market, &config, outcomes.clone())?;
+        let mut state = TrackerState::new();
 
-        // Build WebSocket configuration from DbMarket
+        // Build WebSocket configuration
         let ws_config = MarketTrackerConfig::new(
-            market_id.clone(),
-            market_question.clone(),
+            ctx.market_id.clone(),
+            ctx.market_question.clone(),
             market.slug.clone(),
-            token_ids.clone(),
-            outcomes.clone(),
+            ctx.token_ids.clone(),
+            outcomes,
             &market.end_date,
         )?;
 
-        info!("[WS {}] Connecting to orderbook stream...", market_id);
-        info!("[WS {}] Market: {}", market_id, market_question);
-        info!("[WS {}] Oracle: {}", market_id, oracle_source);
-        info!("[WS {}] Asset: {}", market_id, crypto_asset);
-        info!("[WS {}] Timeframe: {}", market_id, timeframe);
+        // Log startup info
+        info!("[WS {}] Connecting to orderbook stream...", ctx.market_id);
+        info!("[WS {}] Market: {}", ctx.market_id, ctx.market_question);
+        info!("[WS {}] Oracle: {}", ctx.market_id, ctx.oracle_source);
+        info!("[WS {}] Asset: {}", ctx.market_id, ctx.crypto_asset);
+        info!("[WS {}] Timeframe: {}", ctx.market_id, ctx.timeframe);
         info!(
             "[WS {}] Resolution time: {}",
-            market_id, ws_config.resolution_time
+            ctx.market_id, ws_config.resolution_time
         );
 
-        // Create shared orderbooks - handler writes, this loop reads
+        // Create shared orderbooks and connect WebSocket
         let orderbooks: SharedOrderbooks = Arc::new(std::sync::RwLock::new(HashMap::new()));
-
-        // Build and connect WebSocket client with shared orderbooks
         let client = build_ws_client(&ws_config, Arc::clone(&orderbooks)).await?;
-        info!("[WS {}] Connected and subscribed", market_id);
-
-        // Timer state for tracking no-asks condition
-        let outcome_map = ws_config.build_outcome_map();
-        let market_url = market
-            .slug
-            .as_ref()
-            .map(|s| format!("https://polymarket.com/event/{}", s))
-            .unwrap_or_else(|| "N/A".to_string());
-        let mut no_asks_timers: HashMap<String, Instant> = HashMap::new();
-        let mut _bid_triggered: HashSet<String> = HashSet::new();
-        let mut threshold_triggered: HashSet<String> = HashSet::new();
-        let mut order_placed: HashSet<String> = HashSet::new();
-
-        // Get threshold from config
-        let no_ask_threshold_secs = config.no_ask_time_threshold;
-
-        const _MIN_LIQUIDITY: f64 = 100_000.0; // 10k tokens
-        const _TARGET_BID_PRICE: f64 = 0.99;
+        info!("[WS {}] Connected and subscribed", ctx.market_id);
 
         // Main tracking loop
         loop {
-            // Check shutdown flag first (highest priority)
+            // Check shutdown flag (highest priority)
             if !shutdown_flag.load(Ordering::Acquire) {
-                info!("[WS {}] Shutdown signal received", market_id);
+                info!("[WS {}] Shutdown signal received", ctx.market_id);
                 break;
             }
 
             // Handle WebSocket events
             if let Some(event) = client.try_recv_event() {
-                if !handle_client_event(event, &market_id) {
+                if !handle_client_event(event, &ctx.market_id) {
                     break;
                 }
             }
 
-            // Check orderbook state for all tracked tokens
-            // Collect tokens that need orders (to avoid holding lock across await)
-            let mut tokens_to_order: Vec<(String, String, f64)> = Vec::new();
-            let mut all_orderbooks_empty = true; // Track if all orderbooks are empty (market ended)
-            {
-                let obs = orderbooks.read().unwrap();
-                for token_id in &token_ids {
-                    if let Some(orderbook) = obs.get(token_id) {
-                        let has_asks = !orderbook.asks.is_empty();
-                        let has_bids = !orderbook.bids.is_empty();
-                        let outcome_name = outcome_map
-                            .get(token_id)
-                            .cloned()
-                            .unwrap_or_else(|| "Unknown".to_string());
+            // Check orderbooks and get tokens needing orders
+            let (tokens_to_order, all_empty) = check_all_orderbooks(&orderbooks, &mut state, &ctx).await;
 
-                        // Check if this orderbook has any activity
-                        if has_asks || has_bids {
-                            all_orderbooks_empty = false;
-                        }
-
-                        if has_asks {
-                            // Asks exist - reset timer and threshold state if they were running
-                            if no_asks_timers.remove(token_id).is_some() {
-                                threshold_triggered.remove(token_id);
-                                info!(
-                                    "⏹️  Timer RESET for {} ({}) - asks appeared in orderbook",
-                                    token_id, outcome_name
-                                );
-                            }
-                        } else {
-                            // No asks - start timer if not already running
-                            if !no_asks_timers.contains_key(token_id) {
-                                info!(
-                                    "════════════════════════════════════════════════════════════════\n\
-                                     🎯 NO ASKS IN ORDERBOOK - STARTING TIMER\n\
-                                     ════════════════════════════════════════════════════════════════\n\
-                                       Market ID:    {}\n\
-                                       Market:       {}\n\
-                                       URL:          {}\n\
-                                       Oracle:       {}\n\
-                                       Asset:        {}\n\
-                                       Timeframe:    {}\n\
-                                       Outcome:      {}\n\
-                                       Token ID:     {}\n\
-                                     ════════════════════════════════════════════════════════════════",
-                                    market_id, market_question, market_url, oracle_source, crypto_asset, timeframe, outcome_name, token_id
-                                );
-                                no_asks_timers.insert(token_id.clone(), Instant::now());
-                            }
-
-                            // Check if no-asks time threshold exceeded (only log once per token)
-                            if !threshold_triggered.contains(token_id)
-                                && !order_placed.contains(token_id)
-                            {
-                                if let Some(timer_start) = no_asks_timers.get(token_id) {
-                                    let elapsed = timer_start.elapsed().as_secs_f64();
-                                    if elapsed >= no_ask_threshold_secs {
-                                        info!(
-                                            "════════════════════════════════════════════════════════════════\n\
-                                             ⚡ NO-ASK TIME THRESHOLD EXCEEDED\n\
-                                             ════════════════════════════════════════════════════════════════\n\
-                                               Market ID:      {}\n\
-                                               Market:         {}\n\
-                                               URL:            {}\n\
-                                               Oracle:         {}\n\
-                                               Asset:          {}\n\
-                                               Timeframe:      {}\n\
-                                               Outcome:        {}\n\
-                                               Token ID:       {}\n\
-                                               Elapsed Time:   {:.3} seconds\n\
-                                               Threshold:      {:.3} seconds\n\
-                                             ════════════════════════════════════════════════════════════════",
-                                            market_id, market_question, market_url, oracle_source, crypto_asset, timeframe, outcome_name, token_id, elapsed, no_ask_threshold_secs
-                                        );
-
-                                        // Collect token for ordering (will place order after releasing lock)
-                                        tokens_to_order.push((
-                                            token_id.clone(),
-                                            outcome_name.clone(),
-                                            elapsed,
-                                        ));
-                                        threshold_triggered.insert(token_id.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } // Lock released here
-
-            // Check if all orderbooks are empty (market has ended)
-            if all_orderbooks_empty {
-                info!(
-                    "════════════════════════════════════════════════════════════════\n\
-                     🏁 MARKET ENDED - NO BIDS OR ASKS IN ANY ORDERBOOK\n\
-                     ════════════════════════════════════════════════════════════════\n\
-                       Market ID:    {}\n\
-                       Market:       {}\n\
-                       URL:          {}\n\
-                     ════════════════════════════════════════════════════════════════",
-                    market_id, market_question, market_url
-                );
+            // Exit if market has ended
+            if all_empty {
+                log_market_ended(&ctx);
                 break;
             }
 
-            // Place orders outside the lock scope
+            // Place orders for tokens that exceeded threshold
             for (token_id, outcome_name, elapsed) in tokens_to_order {
-                info!(
-                    "════════════════════════════════════════════════════════════════\n\
-                     🚀 PLACING BUY ORDER\n\
-                     ════════════════════════════════════════════════════════════════\n\
-                       Market ID:      {}\n\
-                       Market:         {}\n\
-                       URL:            {}\n\
-                       Oracle:         {}\n\
-                       Asset:          {}\n\
-                       Timeframe:      {}\n\
-                       Outcome:        {}\n\
-                       Token ID:       {}\n\
-                       Elapsed Time:   {:.3} seconds\n\
-                       Threshold:      {:.3} seconds\n\
-                     ════════════════════════════════════════════════════════════════",
-                    market_id, market_question, market_url, oracle_source, crypto_asset, timeframe, outcome_name, token_id, elapsed, no_ask_threshold_secs
-                );
-
-                match trading.buy(&token_id, 0.99, 18.0).await {
-                    Ok(order_id) => {
-                        info!(
-                            "════════════════════════════════════════════════════════════════\n\
-                             ✅ ORDER PLACED SUCCESSFULLY\n\
-                             ════════════════════════════════════════════════════════════════\n\
-                               Order ID:       {:?}\n\
-                               Market ID:      {}\n\
-                               Market:         {}\n\
-                               URL:            {}\n\
-                               Outcome:        {}\n\
-                               Timeframe:      {}\n\
-                               Token ID:       {}\n\
-                             ════════════════════════════════════════════════════════════════",
-                            order_id, market_id, market_question, market_url, outcome_name, timeframe, token_id
-                        );
-                    }
-                    Err(e) => {
-                        error!(
-                            "════════════════════════════════════════════════════════════════\n\
-                             ❌ ORDER PLACEMENT FAILED\n\
-                             ════════════════════════════════════════════════════════════════\n\
-                               Error:          {}\n\
-                               Market ID:      {}\n\
-                               Market:         {}\n\
-                               URL:            {}\n\
-                               Outcome:        {}\n\
-                               Token ID:       {}\n\
-                             ════════════════════════════════════════════════════════════════",
-                            e, market_id, market_question, market_url, outcome_name, token_id
-                        );
-                    }
-                }
-                order_placed.insert(token_id.clone());
+                place_order(&trading, &token_id, &outcome_name, elapsed, &ctx).await;
+                state.order_placed.insert(token_id);
             }
 
-            // Check for false positive risk on all tokens with placed orders
-            if !order_placed.is_empty() {
-                let obs = orderbooks.read().unwrap();
-                for token_id in &order_placed {
-                    if let Some(orderbook) = obs.get(token_id) {
-                        let outcome_name = outcome_map
-                            .get(token_id)
-                            .cloned()
-                            .unwrap_or_else(|| "Unknown".to_string());
+            // Monitor for false positive risk on placed orders
+            check_false_positive_risk(&orderbooks, &state, &ctx);
 
-                        // Bids are already sorted descending (highest price first) from OrderbookSide
-                        let bid_levels = orderbook.bids.levels();
-
-                        // Skip top bid and take next 4 bids
-                        if bid_levels.len() > 1 {
-                            let other_bids: Vec<f64> = bid_levels.iter().skip(1).take(4).map(|(price, _)| *price).collect();
-                            if !other_bids.is_empty() {
-                                let avg_price: f64 = other_bids.iter().sum::<f64>() / other_bids.len() as f64;
-
-                                if avg_price < 0.90 {
-                                    warn!(
-                                        "════════════════════════════════════════════════════════════════\n\
-                                         ⚠️  FALSE POSITIVE RISK DETECTED\n\
-                                         ════════════════════════════════════════════════════════════════\n\
-                                           Market ID:      {}\n\
-                                           Market:         {}\n\
-                                           URL:            {}\n\
-                                           Outcome:        {}\n\
-                                           Token ID:       {}\n\
-                                           Avg Bid (excl. top): {:.4}\n\
-                                           Other Bids:     {:?}\n\
-                                           Threshold:      0.90\n\
-                                         ════════════════════════════════════════════════════════════════",
-                                        market_id, market_question, market_url, outcome_name, token_id, avg_price, other_bids
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Sleep briefly before next iteration
+            // Brief sleep before next iteration
             sleep(StdDuration::from_millis(100)).await;
         }
 
-        info!("[WS {}] Closing connection", market_id);
+        // Cleanup
+        info!("[WS {}] Closing connection", ctx.market_id);
         if let Err(e) = client.shutdown().await {
-            warn!("[WS {}] Error during shutdown: {}", market_id, e);
+            warn!("[WS {}] Error during shutdown: {}", ctx.market_id, e);
         }
-        info!("[WS {}] Tracker stopped", market_id);
+        info!("[WS {}] Tracker stopped", ctx.market_id);
         Ok(())
     }
 

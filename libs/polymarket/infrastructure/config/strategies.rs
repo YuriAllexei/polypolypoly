@@ -34,13 +34,21 @@ pub struct UpOrDownConfig {
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: f64,
 
-    /// Time threshold in seconds - if no asks for longer than this, trigger action
-    #[serde(default = "default_no_ask_time_threshold")]
-    pub no_ask_time_threshold: f64,
-
     /// Minimum price difference in basis points between oracle and market for trade signal
     #[serde(default = "default_oracle_bps_threshold")]
     pub oracle_bps_price_threshold: f64,
+
+    /// Minimum threshold in seconds for no-asks condition (when close to market end)
+    #[serde(default = "default_threshold_min")]
+    pub threshold_min: f64,
+
+    /// Maximum threshold in seconds for no-asks condition (when far from market end)
+    #[serde(default = "default_threshold_max")]
+    pub threshold_max: f64,
+
+    /// Decay time constant in seconds for exponential threshold decay
+    #[serde(default = "default_threshold_tau")]
+    pub threshold_tau: f64,
 }
 
 fn default_delta_t() -> f64 {
@@ -51,12 +59,20 @@ fn default_poll_interval() -> f64 {
     60.0 // 1 minute
 }
 
-fn default_no_ask_time_threshold() -> f64 {
-    5.0 // 5 seconds
-}
-
 fn default_oracle_bps_threshold() -> f64 {
     50.0 // 50 basis points (0.5%)
+}
+
+fn default_threshold_min() -> f64 {
+    0.5 // 0.5 seconds (aggressive, near market end)
+}
+
+fn default_threshold_max() -> f64 {
+    10.0 // 10 seconds (conservative, far from market end)
+}
+
+fn default_threshold_tau() -> f64 {
+    30.0 // 30 seconds decay time constant
 }
 
 impl Default for UpOrDownConfig {
@@ -64,8 +80,10 @@ impl Default for UpOrDownConfig {
         Self {
             delta_t_seconds: default_delta_t(),
             poll_interval_secs: default_poll_interval(),
-            no_ask_time_threshold: default_no_ask_time_threshold(),
             oracle_bps_price_threshold: default_oracle_bps_threshold(),
+            threshold_min: default_threshold_min(),
+            threshold_max: default_threshold_max(),
+            threshold_tau: default_threshold_tau(),
         }
     }
 }
@@ -115,10 +133,21 @@ impl StrategiesConfig {
             "  Poll interval: {} seconds",
             self.up_or_down.poll_interval_secs
         );
-        info!("  No ask time threshold: {} seconds", self.up_or_down.no_ask_time_threshold);
         info!(
             "  Oracle BPS threshold: {} bps",
             self.up_or_down.oracle_bps_price_threshold
+        );
+        info!(
+            "  Threshold min: {} seconds",
+            self.up_or_down.threshold_min
+        );
+        info!(
+            "  Threshold max: {} seconds",
+            self.up_or_down.threshold_max
+        );
+        info!(
+            "  Threshold tau: {} seconds",
+            self.up_or_down.threshold_tau
         );
     }
 }
@@ -137,15 +166,33 @@ impl UpOrDownConfig {
             ));
         }
 
-        if self.no_ask_time_threshold < 0.0 {
-            return Err(ConfigError::ValidationError(
-                "up_or_down.no_ask_time_threshold must be >= 0".to_string(),
-            ));
-        }
-
         if self.oracle_bps_price_threshold < 0.0 {
             return Err(ConfigError::ValidationError(
                 "up_or_down.oracle_bps_price_threshold must be >= 0".to_string(),
+            ));
+        }
+
+        if self.threshold_min <= 0.0 {
+            return Err(ConfigError::ValidationError(
+                "up_or_down.threshold_min must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.threshold_max <= 0.0 {
+            return Err(ConfigError::ValidationError(
+                "up_or_down.threshold_max must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.threshold_min >= self.threshold_max {
+            return Err(ConfigError::ValidationError(
+                "up_or_down.threshold_min must be less than threshold_max".to_string(),
+            ));
+        }
+
+        if self.threshold_tau <= 0.0 {
+            return Err(ConfigError::ValidationError(
+                "up_or_down.threshold_tau must be greater than 0".to_string(),
             ));
         }
 

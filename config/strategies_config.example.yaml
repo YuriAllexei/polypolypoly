@@ -10,7 +10,14 @@ up_or_down:
   delta_t_seconds: 300
   # How often to poll database for new markets (seconds)
   poll_interval_secs: 60
-  # Time threshold in seconds - if no asks for longer than this, trigger action
-  no_ask_time_threshold: 5.0
   # Minimum price difference in basis points between oracle and market for trade signal
   oracle_bps_price_threshold: 50.0
+
+  # Dynamic threshold parameters (exponential decay based on time to market end)
+  # Formula: threshold = min + (max - min) * (1 - exp(-time_remaining / tau))
+  # Minimum threshold in seconds (when close to market end - more aggressive)
+  threshold_min: 0.5
+  # Maximum threshold in seconds (when far from market end - more conservative)
+  threshold_max: 10.0
+  # Decay time constant in seconds (controls how fast threshold decreases)
+  threshold_tau: 30.0
