@@ -29,7 +29,7 @@
 use super::super::auth::PolymarketAuth;
 use super::order_builder::OrderBuilder;
 use super::rest::{RestClient, RestError};
-use super::types::{ApiCredentials, OrderPlacementResponse, OrderType, Side};
+use super::types::{ApiCredentials, CancelResponse, OrderPlacementResponse, OrderType, Side};
 use super::POLYGON_CHAIN_ID;
 use ethers::types::Address;
 use std::collections::HashMap;
@@ -362,6 +362,42 @@ impl TradingClient {
     /// Start building an order with the fluent API
     pub fn order(&self, token_id: &str) -> OrderRequest<'_> {
         OrderRequest::new(self, token_id.to_string())
+    }
+
+    /// Cancel a single order by ID
+    pub async fn cancel_order(&self, order_id: &str) -> Result<CancelResponse> {
+        self.rest
+            .cancel_order(&self.auth, order_id)
+            .await
+            .map_err(TradingError::from)
+    }
+
+    /// Cancel multiple orders by ID
+    pub async fn cancel_orders(&self, order_ids: &[String]) -> Result<CancelResponse> {
+        self.rest
+            .cancel_orders(&self.auth, order_ids)
+            .await
+            .map_err(TradingError::from)
+    }
+
+    /// Cancel all open orders
+    pub async fn cancel_all(&self) -> Result<CancelResponse> {
+        self.rest
+            .cancel_all_orders(&self.auth)
+            .await
+            .map_err(TradingError::from)
+    }
+
+    /// Cancel orders for a specific market or asset
+    pub async fn cancel_market_orders(
+        &self,
+        market: Option<&str>,
+        asset_id: Option<&str>,
+    ) -> Result<CancelResponse> {
+        self.rest
+            .cancel_market_orders(&self.auth, market, asset_id)
+            .await
+            .map_err(TradingError::from)
     }
 }
 

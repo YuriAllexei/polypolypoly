@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // Re-export PriceLevel from domain
 pub use crate::domain::orderbook::PriceLevel;
@@ -173,6 +174,14 @@ pub struct BatchOrderResponse {
 
     /// Overall success status
     pub success: bool,
+}
+
+/// Response from order cancellation endpoints
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelResponse {
+    pub canceled: Vec<String>,
+    #[serde(default)]
+    pub not_canceled: HashMap<String, String>,
 }
 
 /// Nonce response from exchange

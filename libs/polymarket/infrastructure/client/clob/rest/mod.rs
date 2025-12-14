@@ -3,8 +3,10 @@
 //! Split into focused modules:
 //! - `orders`: Order placement methods
 //! - `auth`: API key management
+//! - `cancellation`: Order cancellation methods
 
 mod auth;
+mod cancellation;
 mod orders;
 
 use super::helpers::{parse_json, require_success};
