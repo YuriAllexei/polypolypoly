@@ -272,6 +272,64 @@ impl SimplifiedMarket {
     }
 }
 
+/// Asset type for balance queries
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum AssetType {
+    Collateral,
+    Conditional,
+}
+
+/// Query parameters for fetching open orders
+#[derive(Debug, Clone, Default)]
+pub struct OpenOrderParams {
+    pub id: Option<String>,
+    pub market: Option<String>,
+    pub asset_id: Option<String>,
+}
+
+/// Query parameters for fetching trades
+#[derive(Debug, Clone, Default)]
+pub struct TradeParams {
+    pub id: Option<String>,
+    pub maker_address: Option<String>,
+    pub market: Option<String>,
+    pub asset_id: Option<String>,
+    pub before: Option<i64>,
+    pub after: Option<i64>,
+}
+
+/// Query parameters for balance/allowance
+#[derive(Debug, Clone, Default)]
+pub struct BalanceAllowanceParams {
+    pub asset_type: Option<AssetType>,
+    pub token_id: Option<String>,
+    pub signature_type: Option<u8>,
+}
+
+/// Balance and allowance response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalanceAllowance {
+    #[serde(default)]
+    pub balance: String,
+    #[serde(default)]
+    pub allowance: String,
+}
+
+/// Paginated response wrapper
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaginatedResponse<T> {
+    #[serde(default)]
+    pub data: Vec<T>,
+    pub next_cursor: String,
+}
+
+/// Open order from API (flexible type)
+pub type OpenOrder = serde_json::Value;
+
+/// Trade from API (flexible type)
+pub type Trade = serde_json::Value;
+
 /// Best price opportunity in orderbook
 #[derive(Debug, Clone)]
 pub struct BestOpportunity {

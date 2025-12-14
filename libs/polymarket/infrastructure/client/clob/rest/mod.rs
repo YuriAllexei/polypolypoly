@@ -8,6 +8,7 @@
 mod auth;
 mod cancellation;
 mod orders;
+mod queries;
 
 use super::helpers::{parse_json, require_success};
 use super::types::*;

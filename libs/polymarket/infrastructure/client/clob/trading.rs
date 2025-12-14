@@ -29,7 +29,10 @@
 use super::super::auth::PolymarketAuth;
 use super::order_builder::OrderBuilder;
 use super::rest::{RestClient, RestError};
-use super::types::{ApiCredentials, CancelResponse, OrderPlacementResponse, OrderType, Side};
+use super::types::{
+    ApiCredentials, BalanceAllowance, BalanceAllowanceParams, CancelResponse, OpenOrder,
+    OpenOrderParams, OrderPlacementResponse, OrderType, Side, Trade, TradeParams,
+};
 use super::POLYGON_CHAIN_ID;
 use ethers::types::Address;
 use std::collections::HashMap;
@@ -396,6 +399,33 @@ impl TradingClient {
     ) -> Result<CancelResponse> {
         self.rest
             .cancel_market_orders(&self.auth, market, asset_id)
+            .await
+            .map_err(TradingError::from)
+    }
+
+    /// Get all open orders
+    pub async fn get_orders(&self, params: Option<&OpenOrderParams>) -> Result<Vec<OpenOrder>> {
+        self.rest
+            .get_all_orders(&self.auth, params)
+            .await
+            .map_err(TradingError::from)
+    }
+
+    /// Get all trades
+    pub async fn get_trades(&self, params: Option<&TradeParams>) -> Result<Vec<Trade>> {
+        self.rest
+            .get_all_trades(&self.auth, params)
+            .await
+            .map_err(TradingError::from)
+    }
+
+    /// Get balance and allowance
+    pub async fn get_balance_allowance(
+        &self,
+        params: Option<&BalanceAllowanceParams>,
+    ) -> Result<BalanceAllowance> {
+        self.rest
+            .get_balance_allowance(&self.auth, params)
             .await
             .map_err(TradingError::from)
     }
