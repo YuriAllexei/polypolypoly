@@ -12,7 +12,7 @@ use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::config::UpOrDownConfig;
 use crate::infrastructure::{
     build_ws_client, handle_client_event, spawn_oracle_trackers, MarketTrackerConfig,
-    SharedOraclePrices, SharedOrderbooks,
+    OracleType, SharedOraclePrices, SharedOrderbooks,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -184,6 +184,8 @@ struct MarketTrackerContext {
     threshold_tau: f64,
     /// The opening price that determines "up" or "down" outcome
     price_to_beat: Option<f64>,
+    /// Oracle price difference threshold in basis points
+    oracle_bps_price_threshold: f64,
 }
 
 impl MarketTrackerContext {
@@ -229,6 +231,7 @@ impl MarketTrackerContext {
             threshold_max: config.threshold_max,
             threshold_tau: config.threshold_tau,
             price_to_beat: None,
+            oracle_bps_price_threshold: config.oracle_bps_price_threshold,
         })
     }
 
@@ -429,15 +432,25 @@ async fn place_order(
     }
 }
 
-/// Check for false positive risk on tokens with placed orders
-fn check_false_positive_risk(
+/// Check for risk on tokens with placed orders.
+///
+/// Two signals must both be active to indicate risk:
+/// 1. Average of other bids (excluding top) < 0.90
+/// 2. |price_to_beat - oracle_price| in bps < oracle_bps_price_threshold
+fn check_risk(
     orderbooks: &SharedOrderbooks,
     state: &TrackerState,
     ctx: &MarketTrackerContext,
-) {
+    oracle_prices: &Option<SharedOraclePrices>,
+) -> bool {
     if state.order_placed.is_empty() {
-        return;
+        return false;
     }
+
+    // Signal 1: Check bid levels (existing logic)
+    let mut signal_1_active = false;
+    let mut avg_bid_price = 0.0;
+    let mut other_bids: Vec<f64> = Vec::new();
 
     let obs = orderbooks.read().unwrap();
     for token_id in &state.order_placed {
@@ -446,7 +459,7 @@ fn check_false_positive_risk(
 
             // Need at least 2 bids to analyze (skip top bid, check others)
             if bid_levels.len() > 1 {
-                let other_bids: Vec<f64> = bid_levels
+                other_bids = bid_levels
                     .iter()
                     .skip(1)
                     .take(4)
@@ -454,23 +467,49 @@ fn check_false_positive_risk(
                     .collect();
 
                 if !other_bids.is_empty() {
-                    let avg_price: f64 = other_bids.iter().sum::<f64>() / other_bids.len() as f64;
-
-                    if avg_price < 0.90 {
-                        // let outcome_name = ctx.get_outcome_name(token_id);
-                        // log_false_positive_risk(
-                        //     ctx,
-                        //     token_id,
-                        //     &outcome_name,
-                        //     avg_price,
-                        //     &other_bids,
-                        // );
-                        // //TODO Order cancellation logic could go here
+                    avg_bid_price = other_bids.iter().sum::<f64>() / other_bids.len() as f64;
+                    if avg_bid_price < 0.90 {
+                        signal_1_active = true;
                     }
                 }
             }
         }
     }
+    drop(obs); // Release lock
+
+    // Signal 2: Check oracle price difference
+    let mut signal_2_active = false;
+    let mut bps_diff = 0.0;
+    let mut oracle_price = 0.0;
+
+    if let (Some(price_to_beat), Some(oracle_prices)) = (ctx.price_to_beat, oracle_prices) {
+        if let Some(current_price) = get_oracle_price(ctx.oracle_source, ctx.crypto_asset, oracle_prices) {
+            oracle_price = current_price;
+            bps_diff = ((price_to_beat - current_price).abs() / price_to_beat) * 10000.0;
+            if bps_diff < ctx.oracle_bps_price_threshold {
+                signal_2_active = true;
+            }
+        }
+    }
+
+    // Both signals must be active to indicate risk
+    if signal_1_active && signal_2_active {
+        for token_id in &state.order_placed {
+            let outcome_name = ctx.get_outcome_name(token_id);
+            log_risk_detected(
+                ctx,
+                token_id,
+                &outcome_name,
+                avg_bid_price,
+                &other_bids,
+                bps_diff,
+                oracle_price,
+            );
+        }
+        return true;
+    }
+
+    false
 }
 
 // =============================================================================
@@ -577,6 +616,44 @@ async fn get_price_to_beat(
     debug!(open_price = data.open_price, "Retrieved price to beat");
 
     Ok(data.open_price)
+}
+
+/// Get the current oracle price for a crypto asset.
+///
+/// Fetches the real-time price from either Binance or ChainLink oracle
+/// depending on the market's oracle source.
+///
+/// # Arguments
+/// * `oracle_source` - Which oracle to use (Binance or ChainLink)
+/// * `crypto_asset` - The cryptocurrency (BTC, ETH, SOL, XRP)
+/// * `oracle_prices` - Shared oracle price manager
+///
+/// # Returns
+/// The current price as f64, or None if unavailable
+fn get_oracle_price(
+    oracle_source: OracleSource,
+    crypto_asset: CryptoAsset,
+    oracle_prices: &SharedOraclePrices,
+) -> Option<f64> {
+    // Map OracleSource to OracleType
+    let oracle_type = match oracle_source {
+        OracleSource::Binance => OracleType::Binance,
+        OracleSource::ChainLink => OracleType::ChainLink,
+        OracleSource::Unknown => return None,
+    };
+
+    // Map CryptoAsset to symbol string
+    let symbol = match crypto_asset {
+        CryptoAsset::Bitcoin => "BTC",
+        CryptoAsset::Ethereum => "ETH",
+        CryptoAsset::Solana => "SOL",
+        CryptoAsset::Xrp => "XRP",
+        CryptoAsset::Unknown => return None,
+    };
+
+    // Get price from oracle manager
+    let manager = oracle_prices.read().unwrap();
+    manager.get_price(oracle_type, symbol).map(|entry| entry.value)
 }
 
 // =============================================================================
@@ -742,32 +819,40 @@ fn log_order_failed<E: std::fmt::Display>(
     );
 }
 
-fn log_false_positive_risk(
+fn log_risk_detected(
     ctx: &MarketTrackerContext,
     token_id: &str,
     outcome_name: &str,
-    avg_price: f64,
+    avg_bid_price: f64,
     other_bids: &[f64],
+    bps_diff: f64,
+    oracle_price: f64,
 ) {
     warn!(
         "════════════════════════════════════════════════════════════════\n\
-         ⚠️  FALSE POSITIVE RISK DETECTED\n\
+         ⚠️  RISK DETECTED - BOTH SIGNALS ACTIVE\n\
          ════════════════════════════════════════════════════════════════\n\
            Market ID:      {}\n\
            Market:         {}\n\
            URL:            {}\n\
+           Price to Beat:  {}\n\
+           Oracle Price:   ${:.2}\n\
+           BPS Difference: {:.2} bps (threshold: {:.2})\n\
            Outcome:        {}\n\
            Token ID:       {}\n\
-           Avg Bid (excl. top): {:.4}\n\
+           Avg Bid (excl top): {:.4}\n\
            Other Bids:     {:?}\n\
-           Threshold:      0.90\n\
          ════════════════════════════════════════════════════════════════",
         ctx.market_id,
         ctx.market_question,
         ctx.market_url,
+        ctx.format_price_to_beat(),
+        oracle_price,
+        bps_diff,
+        ctx.oracle_bps_price_threshold,
         outcome_name,
         token_id,
-        avg_price,
+        avg_bid_price,
         other_bids
     );
 }
@@ -1017,7 +1102,7 @@ impl UpOrDownStrategy {
         shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
         config: UpOrDownConfig,
         trading: Arc<TradingClient>,
-        _oracle_prices: Option<SharedOraclePrices>,
+        oracle_prices: Option<SharedOraclePrices>,
     ) -> anyhow::Result<()> {
         // Initialize context and state
         let outcomes = market.parse_outcomes()?;
@@ -1098,8 +1183,8 @@ impl UpOrDownStrategy {
                 state.order_placed.insert(token_id);
             }
 
-            // Monitor for false positive risk on placed orders
-            check_false_positive_risk(&orderbooks, &state, &ctx);
+            // Monitor for risk on placed orders
+            check_risk(&orderbooks, &state, &ctx, &oracle_prices);
 
             // Brief sleep before next iteration
             sleep(StdDuration::from_millis(100)).await;
