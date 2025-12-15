@@ -441,11 +441,11 @@ async fn place_order(
 /// Check for risk on tokens with placed orders and cancel if risk detected.
 ///
 /// Two signals must both be active to indicate risk:
-/// 1. Average of other bids (excluding top) < 0.90
+/// 1. Average of other bids (excluding top) < 0.85
 /// 2. |price_to_beat - oracle_price| in bps < oracle_bps_price_threshold
 ///
 /// Returns false early if no orders are placed or if the market has ended.
-/// When risk is detected, cancels all placed orders and clears the order tracking state.
+/// Only cancels the specific token(s) where risk is detected, not all orders.
 async fn check_risk(
     orderbooks: &SharedOrderbooks,
     state: &mut TrackerState,
@@ -462,38 +462,7 @@ async fn check_risk(
         return false;
     }
 
-    // Signal 1: Check bid levels (existing logic)
-    let mut signal_1_active = false;
-    let mut avg_bid_price = 0.0;
-    let mut other_bids: Vec<f64> = Vec::new();
-
-    {
-        let obs = orderbooks.read().unwrap();
-        for token_id in state.order_placed.keys() {
-            if let Some(orderbook) = obs.get(token_id) {
-                let bid_levels = orderbook.bids.levels();
-
-                // Need at least 2 bids to analyze (skip top bid, check others)
-                if bid_levels.len() > 1 {
-                    other_bids = bid_levels
-                        .iter()
-                        .skip(1)
-                        .take(4)
-                        .map(|(price, _)| *price)
-                        .collect();
-
-                    if !other_bids.is_empty() {
-                        avg_bid_price = other_bids.iter().sum::<f64>() / other_bids.len() as f64;
-                        if avg_bid_price < 0.85 {
-                            signal_1_active = true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Signal 2: Check oracle price difference
+    // Signal 2: Check oracle price difference (applies to whole market)
     let mut signal_2_active = false;
     let mut bps_diff = 0.0;
     let mut oracle_price = 0.0;
@@ -510,33 +479,101 @@ async fn check_risk(
         }
     }
 
-    // Both signals must be active to indicate risk
-    if signal_1_active && signal_2_active {
-        // Log risk detection for each token
-        for token_id in state.order_placed.keys() {
-            let outcome_name = ctx.get_outcome_name(token_id);
-            log_risk_detected(
-                ctx,
-                token_id,
-                &outcome_name,
-                avg_bid_price,
-                &other_bids,
-                bps_diff,
-                oracle_price,
-            );
-        }
-
-        // Cancel all placed orders
-        let order_ids = state.get_order_ids();
-        if !order_ids.is_empty() {
-            cancel_orders(trading, &order_ids, ctx).await;
-            state.order_placed.clear();
-        }
-
-        return true;
+    // If oracle signal not active, no risk
+    if !signal_2_active {
+        return false;
     }
 
-    false
+    // Signal 1: Check bid levels per token and collect tokens at risk
+    let mut tokens_at_risk: Vec<(String, f64, Vec<f64>)> = Vec::new();
+
+    {
+        let obs = orderbooks.read().unwrap();
+        for token_id in state.order_placed.keys() {
+            if let Some(orderbook) = obs.get(token_id) {
+                let bid_levels = orderbook.bids.levels();
+
+                // Need at least 2 bids to analyze (skip top bid, check others)
+                if bid_levels.len() > 1 {
+                    let other_bids: Vec<f64> = bid_levels
+                        .iter()
+                        .skip(1)
+                        .take(4)
+                        .map(|(price, _)| *price)
+                        .collect();
+
+                    if !other_bids.is_empty() {
+                        let avg_bid_price = other_bids.iter().sum::<f64>() / other_bids.len() as f64;
+                        if avg_bid_price < 0.85 {
+                            tokens_at_risk.push((token_id.clone(), avg_bid_price, other_bids));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if tokens_at_risk.is_empty() {
+        return false;
+    }
+
+    // Cancel only the specific tokens at risk
+    for (token_id, avg_bid_price, other_bids) in tokens_at_risk {
+        let outcome_name = ctx.get_outcome_name(&token_id);
+        log_risk_detected(
+            ctx,
+            &token_id,
+            &outcome_name,
+            avg_bid_price,
+            &other_bids,
+            bps_diff,
+            oracle_price,
+        );
+
+        // Cancel only this token's order
+        if let Some(order_id) = state.order_placed.remove(&token_id) {
+            cancel_order(trading, &order_id, &token_id, ctx).await;
+        }
+    }
+
+    true
+}
+
+/// Cancel a single order and log the result
+async fn cancel_order(
+    trading: &TradingClient,
+    order_id: &str,
+    token_id: &str,
+    ctx: &MarketTrackerContext,
+) {
+    let outcome_name = ctx.get_outcome_name(token_id);
+    info!(
+        "[WS {}] 🚨 Cancelling order {} for {}",
+        ctx.market_id, order_id, outcome_name
+    );
+
+    match trading.cancel_order(order_id).await {
+        Ok(response) => {
+            if !response.canceled.is_empty() {
+                info!(
+                    "[WS {}] ✅ Cancelled order for {}",
+                    ctx.market_id, outcome_name
+                );
+            }
+            if !response.not_canceled.is_empty() {
+                warn!(
+                    "[WS {}] ⚠️ Failed to cancel order {}: {:?}",
+                    ctx.market_id, order_id, response.not_canceled
+                );
+            }
+        }
+        Err(e) => {
+            error!(
+                "[WS {}] ❌ Failed to cancel order {}: {}",
+                ctx.market_id, order_id, e
+            );
+        }
+    }
 }
 
 /// Cancel orders and log the result
