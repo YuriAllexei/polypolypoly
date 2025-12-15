@@ -259,7 +259,7 @@ pub async fn build_ws_client(
         .router(router, move |routing| {
             routing.handler(SniperRoute::Market(market_id_for_route.clone()), handler)
         })
-        .heartbeat(Duration::from_secs(10), WsMessage::Text("PING".to_string()))
+        .heartbeat(Duration::from_secs(5), WsMessage::Text("PING".to_string()))
         .subscription(WsMessage::Text(subscription_json))
         .shutdown_flag(local_shutdown_flag)
         .build()

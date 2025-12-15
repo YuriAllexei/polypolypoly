@@ -383,31 +383,41 @@ async fn check_all_orderbooks(
     let mut tokens_to_order = Vec::new();
     let mut all_empty = true;
 
-    let obs = orderbooks.read().unwrap();
-    for token_id in &ctx.token_ids {
-        if let Some(orderbook) = obs.get(token_id) {
-            let has_asks = !orderbook.asks.is_empty();
-            let has_bids = !orderbook.bids.is_empty();
+    let token_data: Vec<(String, bool, bool)> = {
+        let obs = orderbooks.read().unwrap();
+        ctx.token_ids
+            .iter()
+            .filter_map(|token_id| {
+                obs.get(token_id).map(|orderbook| {
+                    (
+                        token_id.clone(),
+                        !orderbook.asks.is_empty(),
+                        !orderbook.bids.is_empty(),
+                    )
+                })
+            })
+            .collect()
+    };
 
-            if has_asks || has_bids {
-                all_empty = false;
-            }
+    for (token_id, has_asks, has_bids) in token_data {
+        if has_asks || has_bids {
+            all_empty = false;
+        }
 
-            match check_token_orderbook(token_id, has_asks, state, ctx) {
-                OrderbookCheckResult::ThresholdExceeded { elapsed_secs } => {
-                    let outcome_name = ctx.get_outcome_name(token_id);
-                    let dynamic_threshold = calculate_dynamic_threshold(ctx);
-                    log_threshold_exceeded(
-                        ctx,
-                        token_id,
-                        &outcome_name,
-                        elapsed_secs,
-                        dynamic_threshold,
-                    );
-                    tokens_to_order.push((token_id.clone(), outcome_name, elapsed_secs));
-                }
-                _ => {}
+        match check_token_orderbook(&token_id, has_asks, state, ctx) {
+            OrderbookCheckResult::ThresholdExceeded { elapsed_secs } => {
+                let outcome_name = ctx.get_outcome_name(&token_id);
+                let dynamic_threshold = calculate_dynamic_threshold(ctx);
+                log_threshold_exceeded(
+                    ctx,
+                    &token_id,
+                    &outcome_name,
+                    elapsed_secs,
+                    dynamic_threshold,
+                );
+                tokens_to_order.push((token_id.clone(), outcome_name, elapsed_secs));
             }
+            _ => {}
         }
     }
 
@@ -484,32 +494,37 @@ async fn check_risk(
         return false;
     }
 
-    // Signal 1: Check bid levels per token and collect tokens at risk
-    let mut tokens_at_risk: Vec<(String, f64, Vec<f64>)> = Vec::new();
-
-    {
+    // Signal 1: Check bid levels per token
+    let bid_data: Vec<(String, Vec<f64>)> = {
         let obs = orderbooks.read().unwrap();
-        for token_id in state.order_placed.keys() {
-            if let Some(orderbook) = obs.get(token_id) {
-                let bid_levels = orderbook.bids.levels();
-
-                // Need at least 2 bids to analyze (skip top bid, check others)
-                if bid_levels.len() > 1 {
-                    let other_bids: Vec<f64> = bid_levels
-                        .iter()
-                        .skip(1)
-                        .take(4)
-                        .map(|(price, _)| *price)
-                        .collect();
-
-                    if !other_bids.is_empty() {
-                        let avg_bid_price = other_bids.iter().sum::<f64>() / other_bids.len() as f64;
-                        if avg_bid_price < 0.85 {
-                            tokens_at_risk.push((token_id.clone(), avg_bid_price, other_bids));
+        state
+            .order_placed
+            .keys()
+            .filter_map(|token_id| {
+                obs.get(token_id).and_then(|orderbook| {
+                    let bid_levels = orderbook.bids.levels();
+                    if bid_levels.len() > 1 {
+                        let other_bids: Vec<f64> = bid_levels
+                            .iter()
+                            .skip(1)
+                            .take(4)
+                            .map(|(price, _)| *price)
+                            .collect();
+                        if !other_bids.is_empty() {
+                            return Some((token_id.clone(), other_bids));
                         }
                     }
-                }
-            }
+                    None
+                })
+            })
+            .collect()
+    };
+
+    let mut tokens_at_risk: Vec<(String, f64, Vec<f64>)> = Vec::new();
+    for (token_id, other_bids) in bid_data {
+        let avg_bid_price = other_bids.iter().sum::<f64>() / other_bids.len() as f64;
+        if avg_bid_price < 0.85 {
+            tokens_at_risk.push((token_id, avg_bid_price, other_bids));
         }
     }
 

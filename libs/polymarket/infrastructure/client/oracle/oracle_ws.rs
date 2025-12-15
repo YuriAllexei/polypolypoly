@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 const ORACLE_WS_URL: &str = "wss://ws-live-data.polymarket.com";
 
 /// Heartbeat interval in seconds
-const HEARTBEAT_INTERVAL_SECS: u64 = 8;
+const HEARTBEAT_INTERVAL_SECS: u64 = 5;
 
 // =============================================================================
 // Symbol Parsing

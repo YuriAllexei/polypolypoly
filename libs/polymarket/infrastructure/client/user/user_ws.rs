@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 const USER_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/user";
 
 /// Heartbeat interval in seconds
-const HEARTBEAT_INTERVAL_SECS: u64 = 10;
+const HEARTBEAT_INTERVAL_SECS: u64 = 5;
 
 // =============================================================================
 // Configuration
