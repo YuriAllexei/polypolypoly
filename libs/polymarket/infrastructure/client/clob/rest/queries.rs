@@ -71,6 +71,23 @@ impl RestClient {
         Ok(all_orders)
     }
 
+    /// Fetch a single order by ID
+    pub async fn get_order(&self, auth: &PolymarketAuth, order_id: &str) -> Result<OpenOrder> {
+        let path = format!("/data/order/{}", order_id);
+        let url = format!("{}{}", self.base_url, path);
+        let timestamp = PolymarketAuth::current_timestamp();
+
+        let headers = auth.l2_headers(timestamp, "GET", &path, "")?;
+        let req = with_headers(self.client.get(&url), headers);
+        let response = req.send().await?;
+
+        if !response.status().is_success() {
+            return Err(extract_api_error(response, "Failed to fetch order").await);
+        }
+
+        parse_json(response).await
+    }
+
     /// Fetch trades (single page)
     pub async fn get_trades(
         &self,

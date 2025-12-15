@@ -411,6 +411,14 @@ impl TradingClient {
             .map_err(TradingError::from)
     }
 
+    /// Get a single order by ID
+    pub async fn get_order(&self, order_id: &str) -> Result<OpenOrder> {
+        self.rest
+            .get_order(&self.auth, order_id)
+            .await
+            .map_err(TradingError::from)
+    }
+
     /// Get all trades
     pub async fn get_trades(&self, params: Option<&TradeParams>) -> Result<Vec<Trade>> {
         self.rest
