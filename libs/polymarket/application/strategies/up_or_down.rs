@@ -260,8 +260,8 @@ struct TrackerState {
     no_asks_timers: HashMap<String, Instant>,
     /// Tokens that have exceeded the no-asks threshold
     threshold_triggered: HashSet<String>,
-    /// Tokens for which orders have been placed
-    order_placed: HashSet<String>,
+    /// Orders placed: token_id → order_id (for cancellation tracking)
+    order_placed: HashMap<String, String>,
     /// Whether this is the first orderbook check (used for initial delay)
     first_orderbook_check: bool,
 }
@@ -271,9 +271,14 @@ impl TrackerState {
         Self {
             no_asks_timers: HashMap::new(),
             threshold_triggered: HashSet::new(),
-            order_placed: HashSet::new(),
+            order_placed: HashMap::new(),
             first_orderbook_check: true,
         }
+    }
+
+    /// Get all order IDs for cancellation
+    fn get_order_ids(&self) -> Vec<String> {
+        self.order_placed.values().cloned().collect()
     }
 }
 
@@ -347,7 +352,7 @@ fn check_token_orderbook(
     }
 
     // Check if threshold exceeded using dynamic threshold
-    if !state.threshold_triggered.contains(token_id) && !state.order_placed.contains(token_id) {
+    if !state.threshold_triggered.contains(token_id) && !state.order_placed.contains_key(token_id) {
         if let Some(timer_start) = state.no_asks_timers.get(token_id) {
             let elapsed = timer_start.elapsed().as_secs_f64();
             let dynamic_threshold = calculate_dynamic_threshold(ctx);
@@ -410,38 +415,42 @@ async fn check_all_orderbooks(
 }
 
 /// Place a buy order for a token
+/// Returns the order_id if successful, None if failed
 async fn place_order(
     trading: &TradingClient,
     token_id: &str,
     outcome_name: &str,
     elapsed: f64,
     ctx: &MarketTrackerContext,
-) -> bool {
+) -> Option<String> {
     let dynamic_threshold = calculate_dynamic_threshold(ctx);
     log_placing_order(ctx, token_id, outcome_name, elapsed, dynamic_threshold);
 
     match trading.buy(token_id, 0.99, 18.0).await {
-        Ok(order_id) => {
-            log_order_success(ctx, token_id, outcome_name, &order_id);
-            true
+        Ok(response) => {
+            log_order_success(ctx, token_id, outcome_name, &response);
+            response.order_id
         }
         Err(e) => {
             log_order_failed(ctx, token_id, outcome_name, &e);
-            false
+            None
         }
     }
 }
 
-/// Check for risk on tokens with placed orders.
+/// Check for risk on tokens with placed orders and cancel if risk detected.
 ///
 /// Two signals must both be active to indicate risk:
 /// 1. Average of other bids (excluding top) < 0.90
 /// 2. |price_to_beat - oracle_price| in bps < oracle_bps_price_threshold
-fn check_risk(
+///
+/// When risk is detected, cancels all placed orders and clears the order tracking state.
+async fn check_risk(
     orderbooks: &SharedOrderbooks,
-    state: &TrackerState,
+    state: &mut TrackerState,
     ctx: &MarketTrackerContext,
     oracle_prices: &Option<SharedOraclePrices>,
+    trading: &TradingClient,
 ) -> bool {
     if state.order_placed.is_empty() {
         return false;
@@ -452,30 +461,31 @@ fn check_risk(
     let mut avg_bid_price = 0.0;
     let mut other_bids: Vec<f64> = Vec::new();
 
-    let obs = orderbooks.read().unwrap();
-    for token_id in &state.order_placed {
-        if let Some(orderbook) = obs.get(token_id) {
-            let bid_levels = orderbook.bids.levels();
+    {
+        let obs = orderbooks.read().unwrap();
+        for token_id in state.order_placed.keys() {
+            if let Some(orderbook) = obs.get(token_id) {
+                let bid_levels = orderbook.bids.levels();
 
-            // Need at least 2 bids to analyze (skip top bid, check others)
-            if bid_levels.len() > 1 {
-                other_bids = bid_levels
-                    .iter()
-                    .skip(1)
-                    .take(4)
-                    .map(|(price, _)| *price)
-                    .collect();
+                // Need at least 2 bids to analyze (skip top bid, check others)
+                if bid_levels.len() > 1 {
+                    other_bids = bid_levels
+                        .iter()
+                        .skip(1)
+                        .take(4)
+                        .map(|(price, _)| *price)
+                        .collect();
 
-                if !other_bids.is_empty() {
-                    avg_bid_price = other_bids.iter().sum::<f64>() / other_bids.len() as f64;
-                    if avg_bid_price < 0.90 {
-                        signal_1_active = true;
+                    if !other_bids.is_empty() {
+                        avg_bid_price = other_bids.iter().sum::<f64>() / other_bids.len() as f64;
+                        if avg_bid_price < 0.90 {
+                            signal_1_active = true;
+                        }
                     }
                 }
             }
         }
     }
-    drop(obs); // Release lock
 
     // Signal 2: Check oracle price difference
     let mut signal_2_active = false;
@@ -496,7 +506,8 @@ fn check_risk(
 
     // Both signals must be active to indicate risk
     if signal_1_active && signal_2_active {
-        for token_id in &state.order_placed {
+        // Log risk detection for each token
+        for token_id in state.order_placed.keys() {
             let outcome_name = ctx.get_outcome_name(token_id);
             log_risk_detected(
                 ctx,
@@ -508,10 +519,54 @@ fn check_risk(
                 oracle_price,
             );
         }
+
+        // Cancel all placed orders
+        let order_ids = state.get_order_ids();
+        if !order_ids.is_empty() {
+            cancel_orders(trading, &order_ids, ctx).await;
+            state.order_placed.clear();
+        }
+
         return true;
     }
 
     false
+}
+
+/// Cancel orders and log the result
+async fn cancel_orders(trading: &TradingClient, order_ids: &[String], ctx: &MarketTrackerContext) {
+    info!(
+        "[WS {}] 🚨 CANCELLING {} orders due to risk detection",
+        ctx.market_id,
+        order_ids.len()
+    );
+
+    match trading.cancel_orders(order_ids).await {
+        Ok(response) => {
+            if !response.canceled.is_empty() {
+                info!(
+                    "[WS {}] ✅ Successfully cancelled {} orders: {:?}",
+                    ctx.market_id,
+                    response.canceled.len(),
+                    response.canceled
+                );
+            }
+            if !response.not_canceled.is_empty() {
+                warn!(
+                    "[WS {}] ⚠️ Failed to cancel {} orders: {:?}",
+                    ctx.market_id,
+                    response.not_canceled.len(),
+                    response.not_canceled
+                );
+            }
+        }
+        Err(e) => {
+            error!(
+                "[WS {}] ❌ Failed to cancel orders: {}",
+                ctx.market_id, e
+            );
+        }
+    }
 }
 
 // =============================================================================
@@ -1183,18 +1238,30 @@ impl UpOrDownStrategy {
 
             // Place orders for tokens that exceeded threshold
             for (token_id, outcome_name, elapsed) in tokens_to_order {
-                place_order(&trading, &token_id, &outcome_name, elapsed, &ctx).await;
-                state.order_placed.insert(token_id);
+                if let Some(order_id) = place_order(&trading, &token_id, &outcome_name, elapsed, &ctx).await {
+                    state.order_placed.insert(token_id, order_id);
+                }
             }
 
-            // Monitor for risk on placed orders
-            check_risk(&orderbooks, &state, &ctx, &oracle_prices);
+            // Monitor for risk on placed orders and cancel if detected
+            check_risk(&orderbooks, &mut state, &ctx, &oracle_prices, &trading).await;
 
             // Brief sleep before next iteration
             sleep(StdDuration::from_millis(100)).await;
         }
 
-        // Cleanup
+        // Cleanup: Cancel any remaining open orders before shutdown
+        if !state.order_placed.is_empty() {
+            info!(
+                "[WS {}] Cancelling {} remaining orders before shutdown",
+                ctx.market_id,
+                state.order_placed.len()
+            );
+            let order_ids = state.get_order_ids();
+            cancel_orders(&trading, &order_ids, &ctx).await;
+        }
+
+        // Close WebSocket connection
         info!("[WS {}] Closing connection", ctx.market_id);
         if let Err(e) = client.shutdown().await {
             warn!("[WS {}] Error during shutdown: {}", ctx.market_id, e);
