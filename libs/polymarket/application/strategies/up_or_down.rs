@@ -444,6 +444,7 @@ async fn place_order(
 /// 1. Average of other bids (excluding top) < 0.90
 /// 2. |price_to_beat - oracle_price| in bps < oracle_bps_price_threshold
 ///
+/// Returns false early if no orders are placed or if the market has ended.
 /// When risk is detected, cancels all placed orders and clears the order tracking state.
 async fn check_risk(
     orderbooks: &SharedOrderbooks,
@@ -453,6 +454,11 @@ async fn check_risk(
     trading: &TradingClient,
 ) -> bool {
     if state.order_placed.is_empty() {
+        return false;
+    }
+
+    // If market has ended, no point in checking risk
+    if Utc::now() > ctx.market_end_time {
         return false;
     }
 
@@ -478,7 +484,7 @@ async fn check_risk(
 
                     if !other_bids.is_empty() {
                         avg_bid_price = other_bids.iter().sum::<f64>() / other_bids.len() as f64;
-                        if avg_bid_price < 0.90 {
+                        if avg_bid_price < 0.85 {
                             signal_1_active = true;
                         }
                     }
@@ -561,10 +567,7 @@ async fn cancel_orders(trading: &TradingClient, order_ids: &[String], ctx: &Mark
             }
         }
         Err(e) => {
-            error!(
-                "[WS {}] ❌ Failed to cancel orders: {}",
-                ctx.market_id, e
-            );
+            error!("[WS {}] ❌ Failed to cancel orders: {}", ctx.market_id, e);
         }
     }
 }
@@ -1238,7 +1241,9 @@ impl UpOrDownStrategy {
 
             // Place orders for tokens that exceeded threshold
             for (token_id, outcome_name, elapsed) in tokens_to_order {
-                if let Some(order_id) = place_order(&trading, &token_id, &outcome_name, elapsed, &ctx).await {
+                if let Some(order_id) =
+                    place_order(&trading, &token_id, &outcome_name, elapsed, &ctx).await
+                {
                     state.order_placed.insert(token_id, order_id);
                 }
             }
