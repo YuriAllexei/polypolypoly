@@ -16,6 +16,7 @@ use crate::infrastructure::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -181,6 +182,8 @@ struct MarketTrackerContext {
     threshold_max: f64,
     /// Decay time constant in seconds
     threshold_tau: f64,
+    /// The opening price that determines "up" or "down" outcome
+    price_to_beat: Option<f64>,
 }
 
 impl MarketTrackerContext {
@@ -225,6 +228,7 @@ impl MarketTrackerContext {
             threshold_min: config.threshold_min,
             threshold_max: config.threshold_max,
             threshold_tau: config.threshold_tau,
+            price_to_beat: None,
         })
     }
 
@@ -233,6 +237,17 @@ impl MarketTrackerContext {
             .get(token_id)
             .cloned()
             .unwrap_or_else(|| "Unknown".to_string())
+    }
+
+    fn set_price_to_beat(&mut self, price: Option<f64>) {
+        self.price_to_beat = price;
+    }
+
+    fn format_price_to_beat(&self) -> String {
+        match self.price_to_beat {
+            Some(price) => format!("${:.2}", price),
+            None => "N/A".to_string(),
+        }
     }
 }
 
@@ -442,20 +457,126 @@ fn check_false_positive_risk(
                     let avg_price: f64 = other_bids.iter().sum::<f64>() / other_bids.len() as f64;
 
                     if avg_price < 0.90 {
-                        let outcome_name = ctx.get_outcome_name(token_id);
-                        log_false_positive_risk(
-                            ctx,
-                            token_id,
-                            &outcome_name,
-                            avg_price,
-                            &other_bids,
-                        );
-                        //TODO Order cancellation logic could go here
+                        // let outcome_name = ctx.get_outcome_name(token_id);
+                        // log_false_positive_risk(
+                        //     ctx,
+                        //     token_id,
+                        //     &outcome_name,
+                        //     avg_price,
+                        //     &other_bids,
+                        // );
+                        // //TODO Order cancellation logic could go here
                     }
                 }
             }
         }
     }
+}
+
+// =============================================================================
+// Price API Helper Functions
+// =============================================================================
+
+/// Response from Polymarket's crypto price API
+#[derive(Debug, Deserialize)]
+struct CryptoPriceResponse {
+    #[serde(rename = "openPrice")]
+    open_price: f64,
+}
+
+/// Get the opening price ("price to beat") from Polymarket's crypto price API.
+///
+/// This fetches the reference price used to determine if the crypto asset
+/// went "up" or "down" during the market's timeframe.
+///
+/// # Arguments
+/// * `timeframe` - The market timeframe (15M, 1H, 4H, Daily)
+/// * `crypto_asset` - The cryptocurrency being tracked (BTC, ETH, SOL, XRP)
+/// * `market` - The market containing the end_date
+///
+/// # Returns
+/// The opening price as f64, or an error if the request fails
+async fn get_price_to_beat(
+    timeframe: Timeframe,
+    crypto_asset: CryptoAsset,
+    market: &DbMarket,
+) -> anyhow::Result<f64> {
+    // Map CryptoAsset to API symbol
+    let symbol = match crypto_asset {
+        CryptoAsset::Bitcoin => "BTC",
+        CryptoAsset::Ethereum => "ETH",
+        CryptoAsset::Solana => "SOL",
+        CryptoAsset::Xrp => "XRP",
+        CryptoAsset::Unknown => anyhow::bail!("Cannot get price for unknown crypto asset"),
+    };
+
+    // Map Timeframe to API variant
+    let variant = match timeframe {
+        Timeframe::FifteenMin => "fifteen",
+        Timeframe::OneHour => "hourly",
+        Timeframe::FourHour => "fourhour",
+        Timeframe::Daily => "daily",
+        Timeframe::Unknown => anyhow::bail!("Cannot get price for unknown timeframe"),
+    };
+
+    // Parse end_date from market
+    let end_date = DateTime::parse_from_rfc3339(&market.end_date)
+        .map_err(|e| anyhow::anyhow!("Failed to parse market end_date: {}", e))?
+        .with_timezone(&Utc);
+
+    // Calculate event start time by subtracting timeframe duration
+    let duration = match timeframe {
+        Timeframe::FifteenMin => Duration::minutes(15),
+        Timeframe::OneHour => Duration::hours(1),
+        Timeframe::FourHour => Duration::hours(4),
+        Timeframe::Daily => Duration::days(1),
+        Timeframe::Unknown => anyhow::bail!("Cannot calculate duration for unknown timeframe"),
+    };
+    let event_start_time = end_date - duration;
+
+    // Format dates as ISO 8601 for URL
+    let end_date_str = end_date.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let event_start_time_str = event_start_time.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    // Build the API URL
+    let url = format!(
+        "https://polymarket.com/api/crypto/crypto-price?symbol={}&eventStartTime={}&variant={}&endDate={}",
+        symbol, event_start_time_str, variant, end_date_str
+    );
+
+    debug!(
+        symbol = symbol,
+        variant = variant,
+        event_start_time = %event_start_time_str,
+        end_date = %end_date_str,
+        "Fetching price to beat from Polymarket API"
+    );
+
+    // Make the HTTP request
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to fetch crypto price: {}", e))?;
+
+    // Check for successful response
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "Crypto price API returned error status: {}",
+            response.status()
+        );
+    }
+
+    // Parse the JSON response
+    let data: CryptoPriceResponse = response
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to parse crypto price response: {}", e))?;
+
+    debug!(open_price = data.open_price, "Retrieved price to beat");
+
+    Ok(data.open_price)
 }
 
 // =============================================================================
@@ -470,6 +591,7 @@ fn log_no_asks_started(ctx: &MarketTrackerContext, token_id: &str, outcome_name:
            Market ID:    {}\n\
            Market:       {}\n\
            URL:          {}\n\
+           Price to Beat:{}\n\
            Oracle:       {}\n\
            Asset:        {}\n\
            Timeframe:    {}\n\
@@ -479,6 +601,7 @@ fn log_no_asks_started(ctx: &MarketTrackerContext, token_id: &str, outcome_name:
         ctx.market_id,
         ctx.market_question,
         ctx.market_url,
+        ctx.format_price_to_beat(),
         ctx.oracle_source,
         ctx.crypto_asset,
         ctx.timeframe,
@@ -501,6 +624,7 @@ fn log_threshold_exceeded(
            Market ID:      {}\n\
            Market:         {}\n\
            URL:            {}\n\
+           Price to Beat:  {}\n\
            Oracle:         {}\n\
            Asset:          {}\n\
            Timeframe:      {}\n\
@@ -512,6 +636,7 @@ fn log_threshold_exceeded(
         ctx.market_id,
         ctx.market_question,
         ctx.market_url,
+        ctx.format_price_to_beat(),
         ctx.oracle_source,
         ctx.crypto_asset,
         ctx.timeframe,
@@ -536,6 +661,7 @@ fn log_placing_order(
            Market ID:      {}\n\
            Market:         {}\n\
            URL:            {}\n\
+           Price to Beat:  {}\n\
            Oracle:         {}\n\
            Asset:          {}\n\
            Timeframe:      {}\n\
@@ -547,6 +673,7 @@ fn log_placing_order(
         ctx.market_id,
         ctx.market_question,
         ctx.market_url,
+        ctx.format_price_to_beat(),
         ctx.oracle_source,
         ctx.crypto_asset,
         ctx.timeframe,
@@ -571,6 +698,7 @@ fn log_order_success<T: std::fmt::Debug>(
            Market ID:      {}\n\
            Market:         {}\n\
            URL:            {}\n\
+           Price to Beat:  {}\n\
            Outcome:        {}\n\
            Timeframe:      {}\n\
            Token ID:       {}\n\
@@ -579,6 +707,7 @@ fn log_order_success<T: std::fmt::Debug>(
         ctx.market_id,
         ctx.market_question,
         ctx.market_url,
+        ctx.format_price_to_beat(),
         outcome_name,
         ctx.timeframe,
         token_id
@@ -599,10 +728,17 @@ fn log_order_failed<E: std::fmt::Display>(
            Market ID:      {}\n\
            Market:         {}\n\
            URL:            {}\n\
+           Price to Beat:  {}\n\
            Outcome:        {}\n\
            Token ID:       {}\n\
          ════════════════════════════════════════════════════════════════",
-        error, ctx.market_id, ctx.market_question, ctx.market_url, outcome_name, token_id
+        error,
+        ctx.market_id,
+        ctx.market_question,
+        ctx.market_url,
+        ctx.format_price_to_beat(),
+        outcome_name,
+        token_id
     );
 }
 
@@ -644,8 +780,12 @@ fn log_market_ended(ctx: &MarketTrackerContext) {
            Market ID:    {}\n\
            Market:       {}\n\
            URL:          {}\n\
+           Price to Beat:{}\n\
          ════════════════════════════════════════════════════════════════",
-        ctx.market_id, ctx.market_question, ctx.market_url
+        ctx.market_id,
+        ctx.market_question,
+        ctx.market_url,
+        ctx.format_price_to_beat()
     );
 }
 
@@ -881,7 +1021,7 @@ impl UpOrDownStrategy {
     ) -> anyhow::Result<()> {
         // Initialize context and state
         let outcomes = market.parse_outcomes()?;
-        let ctx = MarketTrackerContext::new(&market, &config, outcomes.clone())?;
+        let mut ctx = MarketTrackerContext::new(&market, &config, outcomes.clone())?;
         let mut state = TrackerState::new();
 
         // Build WebSocket configuration
@@ -893,6 +1033,23 @@ impl UpOrDownStrategy {
             outcomes,
             &market.end_date,
         )?;
+
+        // Fetch the price to beat for this market
+        let price_to_beat = match get_price_to_beat(ctx.timeframe, ctx.crypto_asset, &market).await
+        {
+            Ok(price) => {
+                info!("[WS {}] Price to beat: ${:.2}", ctx.market_id, price);
+                Some(price)
+            }
+            Err(e) => {
+                warn!(
+                    "[WS {}] Failed to fetch price to beat: {}",
+                    ctx.market_id, e
+                );
+                None
+            }
+        };
+        ctx.set_price_to_beat(price_to_beat);
 
         // Log startup info
         info!("[WS {}] Connecting to orderbook stream...", ctx.market_id);
@@ -926,7 +1083,8 @@ impl UpOrDownStrategy {
             }
 
             // Check orderbooks and get tokens needing orders
-            let (tokens_to_order, all_empty) = check_all_orderbooks(&orderbooks, &mut state, &ctx).await;
+            let (tokens_to_order, all_empty) =
+                check_all_orderbooks(&orderbooks, &mut state, &ctx).await;
 
             // Exit if market has ended
             if all_empty {
