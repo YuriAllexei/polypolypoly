@@ -11,8 +11,8 @@ use crate::domain::DbMarket;
 use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::config::UpOrDownConfig;
 use crate::infrastructure::{
-    build_ws_client, handle_client_event, spawn_oracle_trackers, MarketTrackerConfig,
-    OracleType, SharedOraclePrices, SharedOrderbooks,
+    build_ws_client, handle_client_event, spawn_oracle_trackers, MarketTrackerConfig, OracleType,
+    SharedOraclePrices, SharedOrderbooks,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -483,7 +483,9 @@ fn check_risk(
     let mut oracle_price = 0.0;
 
     if let (Some(price_to_beat), Some(oracle_prices)) = (ctx.price_to_beat, oracle_prices) {
-        if let Some(current_price) = get_oracle_price(ctx.oracle_source, ctx.crypto_asset, oracle_prices) {
+        if let Some(current_price) =
+            get_oracle_price(ctx.oracle_source, ctx.crypto_asset, oracle_prices)
+        {
             oracle_price = current_price;
             bps_diff = ((price_to_beat - current_price).abs() / price_to_beat) * 10000.0;
             if bps_diff < ctx.oracle_bps_price_threshold {
@@ -653,7 +655,9 @@ fn get_oracle_price(
 
     // Get price from oracle manager
     let manager = oracle_prices.read().unwrap();
-    manager.get_price(oracle_type, symbol).map(|entry| entry.value)
+    manager
+        .get_price(oracle_type, symbol)
+        .map(|entry| entry.value)
 }
 
 // =============================================================================
@@ -836,8 +840,8 @@ fn log_risk_detected(
            Market:         {}\n\
            URL:            {}\n\
            Price to Beat:  {}\n\
-           Oracle Price:   ${:.2}\n\
-           BPS Difference: {:.2} bps (threshold: {:.2})\n\
+           Oracle Price:   ${:.4}\n\
+           BPS Difference: {:.4} bps (threshold: {:.4})\n\
            Outcome:        {}\n\
            Token ID:       {}\n\
            Avg Bid (excl top): {:.4}\n\
