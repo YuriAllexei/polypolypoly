@@ -77,7 +77,18 @@ impl OrderbookSide {
     /// Update a single price level
     /// If size == 0, remove the level
     pub fn process_update(&mut self, price: f64, size: f64) {
-        // Find position for this price
+        // Use wider tolerance for floating-point comparison (prices are typically 0.01-0.99)
+        const PRICE_TOLERANCE: f64 = 1e-6;
+
+        // For removals (size=0), search entire orderbook to find and remove the price
+        if size == 0.0 {
+            if let Some(idx) = self.levels.iter().position(|(p, _)| (p - price).abs() < PRICE_TOLERANCE) {
+                self.levels.remove(idx);
+            }
+            return;
+        }
+
+        // For additions/updates, find correct position
         let pos = self.levels.iter().position(|(p, _)| {
             if self.is_bid {
                 *p <= price
@@ -87,25 +98,17 @@ impl OrderbookSide {
         });
 
         match pos {
-            Some(idx) if (self.levels[idx].0 - price).abs() < 1e-9 => {
-                // Price exists at idx
-                if size == 0.0 {
-                    self.levels.remove(idx);
-                } else {
-                    self.levels[idx].1 = size;
-                }
+            Some(idx) if (self.levels[idx].0 - price).abs() < PRICE_TOLERANCE => {
+                // Price exists at idx - update size
+                self.levels[idx].1 = size;
             }
             Some(idx) => {
                 // Price doesn't exist, insert at idx
-                if size > 0.0 {
-                    self.levels.insert(idx, (price, size));
-                }
+                self.levels.insert(idx, (price, size));
             }
             None => {
                 // Insert at end
-                if size > 0.0 {
-                    self.levels.push((price, size));
-                }
+                self.levels.push((price, size));
             }
         }
     }
@@ -281,6 +284,8 @@ mod tests {
         }
     }
 
+    const TEST_TOLERANCE: f64 = 1e-6;
+
     #[test]
     fn test_orderbook_side_snapshot() {
         let mut bids = OrderbookSide::new(true);
@@ -293,8 +298,8 @@ mod tests {
         // Bids should be sorted descending
         assert_eq!(bids.levels().len(), 3);
         let best = bids.best().unwrap();
-        assert!((best.0 - 0.75).abs() < 1e-9);
-        assert!((best.1 - 200.0).abs() < 1e-9);
+        assert!((best.0 - 0.75).abs() < TEST_TOLERANCE);
+        assert!((best.1 - 200.0).abs() < TEST_TOLERANCE);
     }
 
     #[test]
@@ -305,17 +310,34 @@ mod tests {
         // Update existing level
         bids.process_update(0.75, 300.0);
         let best = bids.best().unwrap();
-        assert!((best.1 - 300.0).abs() < 1e-9);
+        assert!((best.1 - 300.0).abs() < TEST_TOLERANCE);
 
         // Add new level
         bids.process_update(0.76, 100.0);
         let best = bids.best().unwrap();
-        assert!((best.0 - 0.76).abs() < 1e-9);
+        assert!((best.0 - 0.76).abs() < TEST_TOLERANCE);
 
         // Remove level (size = 0)
         bids.process_update(0.76, 0.0);
         let best = bids.best().unwrap();
-        assert!((best.0 - 0.75).abs() < 1e-9);
+        assert!((best.0 - 0.75).abs() < TEST_TOLERANCE);
+    }
+
+    #[test]
+    fn test_orderbook_removal_clears_all_asks() {
+        let mut asks = OrderbookSide::new(false);
+        asks.process_snapshot(&[
+            make_level("0.76", "100"),
+            make_level("0.77", "200"),
+        ]);
+        assert_eq!(asks.len(), 2);
+
+        // Remove all asks one by one
+        asks.process_update(0.76, 0.0);
+        assert_eq!(asks.len(), 1);
+
+        asks.process_update(0.77, 0.0);
+        assert!(asks.is_empty());
     }
 
     #[test]
@@ -328,11 +350,11 @@ mod tests {
 
         let best_bid = ob.best_bid().unwrap();
         let best_ask = ob.best_ask().unwrap();
-        assert!((best_bid.0 - 0.74).abs() < 1e-9);
-        assert!((best_ask.0 - 0.76).abs() < 1e-9);
+        assert!((best_bid.0 - 0.74).abs() < TEST_TOLERANCE);
+        assert!((best_ask.0 - 0.76).abs() < TEST_TOLERANCE);
 
         let spread = ob.spread().unwrap();
-        assert!((spread - 0.02).abs() < 1e-9);
+        assert!((spread - 0.02).abs() < TEST_TOLERANCE);
     }
 
     #[test]
@@ -343,11 +365,11 @@ mod tests {
         // Update bid
         ob.process_update("BUY", "0.75", "200");
         let best_bid = ob.best_bid().unwrap();
-        assert!((best_bid.0 - 0.75).abs() < 1e-9);
+        assert!((best_bid.0 - 0.75).abs() < TEST_TOLERANCE);
 
         // Update ask
         ob.process_update("SELL", "0.755", "150");
         let best_ask = ob.best_ask().unwrap();
-        assert!((best_ask.0 - 0.755).abs() < 1e-9);
+        assert!((best_ask.0 - 0.755).abs() < TEST_TOLERANCE);
     }
 }

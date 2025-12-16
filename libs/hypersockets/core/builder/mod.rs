@@ -124,13 +124,13 @@ where
         self
     }
 
-    fn build(self, _router: Arc<R>, shutdown_flag: Arc<std::sync::atomic::AtomicBool>) -> (HashMap<R::RouteKey, crossbeam_channel::Sender<R::Message>>, Vec<std::thread::JoinHandle<()>>, Option<Arc<std::sync::Barrier>>) {
+    fn build(self, _router: Arc<R>, shutdown_flag: Arc<std::sync::atomic::AtomicBool>) -> (HashMap<R::RouteKey, crossbeam_channel::Sender<R::Message>>, Vec<std::thread::JoinHandle<()>>, Option<Arc<std::sync::atomic::AtomicUsize>>) {
         let mut senders = HashMap::new();
         let mut handles = Vec::new();
 
         let handler_count = self.handlers.len();
-        let barrier = if handler_count > 0 {
-            Some(Arc::new(std::sync::Barrier::new(handler_count + 1)))
+        let handlers_not_ready = if handler_count > 0 {
+            Some(Arc::new(std::sync::atomic::AtomicUsize::new(handler_count)))
         } else {
             None
         };
@@ -139,13 +139,13 @@ where
             senders.insert(route_key.clone(), sender);
 
             let shutdown_flag = Arc::clone(&shutdown_flag);
-            let thread_barrier = barrier.clone();
+            let counter = handlers_not_ready.clone();
 
             let handle = std::thread::spawn(move || {
                 let mut handler = handler;
 
-                if let Some(b) = thread_barrier {
-                    b.wait();
+                if let Some(c) = counter {
+                    c.fetch_sub(1, std::sync::atomic::Ordering::Release);
                 }
 
                 loop {
@@ -173,7 +173,7 @@ where
             handles.push(handle);
         }
 
-        (senders, handles, barrier)
+        (senders, handles, handlers_not_ready)
     }
 }
 
@@ -196,7 +196,7 @@ where
         let routing = configure_routing(routing);
 
         // Store the routing builder as a closure that can be called later
-        type HandlerBuilderFn<R> = Box<dyn FnOnce(Arc<R>, Arc<std::sync::atomic::AtomicBool>) -> (HashMap<<R as MessageRouter>::RouteKey, crossbeam_channel::Sender<<R as MessageRouter>::Message>>, Vec<std::thread::JoinHandle<()>>, Option<Arc<std::sync::Barrier>>) + Send>;
+        type HandlerBuilderFn<R> = Box<dyn FnOnce(Arc<R>, Arc<std::sync::atomic::AtomicBool>) -> (HashMap<<R as MessageRouter>::RouteKey, crossbeam_channel::Sender<<R as MessageRouter>::Message>>, Vec<std::thread::JoinHandle<()>>, Option<Arc<std::sync::atomic::AtomicUsize>>) + Send>;
 
         let handler_builder: HandlerBuilderFn<NewR> = Box::new(move |router_arc: Arc<NewR>, shutdown_flag: Arc<std::sync::atomic::AtomicBool>| {
             routing.build(router_arc, shutdown_flag)
@@ -371,9 +371,9 @@ where
         });
 
         // Build handlers using the closure
-        let (route_senders, handler_handles, handlers_ready) = if let Some(builder_any) = self.handler_builder {
+        let (route_senders, handler_handles, handlers_not_ready) = if let Some(builder_any) = self.handler_builder {
             // Downcast from Any back to the concrete closure type
-            type HandlerBuilderFn<R> = Box<dyn FnOnce(Arc<R>, Arc<std::sync::atomic::AtomicBool>) -> (HashMap<<R as MessageRouter>::RouteKey, crossbeam_channel::Sender<<R as MessageRouter>::Message>>, Vec<std::thread::JoinHandle<()>>, Option<Arc<std::sync::Barrier>>) + Send>;
+            type HandlerBuilderFn<R> = Box<dyn FnOnce(Arc<R>, Arc<std::sync::atomic::AtomicBool>) -> (HashMap<<R as MessageRouter>::RouteKey, crossbeam_channel::Sender<<R as MessageRouter>::Message>>, Vec<std::thread::JoinHandle<()>>, Option<Arc<std::sync::atomic::AtomicUsize>>) + Send>;
 
             let builder = builder_any
                 .downcast::<HandlerBuilderFn<R>>()
@@ -397,7 +397,7 @@ where
             subscriptions: self.subscriptions,
             shutdown_flag,
             halted_flag: self.halted_flag,
-            handlers_ready,
+            handlers_not_ready,
         };
 
         let mut client = WebSocketClient::new(config).await?;

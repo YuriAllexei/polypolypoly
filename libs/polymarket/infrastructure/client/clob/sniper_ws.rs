@@ -105,10 +105,17 @@ impl MessageRouter for SniperRouter {
             return Ok(SniperMessage::Pong);
         }
 
-        // Try to parse as JSON array (book snapshots)
+        // Try to parse as JSON array (book snapshots - initial subscription)
         if let Ok(snapshots) = serde_json::from_str::<Vec<BookSnapshot>>(text) {
             if snapshots.first().map(|s| s.event_type.as_str()) == Some("book") {
                 return Ok(SniperMessage::BookSnapshots(snapshots));
+            }
+        }
+
+        // Try to parse as single book snapshot (sent after trades that affect the book)
+        if let Ok(snapshot) = serde_json::from_str::<BookSnapshot>(text) {
+            if snapshot.event_type == "book" {
+                return Ok(SniperMessage::BookSnapshots(vec![snapshot]));
             }
         }
 
@@ -177,6 +184,10 @@ impl SniperHandler {
 
     /// Process orderbook snapshots and update shared orderbooks
     fn handle_snapshot(&mut self, snapshots: &[BookSnapshot]) {
+        if snapshots.is_empty() {
+            return;
+        }
+
         let mut obs = self.orderbooks.write().unwrap();
         for snapshot in snapshots {
             let orderbook = obs
@@ -185,9 +196,7 @@ impl SniperHandler {
             orderbook.process_snapshot(&snapshot.bids, &snapshot.asks);
         }
 
-        if !self.first_snapshot_received.load(Ordering::Relaxed) {
-            self.first_snapshot_received.store(true, Ordering::Release);
-        }
+        self.first_snapshot_received.swap(true, Ordering::Release);
     }
 
     /// Process price change events and update shared orderbooks

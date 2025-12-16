@@ -1277,6 +1277,20 @@ impl UpOrDownStrategy {
             sleep(StdDuration::from_millis(10)).await;
         }
 
+        // Validate all expected tokens have orderbooks
+        let has_missing_tokens = {
+            let obs = orderbooks.read().unwrap();
+            let missing_count = ctx.token_ids.iter().filter(|t| !obs.contains_key(*t)).count();
+            if missing_count > 0 {
+                error!("[WS {}] Missing orderbooks for {} tokens", ctx.market_id, missing_count);
+            }
+            missing_count > 0
+        };
+        if has_missing_tokens {
+            client.shutdown().await?;
+            return Err(anyhow::anyhow!("Incomplete orderbook snapshot"));
+        }
+
         // Main tracking loop
         loop {
             // Check shutdown flag (highest priority)
@@ -1304,6 +1318,22 @@ impl UpOrDownStrategy {
 
             // Place orders for tokens that exceeded threshold
             for (token_id, outcome_name, elapsed) in tokens_to_order {
+                // Re-check orderbook before placing order (ensures fresh data)
+                let still_no_asks = {
+                    let obs = orderbooks.read().unwrap();
+                    obs.get(&token_id).map(|ob| ob.asks.is_empty()).unwrap_or(false)
+                };
+
+                if !still_no_asks {
+                    info!(
+                        "[WS {}] Skipping order for {} - asks appeared during processing",
+                        ctx.market_id, outcome_name
+                    );
+                    state.threshold_triggered.remove(&token_id);
+                    state.no_asks_timers.remove(&token_id);
+                    continue;
+                }
+
                 if let Some(order_id) =
                     place_order(&trading, &token_id, &outcome_name, elapsed, &ctx).await
                 {

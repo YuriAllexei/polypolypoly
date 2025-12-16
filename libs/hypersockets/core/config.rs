@@ -1,7 +1,7 @@
 use crate::traits::*;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Configuration for WebSocketClient with routing support
@@ -53,7 +53,7 @@ where
     /// Used by ClientManager to track when connections are down but reconnecting
     pub(crate) halted_flag: Option<Arc<AtomicBool>>,
 
-    pub(crate) handlers_ready: Option<Arc<Barrier>>,
+    pub(crate) handlers_not_ready: Option<Arc<AtomicUsize>>,
 }
 
 impl<R, M> ClientConfig<R, M>

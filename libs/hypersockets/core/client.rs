@@ -464,8 +464,10 @@ where
         }
     }
 
-    if let Some(ref barrier) = config.handlers_ready {
-        barrier.wait();
+    if let Some(ref counter) = config.handlers_not_ready {
+        while counter.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            tokio::time::sleep(std::time::Duration::from_micros(100)).await;
+        }
     }
 
     // Send subscription messages if configured
