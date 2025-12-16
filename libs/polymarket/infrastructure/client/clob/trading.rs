@@ -38,7 +38,7 @@ use dashmap::DashMap;
 use ethers::types::Address;
 use std::env;
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const DEFAULT_CLOB_URL: &str = "https://clob.polymarket.com";
 
@@ -146,6 +146,16 @@ impl TradingClient {
             info!("API credentials obtained successfully");
         }
 
+        // Verify HTTP connectivity to CLOB API
+        info!("Verifying HTTP connectivity to CLOB API...");
+        match rest.health_check().await {
+            Ok(_) => info!("✅ CLOB API connectivity verified"),
+            Err(e) => {
+                warn!("⚠️  CLOB API connectivity check failed: {}", e);
+                warn!("⚠️  Order placement may fail due to network issues");
+            }
+        }
+
         debug!(
             "TradingClient initialized: signer={:?}, proxy={:?}",
             signer_addr, proxy_addr
@@ -170,15 +180,22 @@ impl TradingClient {
         self.proxy_addr.unwrap_or(self.signer_addr)
     }
 
-    async fn get_neg_risk(&self, token_id: &str) -> bool {
+    /// Get neg_risk status for a token.
+    ///
+    /// Most markets (including Up or Down) are NOT neg_risk.
+    /// The HTTP endpoint to fetch this is unreliable from Docker containers,
+    /// so we default to false which is correct for the vast majority of markets.
+    ///
+    /// For neg_risk markets, you would need to explicitly specify neg_risk=true
+    /// when placing orders (future enhancement: get from Gamma API data).
+    fn get_neg_risk(&self, token_id: &str) -> bool {
         if let Some(neg_risk) = self.neg_risk_cache.get(token_id) {
             return *neg_risk;
         }
 
-        let neg_risk = self.rest.get_neg_risk(token_id).await.unwrap_or_else(|e| {
-            debug!("Could not fetch neg_risk for {}: {}", token_id, e);
-            false
-        });
+        // Default to false - most markets are not neg_risk
+        // Up or Down markets specifically are NOT neg_risk
+        let neg_risk = false;
 
         self.neg_risk_cache.insert(token_id.to_string(), neg_risk);
         neg_risk
@@ -188,8 +205,8 @@ impl TradingClient {
     ///
     /// Always uses Gnosis Safe signature type (signature_type=2) which is
     /// required for browser wallet users with proxy wallets.
-    async fn order_builder(&self, token_id: &str) -> OrderBuilder {
-        let neg_risk = self.get_neg_risk(token_id).await;
+    fn order_builder(&self, token_id: &str) -> OrderBuilder {
+        let neg_risk = self.get_neg_risk(token_id);
         let maker_addr = self.maker_address();
 
         // Always use Gnosis Safe signature type
@@ -292,7 +309,7 @@ impl TradingClient {
             )));
         }
 
-        let order_builder = self.order_builder(token_id).await;
+        let order_builder = self.order_builder(token_id);
 
         let result = self
             .rest
@@ -317,7 +334,7 @@ impl TradingClient {
         token_id: &str,
         amount_usd: f64,
     ) -> Result<OrderPlacementResponse> {
-        let order_builder = self.order_builder(token_id).await;
+        let order_builder = self.order_builder(token_id);
         let result = self
             .rest
             .place_signed_market_buy(&self.auth, &order_builder, token_id, amount_usd)
@@ -331,7 +348,7 @@ impl TradingClient {
         token_id: &str,
         size: f64,
     ) -> Result<OrderPlacementResponse> {
-        let order_builder = self.order_builder(token_id).await;
+        let order_builder = self.order_builder(token_id);
         let result = self
             .rest
             .place_signed_market_sell(&self.auth, &order_builder, token_id, size)

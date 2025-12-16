@@ -31,9 +31,20 @@ pub struct GammaClient {
 impl GammaClient {
     /// Create new Gamma API client
     pub fn new(base_url: impl Into<String>) -> Self {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            // Connection pool management - prevent stale connections
+            .pool_idle_timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(5)
+            // Detect dead connections faster
+            .tcp_keepalive(Duration::from_secs(15))
+            .build()
+            .expect("Failed to build HTTP client");
+
         Self {
             base_url: base_url.into(),
-            client: Client::new(),
+            client,
         }
     }
 

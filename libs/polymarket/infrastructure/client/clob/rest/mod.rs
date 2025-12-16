@@ -13,13 +13,64 @@ mod queries;
 use super::helpers::{parse_json, require_success};
 use super::types::*;
 use reqwest::Client;
+use std::error::Error as StdError;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, warn};
 
+/// Extract detailed error information from a reqwest error
+fn describe_reqwest_error(err: &reqwest::Error) -> String {
+    let mut details = Vec::new();
+
+    if err.is_connect() {
+        details.push("CONNECTION_FAILED");
+    }
+    if err.is_timeout() {
+        details.push("TIMEOUT");
+    }
+    if err.is_request() {
+        details.push("REQUEST_ERROR");
+    }
+    if err.is_builder() {
+        details.push("BUILDER_ERROR");
+    }
+    if err.is_redirect() {
+        details.push("REDIRECT_ERROR");
+    }
+    if err.is_body() {
+        details.push("BODY_ERROR");
+    }
+    if err.is_decode() {
+        details.push("DECODE_ERROR");
+    }
+
+    // Get the error source chain
+    let mut source_chain = String::new();
+    let mut source: Option<&(dyn StdError + 'static)> = StdError::source(err);
+    while let Some(src) = source {
+        if !source_chain.is_empty() {
+            source_chain.push_str(" -> ");
+        }
+        source_chain.push_str(&src.to_string());
+        source = src.source();
+    }
+
+    let type_info = if details.is_empty() {
+        "UNKNOWN".to_string()
+    } else {
+        details.join("+")
+    };
+
+    if source_chain.is_empty() {
+        format!("[{}] {}", type_info, err)
+    } else {
+        format!("[{}] {} (caused by: {})", type_info, err, source_chain)
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum RestError {
-    #[error("HTTP request failed: {0}")]
+    #[error("HTTP request failed: {}", describe_reqwest_error(.0))]
     RequestFailed(#[from] reqwest::Error),
 
     #[error("API error: {0}")]
@@ -45,6 +96,11 @@ impl RestClient {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(10))
+            // Connection pool management - prevent stale connections
+            .pool_idle_timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(5)
+            // Detect dead connections faster
+            .tcp_keepalive(Duration::from_secs(15))
             .build()
             .expect("Failed to build HTTP client");
 
@@ -52,6 +108,29 @@ impl RestClient {
             base_url: base_url.into(),
             client,
         }
+    }
+
+    /// Check HTTP connectivity to the CLOB API
+    ///
+    /// Makes a lightweight request to verify the network path is working.
+    /// This helps detect connectivity issues early rather than at order time.
+    pub async fn health_check(&self) -> Result<()> {
+        let url = format!("{}/time", self.base_url);
+
+        debug!("Checking CLOB API connectivity: {}", url);
+
+        let response = self
+            .client
+            .get(&url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await?;
+
+        // We just care that we got a response, not what it says
+        let status = response.status();
+        debug!("CLOB API health check response: {}", status);
+
+        Ok(())
     }
 
     /// Get all simplified markets

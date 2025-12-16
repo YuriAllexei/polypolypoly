@@ -349,11 +349,22 @@ fn check_token_orderbook(
     }
 
     // Check if threshold exceeded using dynamic threshold
-    if !state.threshold_triggered.contains(token_id) && !state.order_placed.contains_key(token_id) {
+    if !state.threshold_triggered.contains(token_id) {
         if let Some(timer_start) = state.no_asks_timers.get(token_id) {
             let elapsed = timer_start.elapsed().as_secs_f64();
             let dynamic_threshold = calculate_dynamic_threshold(ctx);
             if elapsed >= dynamic_threshold {
+                // Check if order already placed for this token
+                if state.order_placed.contains_key(token_id) {
+                    // Log that we're skipping because order already exists
+                    info!(
+                        "⏭️  Threshold exceeded for {} ({}) but order already placed - skipping",
+                        token_id, outcome_name
+                    );
+                    // Clear the timer since we're not going to place another order
+                    state.no_asks_timers.remove(token_id);
+                    return OrderbookCheckResult::NoAsks;
+                }
                 state.threshold_triggered.insert(token_id.to_string());
                 return OrderbookCheckResult::ThresholdExceeded {
                     elapsed_secs: elapsed,
