@@ -124,23 +124,31 @@ where
         self
     }
 
-    fn build(self, _router: Arc<R>, shutdown_flag: Arc<std::sync::atomic::AtomicBool>) -> (HashMap<R::RouteKey, crossbeam_channel::Sender<R::Message>>, Vec<std::thread::JoinHandle<()>>) {
+    fn build(self, _router: Arc<R>, shutdown_flag: Arc<std::sync::atomic::AtomicBool>) -> (HashMap<R::RouteKey, crossbeam_channel::Sender<R::Message>>, Vec<std::thread::JoinHandle<()>>, Option<Arc<std::sync::Barrier>>) {
         let mut senders = HashMap::new();
         let mut handles = Vec::new();
+
+        let handler_count = self.handlers.len();
+        let barrier = if handler_count > 0 {
+            Some(Arc::new(std::sync::Barrier::new(handler_count + 1)))
+        } else {
+            None
+        };
 
         for (route_key, (sender, receiver, handler)) in self.handlers {
             senders.insert(route_key.clone(), sender);
 
-            // Clone shutdown flag for this handler thread
             let shutdown_flag = Arc::clone(&shutdown_flag);
+            let thread_barrier = barrier.clone();
 
-            // Spawn dedicated OS thread for this handler
             let handle = std::thread::spawn(move || {
                 let mut handler = handler;
 
+                if let Some(b) = thread_barrier {
+                    b.wait();
+                }
+
                 loop {
-                    // Use recv_timeout for responsive shutdown
-                    // 50ms timeout allows quick shutdown while maintaining low overhead
                     match receiver.recv_timeout(std::time::Duration::from_millis(50)) {
                         Ok(message) => {
                             if let Err(e) = handler.handle(message) {
@@ -148,7 +156,6 @@ where
                             }
                         }
                         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                            // Check shutdown flag on timeout (atomic load, ~1ns cost)
                             if !shutdown_flag.load(std::sync::atomic::Ordering::Acquire) {
                                 tracing::debug!("Shutdown flag detected, handler thread for route {:?} exiting", route_key);
                                 break;
@@ -156,7 +163,6 @@ where
                             continue;
                         }
                         Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                            // Channel closed (I/O stopped, senders dropped)
                             tracing::debug!("Handler channel closed for route {:?}, thread exiting", route_key);
                             break;
                         }
@@ -167,7 +173,7 @@ where
             handles.push(handle);
         }
 
-        (senders, handles)
+        (senders, handles, barrier)
     }
 }
 
@@ -190,7 +196,7 @@ where
         let routing = configure_routing(routing);
 
         // Store the routing builder as a closure that can be called later
-        type HandlerBuilderFn<R> = Box<dyn FnOnce(Arc<R>, Arc<std::sync::atomic::AtomicBool>) -> (HashMap<<R as MessageRouter>::RouteKey, crossbeam_channel::Sender<<R as MessageRouter>::Message>>, Vec<std::thread::JoinHandle<()>>) + Send>;
+        type HandlerBuilderFn<R> = Box<dyn FnOnce(Arc<R>, Arc<std::sync::atomic::AtomicBool>) -> (HashMap<<R as MessageRouter>::RouteKey, crossbeam_channel::Sender<<R as MessageRouter>::Message>>, Vec<std::thread::JoinHandle<()>>, Option<Arc<std::sync::Barrier>>) + Send>;
 
         let handler_builder: HandlerBuilderFn<NewR> = Box::new(move |router_arc: Arc<NewR>, shutdown_flag: Arc<std::sync::atomic::AtomicBool>| {
             routing.build(router_arc, shutdown_flag)
@@ -365,9 +371,9 @@ where
         });
 
         // Build handlers using the closure
-        let (route_senders, handler_handles) = if let Some(builder_any) = self.handler_builder {
+        let (route_senders, handler_handles, handlers_ready) = if let Some(builder_any) = self.handler_builder {
             // Downcast from Any back to the concrete closure type
-            type HandlerBuilderFn<R> = Box<dyn FnOnce(Arc<R>, Arc<std::sync::atomic::AtomicBool>) -> (HashMap<<R as MessageRouter>::RouteKey, crossbeam_channel::Sender<<R as MessageRouter>::Message>>, Vec<std::thread::JoinHandle<()>>) + Send>;
+            type HandlerBuilderFn<R> = Box<dyn FnOnce(Arc<R>, Arc<std::sync::atomic::AtomicBool>) -> (HashMap<<R as MessageRouter>::RouteKey, crossbeam_channel::Sender<<R as MessageRouter>::Message>>, Vec<std::thread::JoinHandle<()>>, Option<Arc<std::sync::Barrier>>) + Send>;
 
             let builder = builder_any
                 .downcast::<HandlerBuilderFn<R>>()
@@ -375,7 +381,7 @@ where
 
             (*builder)(Arc::clone(&router), Arc::clone(&shutdown_flag))
         } else {
-            (HashMap::new(), Vec::new())
+            (HashMap::new(), Vec::new(), None)
         };
 
         let config = ClientConfig {
@@ -391,6 +397,7 @@ where
             subscriptions: self.subscriptions,
             shutdown_flag,
             halted_flag: self.halted_flag,
+            handlers_ready,
         };
 
         let mut client = WebSocketClient::new(config).await?;

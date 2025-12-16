@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use hypersockets::core::*;
 use hypersockets::{MessageHandler, MessageRouter, WsMessage};
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -156,16 +156,22 @@ pub struct SniperHandler {
     last_trade_prices: HashMap<String, (String, String)>, // asset_id -> (price, size)
     /// Track tick sizes per asset
     tick_sizes: HashMap<String, String>, // asset_id -> tick_size
+    first_snapshot_received: Arc<AtomicBool>,
 }
 
 impl SniperHandler {
-    pub fn new(market_id: String, orderbooks: SharedOrderbooks) -> Self {
+    pub fn new(
+        market_id: String,
+        orderbooks: SharedOrderbooks,
+        first_snapshot_received: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             market_id,
             orderbooks,
             message_count: 0,
             last_trade_prices: HashMap::new(),
             tick_sizes: HashMap::new(),
+            first_snapshot_received,
         }
     }
 
@@ -177,6 +183,10 @@ impl SniperHandler {
                 .entry(snapshot.asset_id.clone())
                 .or_insert_with(|| Orderbook::new(snapshot.asset_id.clone()));
             orderbook.process_snapshot(&snapshot.bids, &snapshot.asks);
+        }
+
+        if !self.first_snapshot_received.load(Ordering::Relaxed) {
+            self.first_snapshot_received.store(true, Ordering::Release);
         }
     }
 
@@ -243,12 +253,13 @@ impl MessageHandler<SniperMessage> for SniperHandler {
 pub async fn build_ws_client(
     config: &MarketTrackerConfig,
     orderbooks: SharedOrderbooks,
+    first_snapshot_received: Arc<AtomicBool>,
 ) -> Result<WebSocketClient<SniperRouter, SniperMessage>> {
     // Local shutdown flag for this WebSocket client only
     let local_shutdown_flag = Arc::new(AtomicBool::new(true));
 
     let router = SniperRouter::new(config.market_id.clone());
-    let handler = SniperHandler::new(config.market_id.clone(), orderbooks);
+    let handler = SniperHandler::new(config.market_id.clone(), orderbooks, first_snapshot_received);
 
     let subscription = MarketSubscription::new(config.token_ids.clone());
     let subscription_json = serde_json::to_string(&subscription)?;

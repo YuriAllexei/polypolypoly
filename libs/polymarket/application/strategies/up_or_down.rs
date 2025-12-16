@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 use tokio::task::JoinHandle;
@@ -262,8 +262,6 @@ struct TrackerState {
     threshold_triggered: HashSet<String>,
     /// Orders placed: token_id → order_id (for cancellation tracking)
     order_placed: HashMap<String, String>,
-    /// Whether this is the first orderbook check (used for initial delay)
-    first_orderbook_check: bool,
 }
 
 impl TrackerState {
@@ -272,7 +270,6 @@ impl TrackerState {
             no_asks_timers: HashMap::new(),
             threshold_triggered: HashSet::new(),
             order_placed: HashMap::new(),
-            first_orderbook_check: true,
         }
     }
 
@@ -374,12 +371,6 @@ async fn check_all_orderbooks(
     state: &mut TrackerState,
     ctx: &MarketTrackerContext,
 ) -> (Vec<(String, String, f64)>, bool) {
-    // Sleep on first call to allow orderbook data to populate
-    if state.first_orderbook_check {
-        sleep(StdDuration::from_secs(2)).await;
-        state.first_orderbook_check = false;
-    }
-
     let mut tokens_to_order = Vec::new();
     let mut all_empty = true;
 
@@ -1263,8 +1254,28 @@ impl UpOrDownStrategy {
 
         // Create shared orderbooks and connect WebSocket
         let orderbooks: SharedOrderbooks = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let client = build_ws_client(&ws_config, Arc::clone(&orderbooks)).await?;
+        let first_snapshot_received = Arc::new(AtomicBool::new(false));
+        let client = build_ws_client(
+            &ws_config,
+            Arc::clone(&orderbooks),
+            Arc::clone(&first_snapshot_received),
+        )
+        .await?;
         info!("[WS {}] Connected and subscribed", ctx.market_id);
+
+        let start = std::time::Instant::now();
+        while !first_snapshot_received.load(Ordering::Acquire) {
+            if start.elapsed() > StdDuration::from_secs(10) {
+                error!("[WS {}] Timeout waiting for first snapshot", ctx.market_id);
+                client.shutdown().await?;
+                return Err(anyhow::anyhow!("Timeout waiting for first orderbook snapshot"));
+            }
+            if !shutdown_flag.load(Ordering::Acquire) {
+                client.shutdown().await?;
+                return Ok(());
+            }
+            sleep(StdDuration::from_millis(10)).await;
+        }
 
         // Main tracking loop
         loop {

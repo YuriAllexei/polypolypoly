@@ -464,6 +464,10 @@ where
         }
     }
 
+    if let Some(ref barrier) = config.handlers_ready {
+        barrier.wait();
+    }
+
     // Send subscription messages if configured
     for sub in &config.subscriptions {
         let msg = ws_message_to_tungstenite(sub);
