@@ -34,10 +34,9 @@ use super::types::{
     OpenOrderParams, OrderPlacementResponse, OrderType, Side, Trade, TradeParams,
 };
 use super::POLYGON_CHAIN_ID;
+use dashmap::DashMap;
 use ethers::types::Address;
-use std::collections::HashMap;
 use std::env;
-use std::sync::RwLock;
 use thiserror::Error;
 use tracing::{debug, info};
 
@@ -72,8 +71,7 @@ pub struct TradingClient {
     rest: RestClient,
     signer_addr: Address,
     proxy_addr: Option<Address>,
-    /// Cache of neg_risk status per token_id
-    neg_risk_cache: RwLock<HashMap<String, bool>>,
+    neg_risk_cache: DashMap<String, bool>,
 }
 
 impl TradingClient {
@@ -158,7 +156,7 @@ impl TradingClient {
             rest,
             signer_addr,
             proxy_addr,
-            neg_risk_cache: RwLock::new(HashMap::new()),
+            neg_risk_cache: DashMap::new(),
         })
     }
 
@@ -172,28 +170,17 @@ impl TradingClient {
         self.proxy_addr.unwrap_or(self.signer_addr)
     }
 
-    /// Get neg_risk status for a token, with caching
     async fn get_neg_risk(&self, token_id: &str) -> bool {
-        // Check cache first
-        {
-            let cache = self.neg_risk_cache.read().unwrap();
-            if let Some(&neg_risk) = cache.get(token_id) {
-                return neg_risk;
-            }
+        if let Some(neg_risk) = self.neg_risk_cache.get(token_id) {
+            return *neg_risk;
         }
 
-        // Fetch from API
         let neg_risk = self.rest.get_neg_risk(token_id).await.unwrap_or_else(|e| {
-            debug!("Could not fetch neg_risk for {}: {}, defaulting to false", token_id, e);
+            debug!("Could not fetch neg_risk for {}: {}", token_id, e);
             false
         });
 
-        // Cache the result
-        {
-            let mut cache = self.neg_risk_cache.write().unwrap();
-            cache.insert(token_id.to_string(), neg_risk);
-        }
-
+        self.neg_risk_cache.insert(token_id.to_string(), neg_risk);
         neg_risk
     }
 

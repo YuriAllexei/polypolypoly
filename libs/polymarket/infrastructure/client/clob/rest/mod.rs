@@ -13,6 +13,7 @@ mod queries;
 use super::helpers::{parse_json, require_success};
 use super::types::*;
 use reqwest::Client;
+use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -40,11 +41,16 @@ pub struct RestClient {
 }
 
 impl RestClient {
-    /// Create new REST client
     pub fn new(base_url: impl Into<String>) -> Self {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .expect("Failed to build HTTP client");
+
         Self {
             base_url: base_url.into(),
-            client: Client::new(),
+            client,
         }
     }
 
@@ -103,16 +109,18 @@ impl RestClient {
         parse_json(response).await
     }
 
-    /// Get neg_risk status for a token
-    ///
-    /// Returns true if the token uses the neg_risk CTF exchange,
-    /// which affects the EIP-712 domain for order signing.
+    /// Get neg_risk status for a token (affects EIP-712 domain for signing)
     pub async fn get_neg_risk(&self, token_id: &str) -> Result<bool> {
         let url = format!("{}/neg-risk?token_id={}", self.base_url, token_id);
 
         debug!("Fetching neg_risk for token {}", token_id);
 
-        let response = self.client.get(&url).send().await?;
+        let response = self
+            .client
+            .get(&url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await?;
         let response = require_success(response, "Failed to fetch neg_risk").await?;
 
         let neg_risk_resp: NegRiskResponse = parse_json(response).await?;
