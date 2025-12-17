@@ -26,7 +26,7 @@ impl RestClient {
 
         let headers = auth.l2_headers(timestamp, "DELETE", "/order", &body)?;
         let req = with_headers(
-            self.client
+            self.client()
                 .delete(&url)
                 .header("Content-Type", "application/json"),
             headers,
@@ -63,7 +63,7 @@ impl RestClient {
 
         let headers = auth.l2_headers(timestamp, "DELETE", "/orders", &body)?;
         let req = with_headers(
-            self.client
+            self.client()
                 .delete(&url)
                 .header("Content-Type", "application/json"),
             headers,
@@ -85,7 +85,7 @@ impl RestClient {
         debug!("Canceling all orders");
 
         let headers = auth.l2_headers(timestamp, "DELETE", "/cancel-all", "")?;
-        let req = with_headers(self.client.delete(&url), headers);
+        let req = with_headers(self.client().delete(&url), headers);
         let response = req.send().await?;
 
         if !response.status().is_success() {
@@ -116,7 +116,7 @@ impl RestClient {
 
         let headers = auth.l2_headers(timestamp, "DELETE", "/cancel-market-orders", &body)?;
         let req = with_headers(
-            self.client
+            self.client()
                 .delete(&url)
                 .header("Content-Type", "application/json"),
             headers,

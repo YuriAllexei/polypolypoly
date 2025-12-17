@@ -16,7 +16,7 @@ use reqwest::Client;
 use std::error::Error as StdError;
 use std::time::Duration;
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Extract detailed error information from a reqwest error
 fn describe_reqwest_error(err: &reqwest::Error) -> String {
@@ -68,6 +68,37 @@ fn describe_reqwest_error(err: &reqwest::Error) -> String {
     }
 }
 
+/// Build HTTP client matching official rs-clob-client exactly
+/// The official client uses minimal settings with NO custom timeouts
+fn build_http_client() -> Client {
+    use reqwest::header;
+
+    let mut headers = header::HeaderMap::new();
+    // Match official rs-clob-client headers exactly
+    headers.insert(
+        header::USER_AGENT,
+        header::HeaderValue::from_static("rs_clob_client"),
+    );
+    headers.insert(
+        header::ACCEPT,
+        header::HeaderValue::from_static("*/*"),
+    );
+    headers.insert(
+        header::CONNECTION,
+        header::HeaderValue::from_static("keep-alive"),
+    );
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/json"),
+    );
+
+    // Match official client: NO custom timeouts, use reqwest defaults
+    Client::builder()
+        .default_headers(headers)
+        .build()
+        .expect("Failed to build HTTP client")
+}
+
 #[derive(Error, Debug)]
 pub enum RestError {
     #[error("HTTP request failed: {}", describe_reqwest_error(.0))]
@@ -86,28 +117,32 @@ pub enum RestError {
 pub type Result<T> = std::result::Result<T, RestError>;
 
 /// REST API client for Polymarket CLOB
+///
+/// Uses a persistent HTTP connection with auto-recreation on failure.
 pub struct RestClient {
     pub(crate) base_url: String,
-    pub(crate) client: Client,
+    client: std::sync::RwLock<Client>,
 }
 
 impl RestClient {
     pub fn new(base_url: impl Into<String>) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
-            // Connection pool management - prevent stale connections
-            .pool_idle_timeout(Duration::from_secs(30))
-            .pool_max_idle_per_host(5)
-            // Detect dead connections faster
-            .tcp_keepalive(Duration::from_secs(15))
-            .build()
-            .expect("Failed to build HTTP client");
-
         Self {
             base_url: base_url.into(),
-            client,
+            client: std::sync::RwLock::new(build_http_client()),
         }
+    }
+
+    /// Get the HTTP client
+    pub(crate) fn client(&self) -> Client {
+        self.client.read().unwrap().clone()
+    }
+
+    /// Recreate the HTTP client (forces new DNS resolution and connection)
+    pub fn recreate_client(&self) {
+        info!("[RestClient] Recreating HTTP client to force fresh connection");
+        let new_client = build_http_client();
+        *self.client.write().unwrap() = new_client;
+        info!("[RestClient] HTTP client recreated successfully");
     }
 
     /// Check HTTP connectivity to the CLOB API
@@ -120,7 +155,7 @@ impl RestClient {
         debug!("Checking CLOB API connectivity: {}", url);
 
         let response = self
-            .client
+            .client()
             .get(&url)
             .timeout(Duration::from_secs(5))
             .send()
@@ -133,13 +168,40 @@ impl RestClient {
         Ok(())
     }
 
+    /// Ensure connectivity before making a request
+    /// If health check fails, recreate client and retry once
+    pub async fn ensure_connectivity(&self) -> Result<()> {
+        match self.health_check().await {
+            Ok(_) => {
+                debug!("[RestClient] Pre-flight connectivity check passed");
+                Ok(())
+            }
+            Err(e) => {
+                warn!("[RestClient] Pre-flight check failed: {}. Recreating client...", e);
+                self.recreate_client();
+
+                // Retry after recreation
+                match self.health_check().await {
+                    Ok(_) => {
+                        info!("[RestClient] Connectivity restored after client recreation");
+                        Ok(())
+                    }
+                    Err(e2) => {
+                        warn!("[RestClient] Still failing after recreation: {}", e2);
+                        Err(e2)
+                    }
+                }
+            }
+        }
+    }
+
     /// Get all simplified markets
     pub async fn get_markets(&self) -> Result<Vec<Market>> {
         let url = format!("{}/markets", self.base_url);
 
         debug!("Fetching markets from {}", url);
 
-        let response = self.client.get(&url).send().await?;
+        let response = self.client().get(&url).send().await?;
         let response = require_success(response, "Failed to fetch markets").await?;
 
         let simplified: Vec<SimplifiedMarket> = parse_json(response).await?;
@@ -166,7 +228,7 @@ impl RestClient {
 
         debug!("Fetching market {} from {}", condition_id, url);
 
-        let response = self.client.get(&url).send().await?;
+        let response = self.client().get(&url).send().await?;
         let response = require_success(response, "Failed to fetch market").await?;
 
         let simplified: SimplifiedMarket = parse_json(response).await?;
@@ -182,7 +244,7 @@ impl RestClient {
 
         debug!("Fetching orderbook for token {} from {}", token_id, url);
 
-        let response = self.client.get(&url).send().await?;
+        let response = self.client().get(&url).send().await?;
         let response = require_success(response, "Failed to fetch orderbook").await?;
 
         parse_json(response).await
@@ -195,7 +257,7 @@ impl RestClient {
         debug!("Fetching neg_risk for token {}", token_id);
 
         let response = self
-            .client
+            .client()
             .get(&url)
             .timeout(Duration::from_secs(5))
             .send()

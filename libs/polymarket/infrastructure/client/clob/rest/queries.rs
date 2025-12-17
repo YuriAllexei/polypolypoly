@@ -38,7 +38,7 @@ impl RestClient {
         let timestamp = PolymarketAuth::current_timestamp();
 
         let headers = auth.l2_headers(timestamp, "GET", "/data/orders", "")?;
-        let req = with_headers(self.client.get(&url), headers);
+        let req = with_headers(self.client().get(&url), headers);
         let response = req.send().await?;
 
         if !response.status().is_success() {
@@ -78,7 +78,7 @@ impl RestClient {
         let timestamp = PolymarketAuth::current_timestamp();
 
         let headers = auth.l2_headers(timestamp, "GET", &path, "")?;
-        let req = with_headers(self.client.get(&url), headers);
+        let req = with_headers(self.client().get(&url), headers);
         let response = req.send().await?;
 
         if !response.status().is_success() {
@@ -126,7 +126,7 @@ impl RestClient {
         let timestamp = PolymarketAuth::current_timestamp();
 
         let headers = auth.l2_headers(timestamp, "GET", "/data/trades", "")?;
-        let req = with_headers(self.client.get(&url), headers);
+        let req = with_headers(self.client().get(&url), headers);
         let response = req.send().await?;
 
         if !response.status().is_success() {
@@ -191,7 +191,7 @@ impl RestClient {
         let timestamp = PolymarketAuth::current_timestamp();
 
         let headers = auth.l2_headers(timestamp, "GET", "/balance-allowance", "")?;
-        let req = with_headers(self.client.get(&url), headers);
+        let req = with_headers(self.client().get(&url), headers);
         let response = req.send().await?;
 
         if !response.status().is_success() {

@@ -6,7 +6,8 @@ use super::super::order_builder::{build_batch_order_payload, build_order_payload
 use super::super::types::*;
 use super::{RestClient, Result, RestError};
 use serde_json::json;
-use tracing::{debug, info};
+use std::time::{Duration, Instant};
+use tracing::{debug, info, warn, error};
 
 impl RestClient {
     /// Place a limit order
@@ -30,7 +31,7 @@ impl RestClient {
 
         let headers = auth.l2_headers(timestamp, "POST", "/order", &body)?;
         let req = with_headers(
-            self.client.post(&url).header("Content-Type", "application/json"),
+            self.client().post(&url).header("Content-Type", "application/json"),
             headers,
         );
         let response = req.body(body).send().await?;
@@ -119,6 +120,7 @@ impl RestClient {
     }
 
     /// Submit a pre-built signed order to the exchange
+    /// Uses a dedicated OS thread to completely isolate from tokio runtime
     pub async fn submit_signed_order(
         &self,
         auth: &PolymarketAuth,
@@ -136,20 +138,79 @@ impl RestClient {
         let body = serde_json::to_string(&payload)
             .map_err(|e| RestError::ApiError(format!("Failed to serialize order: {}", e)))?;
 
-        debug!("Order payload: {}", body);
-
         let headers = auth.l2_headers(timestamp, "POST", "/order", &body)?;
-        let req = with_headers(
-            self.client.post(&url).header("Content-Type", "application/json"),
-            headers,
-        );
-        let response = req.body(body).send().await?;
 
-        if !response.status().is_success() {
-            return Err(extract_api_error(response, "Order placement failed").await);
+        info!("📤 SENDING ORDER REQUEST");
+        info!("   URL: {}", url);
+        info!("   Body length: {} bytes", body.len());
+        debug!("   Full body: {}", body);
+
+        let start = Instant::now();
+
+        // Use a completely separate OS thread with oneshot channel
+        // This isolates the HTTP request from the tokio runtime entirely
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let headers_clone = headers.clone();
+
+        std::thread::spawn(move || {
+            info!("⏳ [Dedicated thread] Starting HTTP request...");
+            let thread_start = Instant::now();
+
+            // Use ureq (blocking HTTP client) in dedicated thread
+            let result = (|| -> std::result::Result<OrderPlacementResponse, String> {
+                let mut request = ureq::post(&url)
+                    .set("Content-Type", "application/json")
+                    .set("User-Agent", "rs_clob_client")
+                    .set("Accept", "*/*");
+
+                for (key, value) in &headers_clone {
+                    request = request.set(key, value);
+                }
+
+                info!("⏳ [Dedicated thread] Sending request...");
+
+                let response = request
+                    .timeout(std::time::Duration::from_secs(15))
+                    .send_string(&body)
+                    .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+                let status = response.status();
+                let response_body = response.into_string()
+                    .map_err(|e| format!("Failed to read response: {}", e))?;
+
+                info!("📥 [Dedicated thread] Got response: status={}, body_len={}", status, response_body.len());
+
+                if status == 200 || status == 201 {
+                    serde_json::from_str(&response_body)
+                        .map_err(|e| format!("Failed to parse response: {} - body: {}", e, response_body))
+                } else {
+                    Err(format!("Order failed with status {}: {}", status, response_body))
+                }
+            })();
+
+            info!("📥 [Dedicated thread] HTTP completed in {:?}", thread_start.elapsed());
+
+            // Send result back to async context
+            let _ = tx.send(result);
+        });
+
+        // Wait for the dedicated thread to complete
+        let result = rx.await
+            .map_err(|_| RestError::ApiError("Thread channel closed".to_string()))?;
+
+        let elapsed = start.elapsed();
+
+        match result {
+            Ok(response) => {
+                info!("✅ Order request successful in {:?}", elapsed);
+                Ok(response)
+            }
+            Err(e) => {
+                error!("❌ Order request failed after {:?}: {}", elapsed, e);
+                Err(RestError::ApiError(e))
+            }
         }
-
-        parse_json(response).await
     }
 
     /// Place multiple orders in a batch (max 15)
@@ -209,7 +270,7 @@ impl RestClient {
 
         let headers = auth.l2_headers(timestamp, "POST", "/orders", &body)?;
         let req = with_headers(
-            self.client.post(&url).header("Content-Type", "application/json"),
+            self.client().post(&url).header("Content-Type", "application/json"),
             headers,
         );
         let response = req.body(body).send().await?;

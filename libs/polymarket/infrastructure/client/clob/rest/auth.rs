@@ -15,7 +15,7 @@ impl RestClient {
         debug!("Creating API key");
 
         let headers = auth.l1_headers(timestamp, 0).await?;
-        let req = with_headers(self.client.post(&url), headers);
+        let req = with_headers(self.client().post(&url), headers);
         let response = req.send().await?;
 
         if !response.status().is_success() {
@@ -45,7 +45,7 @@ impl RestClient {
         debug!("Deriving API key");
 
         let headers = auth.l1_headers(timestamp, 0).await?;
-        let req = with_headers(self.client.get(&url), headers);
+        let req = with_headers(self.client().get(&url), headers);
         let response = req.send().await?;
 
         if !response.status().is_success() {
@@ -65,7 +65,7 @@ impl RestClient {
         debug!("Fetching nonce for maker {}", maker);
 
         let headers = auth.l2_headers(timestamp, "GET", &path, "")?;
-        let req = with_headers(self.client.get(&url), headers);
+        let req = with_headers(self.client().get(&url), headers);
         let response = req.send().await?;
 
         if !response.status().is_success() {
@@ -87,7 +87,7 @@ impl RestClient {
         debug!("Fetching user positions");
 
         let headers = auth.l2_headers(timestamp, "GET", "/positions", "")?;
-        let req = with_headers(self.client.get(&url), headers);
+        let req = with_headers(self.client().get(&url), headers);
         let response = req.send().await?;
 
         if !response.status().is_success() {

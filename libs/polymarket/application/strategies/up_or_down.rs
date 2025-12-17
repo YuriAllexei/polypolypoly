@@ -356,12 +356,7 @@ fn check_token_orderbook(
             if elapsed >= dynamic_threshold {
                 // Check if order already placed for this token
                 if state.order_placed.contains_key(token_id) {
-                    // Log that we're skipping because order already exists
-                    info!(
-                        "⏭️  Threshold exceeded for {} ({}) but order already placed - skipping",
-                        token_id, outcome_name
-                    );
-                    // Clear the timer since we're not going to place another order
+                    // Order already exists - silently skip and clear timer
                     state.no_asks_timers.remove(token_id);
                     return OrderbookCheckResult::NoAsks;
                 }
