@@ -123,11 +123,14 @@ impl EventSyncApp {
                 // Get event description to pass to markets
                 let event_description = event.description.clone();
 
+                // Get event game_id to pass to markets (sports events have this)
+                let event_game_id = event.game_id.map(|v| v as i64);
+
                 // Convert and collect event
                 let db_event = crate::application::sync::EventSyncService::event_to_db_event(event);
                 db_events.push(db_event);
 
-                // Process markets for this event (inheriting tags and description from parent event)
+                // Process markets for this event (inheriting tags, description, and game_id from parent event)
                 if let Some(markets) = &event.markets {
                     for market in markets {
                         if let Ok(db_market) =
@@ -135,6 +138,7 @@ impl EventSyncApp {
                                 market,
                                 event_tags_json.clone(),
                                 event_description.clone(),
+                                event_game_id,
                             )
                         {
                             debug!(

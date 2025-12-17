@@ -172,6 +172,9 @@ impl EventSyncService {
         // Get event description to pass to markets
         let event_description = event.description.clone();
 
+        // Get event game_id to pass to markets (sports events have this)
+        let event_game_id = event.game_id.map(|v| v as i64);
+
         // Convert to DbEvent
         let db_event = Self::event_to_db_event(event);
 
@@ -192,9 +195,9 @@ impl EventSyncService {
                     event_id
                 );
 
-                // Save each market (inheriting tags and description from parent event)
+                // Save each market (inheriting tags, description, and game_id from parent event)
                 for market in markets {
-                     let db_market = Self::market_to_db_market(market, event_tags_json.clone(), event_description.clone())?;
+                     let db_market = Self::market_to_db_market(market, event_tags_json.clone(), event_description.clone(), event_game_id)?;
                      if let Err(e) = self.database.upsert_market(db_market).await {
                          warn!("Failed to save market: {}", e);
                      }
@@ -247,6 +250,7 @@ impl EventSyncService {
             created_at: event.created_at.clone().unwrap_or_else(|| now.clone()),
             updated_at: event.updated_at.clone().unwrap_or_else(|| now.clone()),
             last_synced: now,
+            game_id: event.game_id.map(|v| v as i64),
         }
     }
 
@@ -254,6 +258,7 @@ impl EventSyncService {
         market: &Market,
         event_tags: Option<String>,
         event_description: Option<String>,
+        event_game_id: Option<i64>,
     ) -> anyhow::Result<DbMarket> {
         let now = Utc::now().to_rfc3339();
 
@@ -286,6 +291,7 @@ impl EventSyncService {
             tags: event_tags,
             last_updated: now.clone(),
             created_at: market.created_at.clone().unwrap_or(now),
+            game_id: event_game_id,
         })
     }
 }

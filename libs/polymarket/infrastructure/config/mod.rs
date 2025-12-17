@@ -5,7 +5,7 @@ use std::path::Path;
 use thiserror::Error;
 use tracing::info;
 
-pub use strategies::{StrategiesConfig, UpOrDownConfig};
+pub use strategies::{SportsSnipingConfig, StrategiesConfig, UpOrDownConfig};
 
 #[derive(Error, Debug)]
 pub enum ConfigError {

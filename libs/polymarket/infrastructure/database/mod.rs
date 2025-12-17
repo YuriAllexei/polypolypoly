@@ -68,8 +68,8 @@ impl MarketDatabase {
             INSERT INTO markets (
                 id, condition_id, question, description, slug, start_date, end_date, resolution_time,
                 active, closed, archived, market_type, category, liquidity, volume,
-                outcomes, token_ids, tags, last_updated, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+                outcomes, token_ids, tags, last_updated, created_at, game_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
             ON CONFLICT (id) DO UPDATE SET
                 condition_id = EXCLUDED.condition_id,
                 question = EXCLUDED.question,
@@ -88,7 +88,8 @@ impl MarketDatabase {
                 outcomes = EXCLUDED.outcomes,
                 token_ids = EXCLUDED.token_ids,
                 tags = EXCLUDED.tags,
-                last_updated = EXCLUDED.last_updated
+                last_updated = EXCLUDED.last_updated,
+                game_id = EXCLUDED.game_id
             "#,
         )
         .bind(&market.id)
@@ -111,6 +112,7 @@ impl MarketDatabase {
         .bind(&market.tags)
         .bind(&market.last_updated)
         .bind(&market.created_at)
+        .bind(market.game_id)
         .execute(&self.pool)
         .await?;
 
@@ -146,7 +148,7 @@ impl MarketDatabase {
                 r#"INSERT INTO markets (
                     id, condition_id, question, description, slug, start_date, end_date, resolution_time,
                     active, closed, archived, market_type, category, liquidity, volume,
-                    outcomes, token_ids, tags, last_updated, created_at
+                    outcomes, token_ids, tags, last_updated, created_at, game_id
                 ) "#,
             );
 
@@ -170,7 +172,8 @@ impl MarketDatabase {
                     .push_bind(&market.token_ids)
                     .push_bind(&market.tags)
                     .push_bind(&market.last_updated)
-                    .push_bind(&market.created_at);
+                    .push_bind(&market.created_at)
+                    .push_bind(market.game_id);
             });
 
             query_builder.push(
@@ -192,7 +195,8 @@ impl MarketDatabase {
                     outcomes = EXCLUDED.outcomes,
                     token_ids = EXCLUDED.token_ids,
                     tags = EXCLUDED.tags,
-                    last_updated = EXCLUDED.last_updated"#,
+                    last_updated = EXCLUDED.last_updated,
+                    game_id = EXCLUDED.game_id"#,
             );
 
             let query = query_builder.build();
@@ -361,8 +365,8 @@ impl MarketDatabase {
                 active, closed, archived, featured, restricted,
                 liquidity, volume, volume_24hr, volume_1wk, volume_1mo, volume_1yr,
                 open_interest, image, icon, category, competitive, tags, comment_count,
-                created_at, updated_at, last_synced
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
+                created_at, updated_at, last_synced, game_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
             ON CONFLICT (id) DO UPDATE SET
                 ticker = EXCLUDED.ticker,
                 slug = EXCLUDED.slug,
@@ -389,7 +393,8 @@ impl MarketDatabase {
                 tags = EXCLUDED.tags,
                 comment_count = EXCLUDED.comment_count,
                 updated_at = EXCLUDED.updated_at,
-                last_synced = EXCLUDED.last_synced
+                last_synced = EXCLUDED.last_synced,
+                game_id = EXCLUDED.game_id
             "#,
         )
         .bind(&event.id)
@@ -420,6 +425,7 @@ impl MarketDatabase {
         .bind(&event.created_at)
         .bind(&event.updated_at)
         .bind(&event.last_synced)
+        .bind(event.game_id)
         .execute(&self.pool)
         .await?;
 
@@ -434,7 +440,7 @@ impl MarketDatabase {
         }
 
         // PostgreSQL has a limit on parameters, so we batch in chunks
-        // Events have 27 columns, so use smaller batch size
+        // Events have 29 columns, so use smaller batch size
         const BATCH_SIZE: usize = 50;
         let mut total_upserted = 0;
 
@@ -445,7 +451,7 @@ impl MarketDatabase {
                     active, closed, archived, featured, restricted,
                     liquidity, volume, volume_24hr, volume_1wk, volume_1mo, volume_1yr,
                     open_interest, image, icon, category, competitive, tags, comment_count,
-                    created_at, updated_at, last_synced
+                    created_at, updated_at, last_synced, game_id
                 ) "#,
             );
 
@@ -477,7 +483,8 @@ impl MarketDatabase {
                     .push_bind(event.comment_count)
                     .push_bind(&event.created_at)
                     .push_bind(&event.updated_at)
-                    .push_bind(&event.last_synced);
+                    .push_bind(&event.last_synced)
+                    .push_bind(event.game_id);
             });
 
             query_builder.push(
@@ -507,7 +514,8 @@ impl MarketDatabase {
                     tags = EXCLUDED.tags,
                     comment_count = EXCLUDED.comment_count,
                     updated_at = EXCLUDED.updated_at,
-                    last_synced = EXCLUDED.last_synced"#,
+                    last_synced = EXCLUDED.last_synced,
+                    game_id = EXCLUDED.game_id"#,
             );
 
             let query = query_builder.build();
@@ -745,6 +753,18 @@ impl MarketDatabase {
         .await?;
 
         Ok(result.map(|(event_id,)| event_id))
+    }
+
+    /// Get markets by game ID (for sports events)
+    pub async fn get_markets_by_game_id(&self, game_id: i64) -> Result<Vec<DbMarket>> {
+        let markets = sqlx::query_as::<_, DbMarket>(
+            "SELECT * FROM markets WHERE game_id = $1 ORDER BY end_date ASC",
+        )
+        .bind(game_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(markets)
     }
 
     // ==================== UTILITY ====================

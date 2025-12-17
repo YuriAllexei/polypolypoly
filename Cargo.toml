@@ -82,6 +82,10 @@ path = "src/bin/test_order.rs"
 name = "test_order_eoa"
 path = "src/bin/test_order_eoa.rs"
 
+[[bin]]
+name = "test_sports_ws"
+path = "src/bin/test_sports_ws.rs"
+
 [dependencies]
 tokio = { workspace = true }
 tracing = { workspace = true }

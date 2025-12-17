@@ -10,7 +10,7 @@ pub enum SchemaError {
 pub type Result<T> = std::result::Result<T, SchemaError>;
 
 /// Database schema version
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 6;
 
 /// Initialize database schema
 pub async fn initialize_schema(pool: &PgPool) -> Result<()> {
@@ -37,7 +37,8 @@ pub async fn initialize_schema(pool: &PgPool) -> Result<()> {
             token_ids TEXT,
             tags TEXT,
             last_updated TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            game_id BIGINT
         )
         "#,
     )
@@ -122,7 +123,8 @@ pub async fn initialize_schema(pool: &PgPool) -> Result<()> {
             comment_count INTEGER DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            last_synced TEXT NOT NULL
+            last_synced TEXT NOT NULL,
+            game_id BIGINT
         )
         "#,
     )
@@ -229,6 +231,16 @@ pub async fn initialize_schema(pool: &PgPool) -> Result<()> {
     // Migration: Add description column to markets table (v5)
     // This stores the parent event's description for quick access
     sqlx::query("ALTER TABLE markets ADD COLUMN IF NOT EXISTS description TEXT")
+        .execute(pool)
+        .await?;
+
+    // Migration: Add game_id column to events and markets tables (v6)
+    // Sports events have a gameId that markets inherit from their parent event
+    sqlx::query("ALTER TABLE events ADD COLUMN IF NOT EXISTS game_id BIGINT")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("ALTER TABLE markets ADD COLUMN IF NOT EXISTS game_id BIGINT")
         .execute(pool)
         .await?;
 

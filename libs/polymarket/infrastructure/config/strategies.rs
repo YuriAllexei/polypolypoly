@@ -17,6 +17,10 @@ pub struct StrategiesConfig {
     /// Up or Down strategy configuration
     #[serde(default)]
     pub up_or_down: UpOrDownConfig,
+
+    /// Sports Sniping strategy configuration
+    #[serde(default)]
+    pub sports_sniping: SportsSnipingConfig,
 }
 
 fn default_log_level() -> String {
@@ -75,6 +79,43 @@ fn default_threshold_tau() -> f64 {
     30.0 // 30 seconds decay time constant
 }
 
+// Sports Sniping defaults
+fn default_sports_poll_interval() -> f64 {
+    1.0 // 1 second
+}
+
+/// Configuration for the Sports Sniping strategy
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SportsSnipingConfig {
+    /// How often to poll for updates (seconds)
+    #[serde(default = "default_sports_poll_interval")]
+    pub poll_interval_secs: f64,
+
+    /// Enable/disable the strategy (placeholder for future use)
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Default for SportsSnipingConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: default_sports_poll_interval(),
+            enabled: true,
+        }
+    }
+}
+
+impl SportsSnipingConfig {
+    fn validate(&self) -> Result<()> {
+        if self.poll_interval_secs <= 0.0 {
+            return Err(ConfigError::ValidationError(
+                "sports_sniping.poll_interval_secs must be greater than 0".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for UpOrDownConfig {
     fn default() -> Self {
         Self {
@@ -93,6 +134,7 @@ impl Default for StrategiesConfig {
         Self {
             log_level: default_log_level(),
             up_or_down: UpOrDownConfig::default(),
+            sports_sniping: SportsSnipingConfig::default(),
         }
     }
 }
@@ -119,6 +161,9 @@ impl StrategiesConfig {
 
         // Validate up_or_down config
         self.up_or_down.validate()?;
+
+        // Validate sports_sniping config
+        self.sports_sniping.validate()?;
 
         Ok(())
     }
@@ -149,6 +194,12 @@ impl StrategiesConfig {
             "  Threshold tau: {} seconds",
             self.up_or_down.threshold_tau
         );
+        info!("Sports Sniping Strategy:");
+        info!(
+            "  Poll interval: {} seconds",
+            self.sports_sniping.poll_interval_secs
+        );
+        info!("  Enabled: {}", self.sports_sniping.enabled);
     }
 }
 
