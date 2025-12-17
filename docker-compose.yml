@@ -17,9 +17,8 @@ services:
       - ./config/events_config.yaml:/etc/polymarket/events_config.yaml
 
   # Strategy runner - Up or Down
-  # To add more strategies, duplicate this service with a different STRATEGY_NAME
   sniper-up-or-down:
-    profiles: ["strategies"]
+    profiles: ["strategies", "up-or-down"]
     build: .
     container_name: sniper-up-or-down
     restart: unless-stopped
@@ -34,6 +33,27 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - STRATEGY_NAME=up_or_down
+      - STRATEGIES_CONFIG_PATH=${STRATEGIES_CONFIG_PATH:-/etc/polymarket/strategies_config.yaml}
+    volumes:
+      - ./config/strategies_config.yaml:/etc/polymarket/strategies_config.yaml
+
+  # Strategy runner - Sports Sniping
+  sniper-sports-sniping:
+    profiles: ["strategies", "sports-sniping"]
+    build: .
+    container_name: sniper-sports-sniping
+    restart: unless-stopped
+    command: [ "./sniper" ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      polymarket-events:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - STRATEGY_NAME=sports_sniping
       - STRATEGIES_CONFIG_PATH=${STRATEGIES_CONFIG_PATH:-/etc/polymarket/strategies_config.yaml}
     volumes:
       - ./config/strategies_config.yaml:/etc/polymarket/strategies_config.yaml

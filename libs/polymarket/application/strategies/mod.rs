@@ -4,10 +4,12 @@
 
 pub mod traits;
 pub mod up_or_down;
+pub mod sports_sniping;
 
 // Re-exports
 pub use traits::{Strategy, StrategyContext, StrategyError, StrategyResult};
 pub use up_or_down::UpOrDownStrategy;
+pub use sports_sniping::SportsSnipingStrategy;
 
 use crate::infrastructure::config::StrategiesConfig;
 
@@ -15,7 +17,7 @@ use crate::infrastructure::config::StrategiesConfig;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StrategyType {
     UpOrDown,
-    // Future strategies can be added here
+    SportsSniping,
 }
 
 impl StrategyType {
@@ -23,6 +25,7 @@ impl StrategyType {
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().replace(['-', '_'], "").as_str() {
             "upordown" => Some(Self::UpOrDown),
+            "sportssniping" => Some(Self::SportsSniping),
             _ => None,
         }
     }
@@ -31,12 +34,13 @@ impl StrategyType {
     pub fn name(&self) -> &str {
         match self {
             Self::UpOrDown => "up_or_down",
+            Self::SportsSniping => "sports_sniping",
         }
     }
 
     /// List all available strategy names
     pub fn available() -> Vec<&'static str> {
-        vec!["up_or_down"]
+        vec!["up_or_down", "sports_sniping"]
     }
 }
 
@@ -47,5 +51,8 @@ pub fn create_strategy(
 ) -> Box<dyn Strategy> {
     match strategy_type {
         StrategyType::UpOrDown => Box::new(UpOrDownStrategy::new(config.up_or_down.clone())),
+        StrategyType::SportsSniping => {
+            Box::new(SportsSnipingStrategy::new(config.sports_sniping.clone()))
+        }
     }
 }

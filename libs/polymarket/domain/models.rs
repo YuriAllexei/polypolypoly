@@ -24,6 +24,7 @@ pub struct DbMarket {
     pub tags: Option<String>, // JSON array of tag objects
     pub last_updated: String, // ISO 8601
     pub created_at: String,   // ISO 8601
+    pub game_id: Option<i64>, // Sports game ID (inherited from parent event)
 }
 
 impl DbMarket {
@@ -99,6 +100,7 @@ pub struct DbEvent {
     pub created_at: String,  // ISO 8601
     pub updated_at: String,  // ISO 8601
     pub last_synced: String, // ISO 8601
+    pub game_id: Option<i64>, // Sports game ID (for sports events)
 }
 
 impl DbEvent {
@@ -238,6 +240,7 @@ mod tests {
             tags: None,
             last_updated: "2025-01-01T00:00:00Z".to_string(),
             created_at: "2025-01-01T00:00:00Z".to_string(),
+            game_id: None,
         };
 
         let outcomes = market.parse_outcomes().unwrap();
@@ -271,6 +274,7 @@ mod tests {
             tags: None,
             last_updated: "2025-01-01T00:00:00Z".to_string(),
             created_at: "2025-01-01T00:00:00Z".to_string(),
+            game_id: None,
         };
 
         let outcomes = market.parse_outcomes().unwrap();

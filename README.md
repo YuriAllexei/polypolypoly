@@ -87,14 +87,17 @@ Pluggable strategy runner supporting multiple trading strategies.
 | Strategy | Description |
 |----------|-------------|
 | `up_or_down` | Monitors recurring crypto price prediction markets |
+| `sports_sniping` | Snipes sports markets using live game data from WebSocket |
 
 **Usage:**
 ```bash
 # Via CLI argument
 ./sniper up_or_down
+./sniper sports_sniping
 
 # Via environment variable (Docker-friendly)
 STRATEGY_NAME=up_or_down ./sniper
+STRATEGY_NAME=sports_sniping ./sniper
 ```
 
 ### 3. test_orderbook
@@ -160,11 +163,20 @@ up_or_down:
 
 The project uses Docker Compose with **profiles** for flexible deployment:
 
-| Service | Profile | Description |
-|---------|---------|-------------|
+| Service | Profiles | Description |
+|---------|----------|-------------|
 | `postgres` | *(always runs)* | PostgreSQL database |
 | `polymarket-events` | `events`, `strategies` | Event synchronization daemon |
-| `sniper-up-or-down` | `strategies` | Up or Down strategy runner |
+| `sniper-up-or-down` | `strategies`, `up-or-down` | Up or Down strategy runner |
+| `sniper-sports-sniping` | `strategies`, `sports-sniping` | Sports Sniping strategy runner |
+
+**Available Profiles:**
+| Profile | What it runs |
+|---------|--------------|
+| `events` | Event syncer only |
+| `strategies` | Event syncer + ALL strategies |
+| `up-or-down` | Up or Down strategy only |
+| `sports-sniping` | Sports Sniping strategy only |
 
 **Commands:**
 
@@ -178,8 +190,12 @@ docker compose up -d
 # Start postgres + events syncer
 docker compose --profile events up
 
-# Start postgres + events syncer + all strategies
+# Start postgres + events syncer + ALL strategies
 docker compose --profile strategies up
+
+# Start only a SPECIFIC strategy (+ events syncer)
+docker compose --profile events --profile up-or-down up
+docker compose --profile events --profile sports-sniping up
 
 # Build and start
 docker compose --profile strategies up --build
@@ -189,41 +205,16 @@ docker compose down -v
 docker compose up -d
 ```
 
-**Typical workflow:**
+**Typical workflows:**
 ```bash
-# Start strategies (includes events syncer automatically)
+# Run all strategies together
 docker compose --profile strategies up
-```
 
-**Running Multiple Strategies:**
+# Run only one specific strategy
+docker compose --profile events --profile sports-sniping up
 
-To run multiple strategies in parallel, add more services to `docker-compose.yml`:
-
-```yaml
-# Example: Add a second strategy
-sniper-another-strategy:
-  profiles: ["strategies"]
-  build: .
-  container_name: sniper-another-strategy
-  command: ["./sniper"]
-  depends_on:
-    postgres:
-      condition: service_healthy
-    polymarket-events:
-      condition: service_started
-  env_file:
-    - .env
-  environment:
-    - DATABASE_URL=${DATABASE_URL}
-    - STRATEGY_NAME=another_strategy
-    - STRATEGIES_CONFIG_PATH=/etc/polymarket/strategies_config.yaml
-  volumes:
-    - ./config/strategies_config.yaml:/etc/polymarket/strategies_config.yaml
-```
-
-All services with `profiles: ["strategies"]` will start together when running:
-```bash
-docker compose --profile strategies up
+# Run multiple specific strategies (not all)
+docker compose --profile events --profile up-or-down --profile sports-sniping up
 ```
 
 ### 5. Run Locally (without Docker)
@@ -234,11 +225,13 @@ docker compose --profile strategies up
 # Run event syncer
 cargo run --release --bin polymarket_events
 
-# Run strategy runner (strategy is required)
+# Run strategy runner (strategy name is required)
 cargo run --release --bin sniper -- up_or_down
+cargo run --release --bin sniper -- sports_sniping
 
 # Or via environment variable
 STRATEGY_NAME=up_or_down cargo run --release --bin sniper
+STRATEGY_NAME=sports_sniping cargo run --release --bin sniper
 ```
 
 ## Database Schema

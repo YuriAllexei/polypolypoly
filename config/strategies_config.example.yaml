@@ -21,3 +21,10 @@ up_or_down:
   threshold_max: 10.0
   # Decay time constant in seconds (controls how fast threshold decreases)
   threshold_tau: 30.0
+
+# Sports Sniping strategy settings
+sports_sniping:
+  # How often to poll for updates (seconds)
+  poll_interval_secs: 1.0
+  # Enable/disable the strategy
+  enabled: true

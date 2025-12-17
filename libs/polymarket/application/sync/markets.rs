@@ -194,6 +194,7 @@ impl MarketSyncService {
             tags: None, // Markets synced directly from Gamma don't have tags
             last_updated: now.clone(),
             created_at: now,
+            game_id: None, // Markets synced directly from Gamma don't have parent event game_id
         })
     }
 
