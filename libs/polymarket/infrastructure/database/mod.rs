@@ -40,16 +40,20 @@ impl MarketDatabase {
     pub async fn new(db_url: &str) -> Result<Self> {
         info!("Connecting to database: {}", db_url);
 
-        // Connect to database
+        // Connect to database with robust pool settings
         let pool = PgPoolOptions::new()
-            .max_connections(20)
+            .max_connections(50)              // Increased from 20
+            .min_connections(5)               // Keep some connections warm
+            .acquire_timeout(std::time::Duration::from_secs(10))  // Don't wait forever for a connection
+            .idle_timeout(std::time::Duration::from_secs(300))    // Close idle connections after 5 min
+            .max_lifetime(std::time::Duration::from_secs(1800))   // Recycle connections after 30 min
             .connect(db_url)
             .await?;
 
         // Initialize schema
         schema::initialize_schema(&pool).await?;
 
-        info!("Database initialized successfully");
+        info!("Database initialized successfully (pool: max=50, min=5, acquire_timeout=10s)");
 
         Ok(Self { pool })
     }
