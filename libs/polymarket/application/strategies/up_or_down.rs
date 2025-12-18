@@ -124,6 +124,7 @@ impl std::fmt::Display for CryptoAsset {
 /// Timeframe of the market
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Timeframe {
+    FiveMin,    // 5M - NOT officially live, should be skipped
     FifteenMin, // 15M
     OneHour,    // 1H
     FourHour,   // 4H
@@ -137,6 +138,7 @@ impl Timeframe {
             for tag in arr {
                 if let Some(label) = tag.get("label").and_then(|l| l.as_str()) {
                     match label {
+                        "5M" => return Timeframe::FiveMin,
                         "15M" => return Timeframe::FifteenMin,
                         "1H" => return Timeframe::OneHour,
                         "4H" => return Timeframe::FourHour,
@@ -148,11 +150,22 @@ impl Timeframe {
         }
         Timeframe::Unknown
     }
+
+    /// Check if this timeframe is officially supported/live
+    /// 5M markets are not officially live yet and should be skipped
+    fn is_supported(&self) -> bool {
+        match self {
+            Timeframe::FiveMin => false,  // Not officially live
+            Timeframe::Unknown => false,  // Unknown timeframes should be skipped
+            _ => true,
+        }
+    }
 }
 
 impl std::fmt::Display for Timeframe {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Timeframe::FiveMin => write!(f, "5M"),
             Timeframe::FifteenMin => write!(f, "15M"),
             Timeframe::OneHour => write!(f, "1H"),
             Timeframe::FourHour => write!(f, "4H"),
@@ -677,6 +690,7 @@ async fn get_price_to_beat(
 
     // Map Timeframe to API variant
     let variant = match timeframe {
+        Timeframe::FiveMin => anyhow::bail!("5M markets are not supported"),
         Timeframe::FifteenMin => "fifteen",
         Timeframe::OneHour => "hourly",
         Timeframe::FourHour => "fourhour",
@@ -691,6 +705,7 @@ async fn get_price_to_beat(
 
     // Calculate event start time by subtracting timeframe duration
     let duration = match timeframe {
+        Timeframe::FiveMin => Duration::minutes(5),
         Timeframe::FifteenMin => Duration::minutes(15),
         Timeframe::OneHour => Duration::hours(1),
         Timeframe::FourHour => Duration::hours(4),
@@ -1093,6 +1108,19 @@ impl UpOrDownStrategy {
                     // Skip markets without valid token pairs
                     if token_ids.len() < 2 {
                         warn!("Market {} has less than 2 token_ids, skipping", market.id);
+                        continue;
+                    }
+
+                    // Skip unsupported timeframes (5M markets are not officially live)
+                    let tags = market
+                        .parse_tags()
+                        .unwrap_or(serde_json::Value::Array(vec![]));
+                    let timeframe = Timeframe::from_tags(&tags);
+                    if !timeframe.is_supported() {
+                        debug!(
+                            "Skipping market {} with unsupported timeframe: {} ({})",
+                            market.id, timeframe, market.question
+                        );
                         continue;
                     }
 

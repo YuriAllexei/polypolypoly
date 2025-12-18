@@ -20,6 +20,12 @@ const ORACLE_WS_URL: &str = "wss://ws-live-data.polymarket.com";
 /// Heartbeat interval in seconds
 const HEARTBEAT_INTERVAL_SECS: u64 = 5;
 
+/// Maximum reconnection attempts before giving up
+const MAX_RECONNECT_ATTEMPTS: u32 = 10;
+
+/// Delay between reconnection attempts in seconds
+const RECONNECT_DELAY_SECS: u64 = 5;
+
 // =============================================================================
 // Symbol Parsing
 // =============================================================================
@@ -226,42 +232,114 @@ fn handle_client_event(event: ClientEvent, oracle_type: OracleType) -> bool {
 }
 
 /// Spawn a tracker for a single oracle type (internal use)
+/// Includes automatic reconnection on disconnect.
 async fn spawn_single_oracle_tracker(
     oracle_type: OracleType,
     prices: SharedOraclePrices,
     shutdown_flag: Arc<AtomicBool>,
 ) -> Result<()> {
-    info!("[Oracle {}] Connecting to price feed...", oracle_type);
+    let mut reconnect_attempts: u32 = 0;
 
-    let client = build_oracle_ws_client(oracle_type, prices).await?;
-    info!("[Oracle {}] Connected and subscribed", oracle_type);
-
-    // Main tracking loop
-    loop {
-        // Check shutdown flag first (highest priority)
+    // Outer reconnection loop
+    'reconnect: loop {
+        // Check shutdown before attempting connection
         if !shutdown_flag.load(Ordering::Acquire) {
-            info!("[Oracle {}] Shutdown signal received", oracle_type);
-            break;
+            info!("[Oracle {}] Shutdown signal received before connect", oracle_type);
+            break 'reconnect;
         }
 
-        // Handle WebSocket events
-        match client.try_recv_event() {
-            Some(event) => {
-                if !handle_client_event(event, oracle_type) {
-                    break;
+        if reconnect_attempts > 0 {
+            info!(
+                "[Oracle {}] Reconnection attempt {} of {}",
+                oracle_type, reconnect_attempts, MAX_RECONNECT_ATTEMPTS
+            );
+            sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+        } else {
+            info!("[Oracle {}] Connecting to price feed...", oracle_type);
+        }
+
+        // Build WebSocket client
+        let client = match build_oracle_ws_client(oracle_type, Arc::clone(&prices)).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("[Oracle {}] Failed to connect: {}", oracle_type, e);
+                reconnect_attempts += 1;
+                continue 'reconnect;
+            }
+        };
+        info!("[Oracle {}] Connected and subscribed", oracle_type);
+
+        // Track connection start time (for stable connection detection)
+        let connection_start = std::time::Instant::now();
+
+        // Track if we should reconnect after this loop
+        let mut should_reconnect = false;
+
+        // Main tracking loop
+        loop {
+            // Check shutdown flag first (highest priority)
+            if !shutdown_flag.load(Ordering::Acquire) {
+                info!("[Oracle {}] Shutdown signal received", oracle_type);
+                break;
+            }
+
+            // Handle WebSocket events
+            match client.try_recv_event() {
+                Some(event) => {
+                    if !handle_client_event(event, oracle_type) {
+                        // Disconnected - mark for reconnection
+                        should_reconnect = true;
+                        break;
+                    }
+                }
+                None => {
+                    // No event available, sleep briefly before checking again
+                    sleep(Duration::from_millis(10)).await;
                 }
             }
-            None => {
-                // No event available, sleep briefly before checking again
-                sleep(Duration::from_millis(10)).await;
+        }
+
+        // Shutdown current client
+        info!("[Oracle {}] Closing connection", oracle_type);
+        if let Err(e) = client.shutdown().await {
+            warn!("[Oracle {}] Error during shutdown: {}", oracle_type, e);
+        }
+
+        // Decide whether to reconnect or exit
+        if should_reconnect {
+            // Check if connection was stable (ran for more than 2x reconnect delay)
+            // If so, reset the counter - this was likely a one-off disconnect
+            let connection_duration = connection_start.elapsed().as_secs();
+            if connection_duration > RECONNECT_DELAY_SECS * 2 {
+                reconnect_attempts = 0;
+                info!(
+                    "[Oracle {}] Connection was stable for {}s, resetting reconnect counter",
+                    oracle_type, connection_duration
+                );
             }
+
+            reconnect_attempts += 1;
+
+            // Check max attempts after incrementing
+            if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
+                warn!(
+                    "[Oracle {}] Exceeded max reconnection attempts ({}), giving up",
+                    oracle_type, MAX_RECONNECT_ATTEMPTS
+                );
+                break 'reconnect;
+            }
+
+            info!(
+                "[Oracle {}] Will attempt reconnection (attempt {} of {})",
+                oracle_type, reconnect_attempts, MAX_RECONNECT_ATTEMPTS
+            );
+            continue 'reconnect;
+        } else {
+            // Normal shutdown
+            break 'reconnect;
         }
     }
 
-    info!("[Oracle {}] Closing connection", oracle_type);
-    if let Err(e) = client.shutdown().await {
-        warn!("[Oracle {}] Error during shutdown: {}", oracle_type, e);
-    }
     info!("[Oracle {}] Tracker stopped", oracle_type);
     Ok(())
 }
