@@ -1,36 +1,37 @@
-//! Sports Sniping Strategy Implementation
-//!
-//! Monitors sports markets using real-time game data from the Polymarket
-//! sports WebSocket API to identify and execute sniping opportunities.
-
 use crate::application::strategies::traits::{Strategy, StrategyContext, StrategyResult};
 use crate::domain::DbMarket;
 use crate::infrastructure::config::SportsSnipingConfig;
-use crate::infrastructure::{spawn_sports_tracker_with_state, IgnoredGames, SharedSportsLiveData};
+use crate::infrastructure::{
+    build_ws_client, spawn_sports_tracker_with_state, FetchedGames, FullTimeEvent,
+    MarketTrackerConfig, MarketsByGame, SharedOrderbooks, SharedPrecisions,
+};
 use async_trait::async_trait;
-use dashmap::{DashMap, DashSet};
-use std::sync::Arc;
-use std::time::Duration;
+use crossbeam_channel::{unbounded, Receiver};
+use dashmap::DashSet;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::Duration as StdDuration;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
+use tokio::time::sleep;
+use tracing::{error, info, warn};
 
 /// Sports Sniping strategy implementation
 ///
 /// This strategy:
 /// 1. Connects to the sports live data WebSocket
-/// 2. Matches incoming game updates to markets by game_id
-/// 3. Analyzes game state to identify trading opportunities
-/// 4. Places orders when conditions are met
+/// 2. Handler fetches and caches markets on first game message
+/// 3. Receives FullTimeEvent when game reaches FT -> uses cached markets to react
 pub struct SportsSnipingStrategy {
     config: SportsSnipingConfig,
-    /// Shared state containing live game data (league -> game_id -> SportsLiveData)
-    shared_state: Option<SharedSportsLiveData>,
-    /// Set of ignored game IDs (finished games seen on first message)
-    ignored_games: Option<IgnoredGames>,
-    /// Cached markets per game_id (fetched once when game first appears)
-    game_markets: Arc<DashMap<i64, Vec<DbMarket>>>,
-    /// Games that have reached Full Time (FT/VFT) - logged once
-    ft_games: Arc<DashSet<i64>>,
+    /// Cached markets per game_id (shared with handler, populated by handler)
+    markets_cache: MarketsByGame,
+    /// Shared set of game_ids for which we've fetched markets
+    fetched_games: FetchedGames,
+    /// Games already processed for FT (prevent duplicate handling)
+    processed_games: DashSet<i64>,
+    /// Receiver for Full Time events
+    ft_rx: Option<Receiver<FullTimeEvent>>,
     /// Handle to the WebSocket tracker task
     ws_task: Option<JoinHandle<()>>,
 }
@@ -40,13 +41,239 @@ impl SportsSnipingStrategy {
     pub fn new(config: SportsSnipingConfig) -> Self {
         Self {
             config,
-            shared_state: None,
-            ignored_games: None,
-            game_markets: Arc::new(DashMap::new()),
-            ft_games: Arc::new(DashSet::new()),
+            markets_cache: Arc::new(dashmap::DashMap::new()),
+            fetched_games: Arc::new(DashSet::new()),
+            processed_games: DashSet::new(),
+            ft_rx: None,
             ws_task: None,
         }
     }
+}
+
+// =============================================================================
+// Market Tracker Types and Functions
+// =============================================================================
+
+/// Result of analyzing orderbooks to determine the winning token
+#[derive(Debug)]
+struct WinnerAnalysis {
+    token_id: String,
+    outcome_name: String,
+    best_bid: Option<(f64, f64)>, // (price, size)
+    has_asks: bool,
+    confidence: f64, // 0.0 - 1.0
+}
+
+/// Analyze orderbooks to find the likely winning token
+///
+/// Winner criteria:
+/// - Highest bid price
+/// - Preferably no asks (market makers pulled out)
+/// - High confidence if bid > 0.90 and no asks
+fn analyze_orderbooks_for_winner(
+    orderbooks: &SharedOrderbooks,
+    token_ids: &[String],
+    outcomes: &[String],
+) -> Option<WinnerAnalysis> {
+    let obs = orderbooks.read().unwrap();
+    let mut best_candidate: Option<WinnerAnalysis> = None;
+
+    for (token_id, outcome) in token_ids.iter().zip(outcomes.iter()) {
+        if let Some(ob) = obs.get(token_id) {
+            let best_bid = ob.best_bid();
+            let has_asks = !ob.asks.is_empty();
+
+            // Winner criteria: highest bid price
+            let is_better = match &best_candidate {
+                None => true,
+                Some(current) => match (best_bid, current.best_bid) {
+                    (Some((price, _)), Some((curr_price, _))) => price > curr_price,
+                    (Some(_), None) => true,
+                    _ => false,
+                },
+            };
+
+            if is_better {
+                // Calculate confidence based on bid price and ask presence
+                let confidence = match best_bid {
+                    Some((price, _)) if !has_asks && price > 0.90 => 1.0,
+                    Some((price, _)) if !has_asks && price > 0.70 => 0.8,
+                    Some((price, _)) if price > 0.90 => 0.7,
+                    Some(_) => 0.5,
+                    None => 0.1,
+                };
+
+                best_candidate = Some(WinnerAnalysis {
+                    token_id: token_id.clone(),
+                    outcome_name: outcome.clone(),
+                    best_bid,
+                    has_asks,
+                    confidence,
+                });
+            }
+        }
+    }
+
+    best_candidate
+}
+
+/// Log the winning token analysis
+fn log_winning_token(market: &DbMarket, event: &FullTimeEvent, winner: &Option<WinnerAnalysis>) {
+    let market_url = market
+        .slug
+        .as_ref()
+        .map(|s| format!("https://polymarket.com/event/{}", s))
+        .unwrap_or_else(|| "N/A".to_string());
+
+    info!("════════════════════════════════════════════════════════════════");
+    info!("  🏆 WINNER ANALYSIS - GAME ENDED");
+    info!("════════════════════════════════════════════════════════════════");
+    info!(
+        "  Game: {} vs {}",
+        event.home_team.as_deref().unwrap_or("?"),
+        event.away_team.as_deref().unwrap_or("?")
+    );
+    info!("  Final Score: {}", event.final_score);
+    info!("  Market: {}", market.question);
+    info!("  URL: {}", market_url);
+
+    match winner {
+        Some(w) => {
+            info!("  ─────────────────────────────────────────────────────────────");
+            info!("  Predicted Winner: {}", w.outcome_name);
+            info!("  Token ID: {}", w.token_id);
+            if let Some((price, size)) = w.best_bid {
+                info!("  Best Bid: ${:.4} x {:.2}", price, size);
+            } else {
+                info!("  Best Bid: None");
+            }
+            info!("  Has Asks: {}", w.has_asks);
+            info!("  Confidence: {:.0}%", w.confidence * 100.0);
+        }
+        None => {
+            info!("  Could not determine winner from orderbooks");
+        }
+    }
+    info!("════════════════════════════════════════════════════════════════");
+}
+
+/// Run a market tracker for a single sports market
+///
+/// Connects to the orderbook WebSocket, waits for snapshot,
+/// analyzes orderbooks to find the winning token, and logs the result.
+async fn run_sports_market_tracker(
+    market: DbMarket,
+    event: FullTimeEvent,
+    shutdown_flag: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
+    // Parse market data
+    let token_ids = market.parse_token_ids()?;
+    let outcomes = market.parse_outcomes()?;
+
+    if token_ids.len() < 2 {
+        warn!(
+            "[Sports Tracker] Market {} has fewer than 2 tokens, skipping",
+            market.id
+        );
+        return Ok(());
+    }
+
+    info!(
+        "[Sports Tracker] Starting tracker for market: {} ({})",
+        market.question, market.id
+    );
+
+    // Build WebSocket configuration
+    let ws_config = MarketTrackerConfig::new(
+        market.id.clone(),
+        market.question.clone(),
+        market.slug.clone(),
+        token_ids.clone(),
+        outcomes.clone(),
+        &market.end_date,
+    )?;
+
+    // Create shared orderbooks and precisions
+    let orderbooks: SharedOrderbooks = Arc::new(RwLock::new(HashMap::new()));
+    let precisions: SharedPrecisions = Arc::new(RwLock::new(HashMap::new()));
+    let first_snapshot_received = Arc::new(AtomicBool::new(false));
+
+    // Connect to WebSocket
+    let client = match build_ws_client(
+        &ws_config,
+        Arc::clone(&orderbooks),
+        Arc::clone(&precisions),
+        None, // No tick_size_tx needed for now
+        Arc::clone(&first_snapshot_received),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            error!(
+                "[Sports Tracker] Failed to connect to WS for market {}: {}",
+                market.id, e
+            );
+            return Err(e);
+        }
+    };
+
+    info!(
+        "[Sports Tracker] Connected to orderbook WS for market {}",
+        market.id
+    );
+
+    // Wait for first snapshot (with timeout)
+    let start = std::time::Instant::now();
+    let snapshot_received = loop {
+        if first_snapshot_received.load(Ordering::Acquire) {
+            break true;
+        }
+        if start.elapsed() > StdDuration::from_secs(10) {
+            error!(
+                "[Sports Tracker] Timeout waiting for snapshot on market {}",
+                market.id
+            );
+            break false;
+        }
+        if !shutdown_flag.load(Ordering::Acquire) {
+            info!(
+                "[Sports Tracker] Shutdown during snapshot wait for market {}",
+                market.id
+            );
+            let _ = client.shutdown().await;
+            return Ok(());
+        }
+        sleep(StdDuration::from_millis(50)).await;
+    };
+
+    if !snapshot_received {
+        let _ = client.shutdown().await;
+        return Ok(());
+    }
+
+    // Give a brief moment for orderbooks to populate fully
+    sleep(StdDuration::from_millis(200)).await;
+
+    // Analyze orderbooks to find winner
+    let winner = analyze_orderbooks_for_winner(&orderbooks, &token_ids, &outcomes);
+
+    // Log the result
+    log_winning_token(&market, &event, &winner);
+
+    // Cleanup
+    if let Err(e) = client.shutdown().await {
+        warn!(
+            "[Sports Tracker] Error shutting down WS for market {}: {}",
+            market.id, e
+        );
+    }
+
+    info!(
+        "[Sports Tracker] Tracker completed for market {}",
+        market.id
+    );
+    Ok(())
 }
 
 #[async_trait]
@@ -66,17 +293,25 @@ impl Strategy for SportsSnipingStrategy {
             "Initializing Sports Sniping strategy"
         );
 
-        // 1. Create shared state for game data (league -> game_id -> data)
-        let shared_state: SharedSportsLiveData = Arc::new(DashMap::new());
-        let ignored_games: IgnoredGames = Arc::new(DashSet::new());
-        self.shared_state = Some(shared_state.clone());
-        self.ignored_games = Some(ignored_games.clone());
+        // Create channel for FT events
+        let (ft_tx, ft_rx) = unbounded::<FullTimeEvent>();
+        self.ft_rx = Some(ft_rx);
 
-        // 2. Spawn WebSocket tracker task
+        // Clone Arc references for the spawned task
         let shutdown_flag = ctx.shutdown.flag();
+        let fetched_games = Arc::clone(&self.fetched_games);
+        let markets_cache = Arc::clone(&self.markets_cache);
+        let database = Arc::clone(&ctx.database);
+
         let task = tokio::spawn(async move {
-            if let Err(e) =
-                spawn_sports_tracker_with_state(shutdown_flag, shared_state, ignored_games).await
+            if let Err(e) = spawn_sports_tracker_with_state(
+                shutdown_flag,
+                fetched_games,
+                markets_cache,
+                database,
+                Some(ft_tx),
+            )
+            .await
             {
                 error!("Sports WS tracker error: {}", e);
             }
@@ -90,112 +325,67 @@ impl Strategy for SportsSnipingStrategy {
     async fn start(&mut self, ctx: &StrategyContext) -> StrategyResult<()> {
         info!("Starting Sports Sniping strategy main loop");
 
-        let shared_state = self
-            .shared_state
-            .as_ref()
-            .expect("Strategy must be initialized before start");
-        let ignored_games = self
-            .ignored_games
-            .as_ref()
-            .expect("Strategy must be initialized before start");
-
-        // Fast polling for speed - check every 10ms
-        let poll_interval = Duration::from_millis(10);
+        let poll_interval = StdDuration::from_millis(10);
 
         while ctx.is_running() {
-            // Fetch markets for any new games
-            // Collect game_ids to process (to avoid holding iterator while modifying)
-            let mut game_ids_to_check: Vec<(String, i64)> = Vec::new();
-            for league_entry in shared_state.iter() {
-                let league = league_entry.key().clone();
-                for game_entry in league_entry.value().iter() {
-                    let game_id = *game_entry.key();
-                    if !self.game_markets.contains_key(&game_id) {
-                        game_ids_to_check.push((league.clone(), game_id));
+            // Handle FT events - spawn market trackers
+            if let Some(ref rx) = self.ft_rx {
+                while let Ok(event) = rx.try_recv() {
+                    // Skip if already processed
+                    if self.processed_games.contains(&event.game_id) {
+                        continue;
                     }
-                }
-            }
 
-            for (league, game_id) in game_ids_to_check {
-                match ctx.database.get_markets_by_game_id(game_id).await {
-                    Ok(markets) => {
+                    info!("═══════════════════════════════════════════════════");
+                    info!("  🏁 GAME REACHED FULL TIME");
+                    info!("═══════════════════════════════════════════════════");
+                    info!(
+                        "  Game {}: {} vs {} | Score: {} | Period: {} | Status: {}",
+                        event.game_id,
+                        event.home_team.as_deref().unwrap_or("?"),
+                        event.away_team.as_deref().unwrap_or("?"),
+                        event.final_score,
+                        event.period,
+                        event.status.as_deref().unwrap_or("?")
+                    );
+
+                    // Get cached markets for this game and spawn trackers
+                    if let Some(markets) = self.markets_cache.get(&event.game_id) {
                         if markets.is_empty() {
-                            // No markets for this game - remove from tracking and ignore
-                            debug!(
-                                game_id = game_id,
-                                league = %league,
-                                "Game has no markets - removing from tracking and adding to ignore set"
-                            );
-                            // Remove from shared state
-                            if let Some(league_games) = shared_state.get(&league) {
-                                league_games.remove(&game_id);
-                            }
-                            // Add to ignore set
-                            ignored_games.insert(game_id);
+                            info!("  No markets for this game");
                         } else {
-                            info!(
-                                game_id = game_id,
-                                market_count = markets.len(),
-                                "Fetched markets for game"
-                            );
-                            self.game_markets.insert(game_id, markets);
-                        }
-                    }
-                    Err(e) => {
-                        warn!(game_id = game_id, error = %e, "Failed to fetch markets for game");
-                        // Insert empty vec to avoid retrying
-                        self.game_markets.insert(game_id, vec![]);
-                    }
-                }
-            }
+                            info!("  Spawning {} market trackers for this game", markets.len());
 
-            // Check for games that reached Full Time
-            for league_entry in shared_state.iter() {
-                for game_entry in league_entry.value().iter() {
-                    let game_id = *game_entry.key();
-                    let data = game_entry.value();
-
-                    // Check if period indicates Full Time and not already tracked
-                    let is_ft = data.period == "FT" || data.period == "VFT";
-                    if is_ft && !self.ft_games.contains(&game_id) {
-                        // Log the FT event
-                        info!("═══════════════════════════════════════════════════");
-                        info!("  🏁 GAME REACHED FULL TIME");
-                        info!("═══════════════════════════════════════════════════");
-                        info!(
-                            "  Game {}: {} vs {} | Score: {} | Period: {} | Status: {}",
-                            game_id,
-                            data.home_team.as_deref().unwrap_or("?"),
-                            data.away_team.as_deref().unwrap_or("?"),
-                            data.score,
-                            data.period,
-                            data.status.as_deref().unwrap_or("?")
-                        );
-
-                        // Log associated markets
-                        if let Some(markets) = self.game_markets.get(&game_id) {
-                            info!("  Markets for this game:");
                             for market in markets.value().iter() {
-                                let market_url = market
-                                    .slug
-                                    .as_ref()
-                                    .map(|s| format!("https://polymarket.com/event/{}", s))
-                                    .unwrap_or_else(|| "N/A".to_string());
-                                info!(
-                                    "    - {} | Active: {} | End: {} | URL: {}",
-                                    market.question, market.active, market.end_date, market_url
-                                );
+                                let market_clone = market.clone();
+                                let event_clone = event.clone();
+                                let shutdown_flag = ctx.shutdown.flag();
+
+                                // Spawn a tracker task for each market
+                                tokio::spawn(async move {
+                                    if let Err(e) = run_sports_market_tracker(
+                                        market_clone,
+                                        event_clone,
+                                        shutdown_flag,
+                                    )
+                                    .await
+                                    {
+                                        error!("Sports market tracker error: {}", e);
+                                    }
+                                });
                             }
                         }
-                        info!("═══════════════════════════════════════════════════");
-
-                        // Add to ft_games to avoid repeated logging
-                        self.ft_games.insert(game_id);
+                    } else {
+                        info!("  Markets not yet fetched for this game");
                     }
+                    info!("═══════════════════════════════════════════════════");
+
+                    // Mark as processed
+                    self.processed_games.insert(event.game_id);
                 }
             }
 
-            // Sleep before next iteration
+            // Brief sleep before next iteration
             ctx.shutdown.interruptible_sleep(poll_interval).await;
         }
 

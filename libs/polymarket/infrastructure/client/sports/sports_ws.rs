@@ -3,10 +3,15 @@
 //! Connects to Polymarket's sports API WebSocket to receive real-time
 //! game updates including scores, periods, and game status.
 
-use super::types::{IgnoredGames, SharedSportsLiveData, SportsLiveData, SportsLiveDataMessage, SportsRoute};
+use super::types::{
+    FetchedGames, FullTimeEvent, MarketsByGame, SportsLiveData, SportsLiveDataMessage, SportsRoute,
+};
+use crate::infrastructure::MarketDatabase;
 use anyhow::Result;
+use crossbeam_channel::Sender;
 use hypersockets::core::*;
 use hypersockets::{MessageHandler, MessageRouter, WsMessage};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -117,25 +122,31 @@ impl MessageHandler<SportsLiveDataMessage> for SportsLiveDataHandler {
 /// Handler that updates shared state with game updates
 /// Used by strategies that need to access game data from the main loop
 pub struct SportsLiveDataStateHandler {
-    shared_state: SharedSportsLiveData,
-    ignored_games: IgnoredGames,
+    /// Shared set of game_ids for which markets have been fetched
+    fetched_games: FetchedGames,
+    /// Shared cache of markets per game_id
+    markets_cache: MarketsByGame,
+    /// Database access for fetching markets
+    database: Arc<MarketDatabase>,
+    /// Optional channel to forward Full Time events to main loop
+    ft_tx: Option<Sender<FullTimeEvent>>,
+    /// Track which games we've already sent FT events for (prevent duplicates)
+    ft_sent: HashSet<i64>,
 }
 
 impl SportsLiveDataStateHandler {
-    pub fn new(shared_state: SharedSportsLiveData, ignored_games: IgnoredGames) -> Self {
-        Self { shared_state, ignored_games }
-    }
-
-    /// Check if game should be ignored based on status
-    /// Games are ignored if they appear to be finished on first sight
-    fn should_ignore(data: &SportsLiveData) -> bool {
-        if data.ended {
-            return true;
-        }
-        match data.status.as_deref() {
-            Some("Final") | Some("final") | Some("finished") | Some("") => true,
-            None => false,
-            _ => false,
+    pub fn new(
+        fetched_games: FetchedGames,
+        markets_cache: MarketsByGame,
+        database: Arc<MarketDatabase>,
+        ft_tx: Option<Sender<FullTimeEvent>>,
+    ) -> Self {
+        Self {
+            fetched_games,
+            markets_cache,
+            database,
+            ft_tx,
+            ft_sent: HashSet::new(),
         }
     }
 }
@@ -145,38 +156,56 @@ impl MessageHandler<SportsLiveDataMessage> for SportsLiveDataStateHandler {
         if let SportsLiveDataMessage::GameUpdate(data) = message {
             let game_id = data.game_id;
 
-            // 1. Check if already ignored
-            if self.ignored_games.contains(&game_id) {
-                return Ok(());
-            }
-
-            // 2. Skip games with no league abbreviation
+            // Skip games with no league abbreviation
             if data.league_abbreviation.is_empty() {
-                debug!(game_id = game_id, "Skipping game with empty league abbreviation");
-                return Ok(());
-            }
-
-            // 3. Check if game exists in any league
-            let exists = self.shared_state.iter().any(|league| league.value().contains_key(&game_id));
-
-            // 4. If first time seeing this game and should ignore, add to ignore set
-            if !exists && Self::should_ignore(&data) {
-                self.ignored_games.insert(game_id);
                 debug!(
                     game_id = game_id,
-                    league = %data.league_abbreviation,
-                    status = ?data.status,
-                    ended = data.ended,
-                    "Ignoring finished game"
+                    "Skipping game with empty league abbreviation"
                 );
                 return Ok(());
             }
 
-            // 5. Add/update game in league-specific map
-            let league = data.league_abbreviation.clone();
+            // First time seeing this game? Fetch markets from DB
+            if !self.fetched_games.contains(&game_id) {
+                // Use blocking runtime to call async DB method
+                let db = Arc::clone(&self.database);
+                let markets = tokio::runtime::Handle::current().block_on(async move {
+                    db.get_markets_by_game_id(game_id).await
+                });
+
+                match markets {
+                    Ok(m) => {
+                        debug!(game_id = game_id, count = m.len(), "Fetched markets for game");
+                        self.markets_cache.insert(game_id, m);
+                    }
+                    Err(e) => {
+                        warn!(game_id = game_id, error = %e, "Failed to fetch markets");
+                    }
+                }
+                self.fetched_games.insert(game_id);
+            }
+
+            // Check for Full Time and send event if not already sent
+            let is_ft = data.period == "FT" || data.period == "VFT";
+            if is_ft && !self.ft_sent.contains(&game_id) {
+                if let Some(ref tx) = self.ft_tx {
+                    let event = FullTimeEvent {
+                        game_id,
+                        league: data.league_abbreviation.clone(),
+                        home_team: data.home_team.clone(),
+                        away_team: data.away_team.clone(),
+                        final_score: data.score.clone(),
+                        period: data.period.clone(),
+                        status: data.status.clone(),
+                    };
+                    let _ = tx.send(event); // Non-blocking, ignore if receiver dropped
+                }
+                self.ft_sent.insert(game_id);
+            }
+
             debug!(
                 game_id = game_id,
-                league = %league,
+                league = %data.league_abbreviation,
                 home = data.home_team.as_deref().unwrap_or("?"),
                 away = data.away_team.as_deref().unwrap_or("?"),
                 score = %data.score,
@@ -185,10 +214,6 @@ impl MessageHandler<SportsLiveDataMessage> for SportsLiveDataStateHandler {
                 live = data.live,
                 "Game update"
             );
-            self.shared_state
-                .entry(league)
-                .or_insert_with(dashmap::DashMap::new)
-                .insert(game_id, data);
         }
         Ok(())
     }
@@ -202,8 +227,8 @@ impl MessageHandler<SportsLiveDataMessage> for SportsLiveDataStateHandler {
 ///
 /// Each WebSocket client uses a local shutdown flag because hypersockets
 /// sets the flag to false during `client.shutdown()`.
-async fn build_sports_ws_client() -> Result<WebSocketClient<SportsLiveDataRouter, SportsLiveDataMessage>>
-{
+async fn build_sports_ws_client(
+) -> Result<WebSocketClient<SportsLiveDataRouter, SportsLiveDataMessage>> {
     let local_shutdown_flag = Arc::new(AtomicBool::new(true));
 
     let router = SportsLiveDataRouter::new();
@@ -225,16 +250,23 @@ async fn build_sports_ws_client() -> Result<WebSocketClient<SportsLiveDataRouter
 
 /// Build the sports live data WebSocket client with shared state handler.
 ///
-/// Updates the provided SharedSportsLiveData instead of logging.
-/// Finished games on first sight are added to ignored_games and skipped.
+/// Fetches markets from DB on first game update and caches them.
+///
+/// # Arguments
+/// * `fetched_games` - Shared set tracking which games have had markets fetched
+/// * `markets_cache` - Shared cache of markets per game_id
+/// * `database` - Database access for fetching markets
+/// * `ft_tx` - Optional channel sender for forwarding Full Time events to main loop
 async fn build_sports_ws_client_with_state(
-    shared_state: SharedSportsLiveData,
-    ignored_games: IgnoredGames,
+    fetched_games: FetchedGames,
+    markets_cache: MarketsByGame,
+    database: Arc<MarketDatabase>,
+    ft_tx: Option<Sender<FullTimeEvent>>,
 ) -> Result<WebSocketClient<SportsLiveDataRouter, SportsLiveDataMessage>> {
     let local_shutdown_flag = Arc::new(AtomicBool::new(true));
 
     let router = SportsLiveDataRouter::new();
-    let handler = SportsLiveDataStateHandler::new(shared_state, ignored_games);
+    let handler = SportsLiveDataStateHandler::new(fetched_games, markets_cache, database, ft_tx);
 
     let client = WebSocketClientBuilder::new()
         .url(SPORTS_WS_URL)
@@ -278,9 +310,7 @@ fn handle_client_event(event: ClientEvent) -> bool {
 ///
 /// Connects to the sports WebSocket and logs incoming game updates.
 /// Runs until the shutdown flag is set to false.
-pub async fn spawn_sports_live_data_tracker(
-    shutdown_flag: Arc<AtomicBool>,
-) -> Result<()> {
+pub async fn spawn_sports_live_data_tracker(shutdown_flag: Arc<AtomicBool>) -> Result<()> {
     info!("════════════════════════════════════════════════════════════════");
     info!("  STARTING SPORTS LIVE DATA TRACKER");
     info!("════════════════════════════════════════════════════════════════");
@@ -322,13 +352,22 @@ pub async fn spawn_sports_live_data_tracker(
 
 /// Spawn the sports live data tracker that updates shared state.
 ///
-/// Connects to the sports WebSocket and updates the provided SharedSportsLiveData
-/// with incoming game updates. Games that are already finished on first sight
-/// are added to ignored_games. Runs until the shutdown flag is set to false.
+/// Connects to the sports WebSocket, fetches markets from DB on first game update,
+/// caches them, and sends FullTimeEvent when games reach FT/VFT.
+/// Runs until the shutdown flag is set to false.
+///
+/// # Arguments
+/// * `shutdown_flag` - Flag to signal shutdown
+/// * `fetched_games` - Shared set tracking which games have had markets fetched
+/// * `markets_cache` - Shared cache of markets per game_id
+/// * `database` - Database access for fetching markets
+/// * `ft_tx` - Optional channel sender for forwarding Full Time events to main loop
 pub async fn spawn_sports_tracker_with_state(
     shutdown_flag: Arc<AtomicBool>,
-    shared_state: SharedSportsLiveData,
-    ignored_games: IgnoredGames,
+    fetched_games: FetchedGames,
+    markets_cache: MarketsByGame,
+    database: Arc<MarketDatabase>,
+    ft_tx: Option<Sender<FullTimeEvent>>,
 ) -> Result<()> {
     info!("════════════════════════════════════════════════════════════════");
     info!("  STARTING SPORTS LIVE DATA TRACKER (State Mode)");
@@ -336,7 +375,7 @@ pub async fn spawn_sports_tracker_with_state(
     info!("  URL: {}", SPORTS_WS_URL);
     info!("════════════════════════════════════════════════════════════════");
 
-    let client = build_sports_ws_client_with_state(shared_state, ignored_games).await?;
+    let client = build_sports_ws_client_with_state(fetched_games, markets_cache, database, ft_tx).await?;
     info!("[Sports WS] Connected and updating shared state");
 
     // Main tracking loop
