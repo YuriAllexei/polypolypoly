@@ -162,7 +162,7 @@ impl MessageHandler<SportsLiveDataMessage> for SportsLiveDataStateHandler {
             // 4. If first time seeing this game and should ignore, add to ignore set
             if !exists && Self::should_ignore(&data) {
                 self.ignored_games.insert(game_id);
-                info!(
+                debug!(
                     game_id = game_id,
                     league = %data.league_abbreviation,
                     status = ?data.status,
@@ -174,7 +174,7 @@ impl MessageHandler<SportsLiveDataMessage> for SportsLiveDataStateHandler {
 
             // 5. Add/update game in league-specific map
             let league = data.league_abbreviation.clone();
-            info!(
+            debug!(
                 game_id = game_id,
                 league = %league,
                 home = data.home_team.as_deref().unwrap_or("?"),

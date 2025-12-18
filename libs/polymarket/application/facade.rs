@@ -183,7 +183,7 @@ impl EventSyncApp {
             total_events += events_upserted;
             total_markets += markets_upserted;
 
-            info!(
+            debug!(
                 page = page,
                 events = events_upserted,
                 markets = markets_upserted,
