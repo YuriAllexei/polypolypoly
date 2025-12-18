@@ -12,7 +12,7 @@ use dashmap::{DashMap, DashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Sports Sniping strategy implementation
 ///
@@ -29,6 +29,8 @@ pub struct SportsSnipingStrategy {
     ignored_games: Option<IgnoredGames>,
     /// Cached markets per game_id (fetched once when game first appears)
     game_markets: Arc<DashMap<i64, Vec<DbMarket>>>,
+    /// Games that have reached Full Time (FT/VFT) - logged once
+    ft_games: Arc<DashSet<i64>>,
     /// Handle to the WebSocket tracker task
     ws_task: Option<JoinHandle<()>>,
 }
@@ -41,6 +43,7 @@ impl SportsSnipingStrategy {
             shared_state: None,
             ignored_games: None,
             game_markets: Arc::new(DashMap::new()),
+            ft_games: Arc::new(DashSet::new()),
             ws_task: None,
         }
     }
@@ -96,8 +99,8 @@ impl Strategy for SportsSnipingStrategy {
             .as_ref()
             .expect("Strategy must be initialized before start");
 
-        // Print state every 5 seconds
-        let print_interval = Duration::from_secs(5);
+        // Fast polling for speed - check every 10ms
+        let poll_interval = Duration::from_millis(10);
 
         while ctx.is_running() {
             // Fetch markets for any new games
@@ -118,7 +121,7 @@ impl Strategy for SportsSnipingStrategy {
                     Ok(markets) => {
                         if markets.is_empty() {
                             // No markets for this game - remove from tracking and ignore
-                            info!(
+                            debug!(
                                 game_id = game_id,
                                 league = %league,
                                 "Game has no markets - removing from tracking and adding to ignore set"
@@ -146,66 +149,54 @@ impl Strategy for SportsSnipingStrategy {
                 }
             }
 
-            // // Print state summary
-            // info!("═══════════════════════════════════════════════════");
-            // info!("  SPORTS LIVE DATA STATE");
-            // info!("═══════════════════════════════════════════════════");
+            // Check for games that reached Full Time
+            for league_entry in shared_state.iter() {
+                for game_entry in league_entry.value().iter() {
+                    let game_id = *game_entry.key();
+                    let data = game_entry.value();
 
-            // let ignored_count = ignored_games.len();
-            // info!("Ignored games: {}", ignored_count);
+                    // Check if period indicates Full Time and not already tracked
+                    let is_ft = data.period == "FT" || data.period == "VFT";
+                    if is_ft && !self.ft_games.contains(&game_id) {
+                        // Log the FT event
+                        info!("═══════════════════════════════════════════════════");
+                        info!("  🏁 GAME REACHED FULL TIME");
+                        info!("═══════════════════════════════════════════════════");
+                        info!(
+                            "  Game {}: {} vs {} | Score: {} | Period: {} | Status: {}",
+                            game_id,
+                            data.home_team.as_deref().unwrap_or("?"),
+                            data.away_team.as_deref().unwrap_or("?"),
+                            data.score,
+                            data.period,
+                            data.status.as_deref().unwrap_or("?")
+                        );
 
-            // // Count total games across all leagues
-            // let total_games: usize = shared_state.iter().map(|entry| entry.value().len()).sum();
-            // let league_count = shared_state.len();
-            // info!(
-            //     "Tracking {} games across {} leagues",
-            //     total_games, league_count
-            // );
+                        // Log associated markets
+                        if let Some(markets) = self.game_markets.get(&game_id) {
+                            info!("  Markets for this game:");
+                            for market in markets.value().iter() {
+                                let market_url = market
+                                    .slug
+                                    .as_ref()
+                                    .map(|s| format!("https://polymarket.com/event/{}", s))
+                                    .unwrap_or_else(|| "N/A".to_string());
+                                info!(
+                                    "    - {} | Active: {} | End: {} | URL: {}",
+                                    market.question, market.active, market.end_date, market_url
+                                );
+                            }
+                        }
+                        info!("═══════════════════════════════════════════════════");
 
-            // // Iterate over leagues and their games
-            // for league_entry in shared_state.iter() {
-            //     let league = league_entry.key();
-            //     let games = league_entry.value();
-            //     info!("League [{}]: {} games", league, games.len());
-
-            //     for game_entry in games.iter() {
-            //         let game_id = *game_entry.key();
-            //         let data = game_entry.value();
-            //         info!(
-            //             "  Game {}: {} vs {} | Score: {} | Period: {} | Elapsed: {} | Live: {}",
-            //             game_id,
-            //             data.home_team.as_deref().unwrap_or("?"),
-            //             data.away_team.as_deref().unwrap_or("?"),
-            //             data.score,
-            //             data.period,
-            //             data.elapsed,
-            //             data.live
-            //         );
-
-            //         // Log associated markets (tabbed under game)
-            //         if let Some(markets) = self.game_markets.get(&game_id) {
-            //             if markets.is_empty() {
-            //                 info!("    (No markets found)");
-            //             } else {
-            //                 for market in markets.value().iter() {
-            //                     let market_url = market
-            //                         .slug
-            //                         .as_ref()
-            //                         .map(|s| format!("https://polymarket.com/event/{}", s))
-            //                         .unwrap_or_else(|| "N/A".to_string());
-            //                     info!(
-            //                         "    Market: {} | Active: {} | End: {} | URL: {}",
-            //                         market.question, market.active, market.end_date, market_url
-            //                     );
-            //                 }
-            //             }
-            //         }
-            //     }
-            // }
-            // info!("═══════════════════════════════════════════════════");
+                        // Add to ft_games to avoid repeated logging
+                        self.ft_games.insert(game_id);
+                    }
+                }
+            }
 
             // Sleep before next iteration
-            ctx.shutdown.interruptible_sleep(print_interval).await;
+            ctx.shutdown.interruptible_sleep(poll_interval).await;
         }
 
         info!("Sports Sniping strategy loop ended (shutdown requested)");
