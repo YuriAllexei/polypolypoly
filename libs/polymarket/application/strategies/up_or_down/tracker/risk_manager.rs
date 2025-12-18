@@ -1,0 +1,305 @@
+//! Risk management and order execution for the Up or Down strategy.
+//!
+//! Handles pre-order risk checks, post-order risk monitoring, order placement,
+//! and order cancellation.
+
+use crate::application::strategies::up_or_down::services::{
+    get_oracle_price, log_order_failed, log_order_success, log_placing_order, log_risk_detected,
+};
+use crate::application::strategies::up_or_down::tracker::calculate_dynamic_threshold;
+use crate::application::strategies::up_or_down::types::{MarketTrackerContext, TrackerState};
+use crate::infrastructure::client::clob::TradingClient;
+use crate::infrastructure::{SharedOraclePrices, SharedOrderbooks, SharedPrecisions};
+use chrono::Utc;
+use tracing::{debug, error, info, warn};
+
+// =============================================================================
+// Pre-Order Risk Check
+// =============================================================================
+
+/// Pre-order risk check based on oracle price proximity.
+///
+/// Checks if |price_to_beat - oracle_price| in bps < oracle_bps_price_threshold.
+/// If the oracle price is too close to price_to_beat, the outcome is uncertain
+/// and we should NOT place the order.
+///
+/// Returns:
+/// - `true` if safe to place order (oracle price far enough from price_to_beat)
+/// - `false` if risky to place order (oracle price too close)
+pub fn pre_order_risk_check(
+    ctx: &MarketTrackerContext,
+    oracle_prices: &Option<SharedOraclePrices>,
+) -> bool {
+    // If we don't have price_to_beat or oracle prices, allow the order (no data to check against)
+    let (price_to_beat, oracle_prices) = match (ctx.price_to_beat, oracle_prices) {
+        (Some(ptb), Some(op)) => (ptb, op),
+        _ => {
+            debug!(
+                "[WS {}] Pre-check PASS: No oracle data available",
+                ctx.market_id
+            );
+            return true;
+        }
+    };
+
+    // Get current oracle price
+    let current_price = match get_oracle_price(ctx.oracle_source, ctx.crypto_asset, oracle_prices) {
+        Some(price) => price,
+        None => {
+            debug!(
+                "[WS {}] Pre-check PASS: Could not get oracle price",
+                ctx.market_id
+            );
+            return true;
+        }
+    };
+
+    // Calculate BPS difference
+    let bps_diff = ((price_to_beat - current_price).abs() / price_to_beat) * 10000.0;
+
+    // If oracle price is too close to price_to_beat, it's risky
+    if bps_diff < ctx.oracle_bps_price_threshold {
+        warn!(
+            "[WS {}] Pre-check FAIL: Oracle ${:.2} too close to target ${:.2} ({:.1} bps < {:.1} threshold)",
+            ctx.market_id,
+            current_price,
+            price_to_beat,
+            bps_diff,
+            ctx.oracle_bps_price_threshold
+        );
+        return false;
+    }
+
+    info!(
+        "[WS {}] Pre-check PASS: Oracle ${:.2} vs target ${:.2} ({:.1} bps >= {:.1} threshold)",
+        ctx.market_id,
+        current_price,
+        price_to_beat,
+        bps_diff,
+        ctx.oracle_bps_price_threshold
+    );
+    true
+}
+
+// =============================================================================
+// Post-Order Risk Check
+// =============================================================================
+
+/// Check for risk on tokens with placed orders and cancel if risk detected.
+///
+/// Two signals must both be active to indicate risk:
+/// 1. Average of other bids (excluding top) < 0.85
+/// 2. |price_to_beat - oracle_price| in bps < oracle_bps_price_threshold
+///
+/// Returns false early if no orders are placed or if the market has ended.
+/// Only cancels the specific token(s) where risk is detected, not all orders.
+pub async fn check_risk(
+    orderbooks: &SharedOrderbooks,
+    state: &mut TrackerState,
+    ctx: &MarketTrackerContext,
+    oracle_prices: &Option<SharedOraclePrices>,
+    trading: &TradingClient,
+) -> bool {
+    if state.order_placed.is_empty() {
+        return false;
+    }
+
+    // If market has ended, no point in checking risk
+    if Utc::now() > ctx.market_end_time {
+        return false;
+    }
+
+    // Signal 2: Check oracle price difference (applies to whole market)
+    let mut signal_2_active = false;
+    let mut bps_diff = 0.0;
+    let mut oracle_price = 0.0;
+
+    if let (Some(price_to_beat), Some(oracle_prices)) = (ctx.price_to_beat, oracle_prices) {
+        if let Some(current_price) =
+            get_oracle_price(ctx.oracle_source, ctx.crypto_asset, oracle_prices)
+        {
+            oracle_price = current_price;
+            bps_diff = ((price_to_beat - current_price).abs() / price_to_beat) * 10000.0;
+            if bps_diff < ctx.oracle_bps_price_threshold {
+                signal_2_active = true;
+            }
+        }
+    }
+
+    // If oracle signal not active, no risk
+    if !signal_2_active {
+        return false;
+    }
+
+    // Signal 1: Check bid levels per token
+    let bid_data: Vec<(String, Vec<f64>)> = {
+        let obs = orderbooks.read().unwrap();
+        state
+            .order_placed
+            .keys()
+            .filter_map(|token_id| {
+                obs.get(token_id).and_then(|orderbook| {
+                    let bid_levels = orderbook.bids.levels();
+                    if bid_levels.len() > 1 {
+                        let other_bids: Vec<f64> = bid_levels
+                            .iter()
+                            .skip(1)
+                            .take(4)
+                            .map(|(price, _)| *price)
+                            .collect();
+                        if !other_bids.is_empty() {
+                            return Some((token_id.clone(), other_bids));
+                        }
+                    }
+                    None
+                })
+            })
+            .collect()
+    };
+
+    let mut tokens_at_risk: Vec<(String, f64, Vec<f64>)> = Vec::new();
+    for (token_id, other_bids) in bid_data {
+        let avg_bid_price = other_bids.iter().sum::<f64>() / other_bids.len() as f64;
+        if avg_bid_price < 0.85 {
+            tokens_at_risk.push((token_id, avg_bid_price, other_bids));
+        }
+    }
+
+    if tokens_at_risk.is_empty() {
+        return false;
+    }
+
+    // Cancel only the specific tokens at risk
+    for (token_id, avg_bid_price, other_bids) in tokens_at_risk {
+        let outcome_name = ctx.get_outcome_name(&token_id);
+        log_risk_detected(
+            ctx,
+            &token_id,
+            &outcome_name,
+            avg_bid_price,
+            &other_bids,
+            bps_diff,
+            oracle_price,
+        );
+
+        // Cancel only this token's order
+        if let Some(order_id) = state.order_placed.remove(&token_id) {
+            cancel_order(trading, &order_id, &token_id, ctx).await;
+        }
+    }
+
+    true
+}
+
+// =============================================================================
+// Order Placement
+// =============================================================================
+
+/// Place a buy order for a token.
+///
+/// Returns the order_id if successful, None if failed.
+pub async fn place_order(
+    trading: &TradingClient,
+    token_id: &str,
+    outcome_name: &str,
+    elapsed: f64,
+    ctx: &MarketTrackerContext,
+    precisions: &SharedPrecisions,
+) -> Option<String> {
+    let dynamic_threshold = calculate_dynamic_threshold(ctx);
+    log_placing_order(ctx, token_id, outcome_name, elapsed, dynamic_threshold);
+
+    // Get precision for this token (default to 2)
+    let precision = {
+        let precs = precisions.read().unwrap();
+        *precs.get(token_id).unwrap_or(&2)
+    };
+
+    // Calculate price: 0.99 for precision 2, 0.999 for precision 3, etc.
+    let price = 1.0 - 10_f64.powi(-(precision as i32));
+
+    match trading.buy(token_id, price, 18.0).await {
+        Ok(response) => {
+            log_order_success(ctx, token_id, outcome_name, &response);
+            response.order_id
+        }
+        Err(e) => {
+            log_order_failed(ctx, token_id, outcome_name, &e);
+            None
+        }
+    }
+}
+
+// =============================================================================
+// Order Cancellation
+// =============================================================================
+
+/// Cancel a single order and log the result
+pub async fn cancel_order(
+    trading: &TradingClient,
+    order_id: &str,
+    token_id: &str,
+    ctx: &MarketTrackerContext,
+) {
+    let outcome_name = ctx.get_outcome_name(token_id);
+    info!(
+        "[WS {}] 🚨 Cancelling order {} for {}",
+        ctx.market_id, order_id, outcome_name
+    );
+
+    match trading.cancel_order(order_id).await {
+        Ok(response) => {
+            if !response.canceled.is_empty() {
+                info!(
+                    "[WS {}] ✅ Cancelled order for {}",
+                    ctx.market_id, outcome_name
+                );
+            }
+            if !response.not_canceled.is_empty() {
+                warn!(
+                    "[WS {}] ⚠️ Failed to cancel order {}: {:?}",
+                    ctx.market_id, order_id, response.not_canceled
+                );
+            }
+        }
+        Err(e) => {
+            error!(
+                "[WS {}] ❌ Failed to cancel order {}: {}",
+                ctx.market_id, order_id, e
+            );
+        }
+    }
+}
+
+/// Cancel multiple orders and log the result
+pub async fn cancel_orders(trading: &TradingClient, order_ids: &[String], ctx: &MarketTrackerContext) {
+    info!(
+        "[WS {}] 🚨 CANCELLING {} orders due to risk detection",
+        ctx.market_id,
+        order_ids.len()
+    );
+
+    match trading.cancel_orders(order_ids).await {
+        Ok(response) => {
+            if !response.canceled.is_empty() {
+                info!(
+                    "[WS {}] ✅ Successfully cancelled {} orders: {:?}",
+                    ctx.market_id,
+                    response.canceled.len(),
+                    response.canceled
+                );
+            }
+            if !response.not_canceled.is_empty() {
+                warn!(
+                    "[WS {}] ⚠️ Failed to cancel {} orders: {:?}",
+                    ctx.market_id,
+                    response.not_canceled.len(),
+                    response.not_canceled
+                );
+            }
+        }
+        Err(e) => {
+            error!("[WS {}] ❌ Failed to cancel orders: {}", ctx.market_id, e);
+        }
+    }
+}

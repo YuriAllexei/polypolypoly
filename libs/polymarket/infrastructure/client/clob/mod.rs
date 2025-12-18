@@ -32,6 +32,6 @@ pub use sniper_ws::{
     MarketTrackerConfig, SharedOrderbooks, SharedPrecisions, SniperHandler, SniperRoute,
     SniperRouter,
 };
-pub use sniper_ws_types::TickSizeChangeEvent;
+pub use sniper_ws_types::{SniperMessage, TickSizeChangeEvent};
 pub use trading::{TradingClient, TradingError};
 pub use types::*;

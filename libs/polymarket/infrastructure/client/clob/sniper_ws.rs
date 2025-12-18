@@ -223,31 +223,46 @@ impl SniperHandler {
             return;
         }
 
-        let mut obs = self.orderbooks.write().unwrap();
-        let mut precs = self.precisions.write().unwrap();
-
-        for snapshot in snapshots {
-            // Update orderbook
-            let orderbook = obs
-                .entry(snapshot.asset_id.clone())
-                .or_insert_with(|| Orderbook::new(snapshot.asset_id.clone()));
-            orderbook.process_snapshot(&snapshot.bids, &snapshot.asks);
-
-            // Detect precision from price levels if still at default (2)
-            let current = *precs.get(&snapshot.asset_id).unwrap_or(&2);
-            if current == 2 {
-                let bid_max = max_precision_in_levels(&snapshot.bids);
-                let ask_max = max_precision_in_levels(&snapshot.asks);
-                let detected = bid_max.max(ask_max);
-                if detected > 2 {
-                    debug!(
-                        "[WS {}] Detected higher precision {} for {} from book snapshot",
-                        self.market_id, detected, snapshot.asset_id
-                    );
-                    precs.insert(snapshot.asset_id.clone(), detected);
-                } else {
-                    precs.insert(snapshot.asset_id.clone(), 2);
+        // First pass: Calculate all precision updates without holding any locks
+        // This minimizes lock contention by doing computation outside the critical section
+        let mut precision_updates: Vec<(String, u8)> = Vec::new();
+        {
+            let precs = self.precisions.read().unwrap();
+            for snapshot in snapshots {
+                let current = *precs.get(&snapshot.asset_id).unwrap_or(&2);
+                if current == 2 {
+                    let bid_max = max_precision_in_levels(&snapshot.bids);
+                    let ask_max = max_precision_in_levels(&snapshot.asks);
+                    let detected = bid_max.max(ask_max);
+                    if detected > 2 {
+                        debug!(
+                            "[WS {}] Detected higher precision {} for {} from book snapshot",
+                            self.market_id, detected, snapshot.asset_id
+                        );
+                        precision_updates.push((snapshot.asset_id.clone(), detected));
+                    } else {
+                        precision_updates.push((snapshot.asset_id.clone(), 2));
+                    }
                 }
+            }
+        } // Read lock released here
+
+        // Second pass: Update orderbooks (separate lock)
+        {
+            let mut obs = self.orderbooks.write().unwrap();
+            for snapshot in snapshots {
+                let orderbook = obs
+                    .entry(snapshot.asset_id.clone())
+                    .or_insert_with(|| Orderbook::new(snapshot.asset_id.clone()));
+                orderbook.process_snapshot(&snapshot.bids, &snapshot.asks);
+            }
+        } // Write lock released here
+
+        // Third pass: Apply precision updates (separate lock, brief hold)
+        if !precision_updates.is_empty() {
+            let mut precs = self.precisions.write().unwrap();
+            for (asset_id, precision) in precision_updates {
+                precs.insert(asset_id, precision);
             }
         }
 
@@ -350,6 +365,7 @@ pub async fn build_ws_client(
     let subscription_json = serde_json::to_string(&subscription)?;
 
     let market_id_for_route = config.market_id.clone();
+    let market_id_for_log = config.market_id.clone();
     let client = WebSocketClientBuilder::new()
         .url("wss://ws-subscriptions-clob.polymarket.com/ws/market")
         .router(router, move |routing| {
@@ -360,6 +376,21 @@ pub async fn build_ws_client(
         .shutdown_flag(local_shutdown_flag)
         .build()
         .await?;
+
+    // Yield to allow the spawned client task to start running
+    // This ensures the WebSocket connection begins before we return
+    tokio::task::yield_now().await;
+
+    // Wait briefly for the connection to be established (up to 5 seconds)
+    // This prevents returning before the WebSocket actually connects
+    let start = std::time::Instant::now();
+    while !client.is_connected() && start.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    if !client.is_connected() {
+        tracing::warn!("[WS {}] Client not connected after 5s wait, proceeding anyway", market_id_for_log);
+    }
 
     Ok(client)
 }

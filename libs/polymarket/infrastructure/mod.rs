@@ -15,7 +15,7 @@ pub use client::{
     clob::{
         build_ws_client, handle_client_event, Market, MarketTrackerConfig, OrderArgs, OrderBook,
         OrderType, Outcome, PriceLevel, RestClient, SharedOrderbooks, SharedPrecisions, Side,
-        SniperHandler, SniperRoute, SniperRouter, TickSizeChangeEvent, WebSocketClient,
+        SniperHandler, SniperMessage, SniperRoute, SniperRouter, TickSizeChangeEvent, WebSocketClient,
     },
     gamma::{GammaClient, GammaEvent, GammaFilters, GammaMarket, GammaTag},
     oracle::{
