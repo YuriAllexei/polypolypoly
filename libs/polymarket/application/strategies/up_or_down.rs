@@ -27,6 +27,8 @@ use tracing::{debug, error, info, warn};
 
 /// Required tags for Up or Down markets
 const REQUIRED_TAGS: &[&str] = &["Up or Down", "Crypto Prices", "Recurring", "Crypto"];
+const STALENESS_THRESHOLD_SECS: f64 = 60.0;
+const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
 // =============================================================================
 // Market Metadata Types
@@ -287,6 +289,15 @@ enum OrderbookCheckResult {
     NoAsks,
     /// No asks and threshold exceeded - should place order
     ThresholdExceeded { elapsed_secs: f64 },
+}
+
+/// Reason for exiting the tracking loop
+enum TrackingLoopExit {
+    Shutdown,
+    MarketEnded,
+    AllOrderbooksEmpty,
+    WebSocketDisconnected,
+    StaleOrderbook,
 }
 
 // =============================================================================
@@ -1264,144 +1275,275 @@ impl UpOrDownStrategy {
             ctx.market_id, ws_config.resolution_time
         );
 
-        // Create shared orderbooks and connect WebSocket
-        let orderbooks: SharedOrderbooks = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let first_snapshot_received = Arc::new(AtomicBool::new(false));
-        let client = build_ws_client(
-            &ws_config,
-            Arc::clone(&orderbooks),
-            Arc::clone(&first_snapshot_received),
-        )
-        .await?;
-        info!("[WS {}] Connected and subscribed", ctx.market_id);
+        // Track reconnection attempts
+        let mut reconnect_attempts: u32 = 0;
 
-        let start = std::time::Instant::now();
-        while !first_snapshot_received.load(Ordering::Acquire) {
-            if start.elapsed() > StdDuration::from_secs(10) {
-                error!("[WS {}] Timeout waiting for first snapshot", ctx.market_id);
-                client.shutdown().await?;
-                return Err(anyhow::anyhow!("Timeout waiting for first orderbook snapshot"));
-            }
+        // Outer reconnection loop - handles WebSocket reconnection on staleness
+        'reconnect: loop {
+            // Check shutdown before attempting connection
             if !shutdown_flag.load(Ordering::Acquire) {
-                client.shutdown().await?;
-                return Ok(());
-            }
-            sleep(StdDuration::from_millis(10)).await;
-        }
-
-        // Validate all expected tokens have orderbooks
-        let has_missing_tokens = {
-            let obs = orderbooks.read().unwrap();
-            let missing_count = ctx.token_ids.iter().filter(|t| !obs.contains_key(*t)).count();
-            if missing_count > 0 {
-                error!("[WS {}] Missing orderbooks for {} tokens", ctx.market_id, missing_count);
-            }
-            missing_count > 0
-        };
-        if has_missing_tokens {
-            client.shutdown().await?;
-            return Err(anyhow::anyhow!("Incomplete orderbook snapshot"));
-        }
-
-        // Main tracking loop
-        loop {
-            // Check shutdown flag (highest priority)
-            if !shutdown_flag.load(Ordering::Acquire) {
-                info!("[WS {}] Shutdown signal received", ctx.market_id);
-                break;
+                info!("[WS {}] Shutdown signal received before connect", ctx.market_id);
+                break 'reconnect;
             }
 
-            // Check if market resolution time has passed (exit gracefully)
+            // Check if market has ended before attempting connection
             if Utc::now() > ctx.market_end_time {
                 info!(
-                    "[WS {}] Market resolution time passed ({}), stopping tracker",
-                    ctx.market_id,
-                    ctx.market_end_time.format("%Y-%m-%d %H:%M:%S UTC")
+                    "[WS {}] Market already ended, not connecting",
+                    ctx.market_id
                 );
-                break;
+                break 'reconnect;
             }
 
-            // Handle WebSocket events
-            if let Some(event) = client.try_recv_event() {
-                if !handle_client_event(event, &ctx.market_id) {
-                    break;
-                }
+            if reconnect_attempts > 0 {
+                info!(
+                    "[WS {}] Reconnection attempt {} of {}",
+                    ctx.market_id, reconnect_attempts, MAX_RECONNECT_ATTEMPTS
+                );
+                // Brief delay before reconnection to avoid hammering the server
+                sleep(StdDuration::from_secs(2)).await;
             }
 
-            // Check for stale orderbooks (WebSocket may have silently disconnected)
+            // Create shared orderbooks and connect WebSocket
+            let orderbooks: SharedOrderbooks = Arc::new(std::sync::RwLock::new(HashMap::new()));
+            let first_snapshot_received = Arc::new(AtomicBool::new(false));
+            let client = match build_ws_client(
+                &ws_config,
+                Arc::clone(&orderbooks),
+                Arc::clone(&first_snapshot_received),
+            )
+            .await
             {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("[WS {}] Failed to connect: {}", ctx.market_id, e);
+                    reconnect_attempts += 1;
+                    continue 'reconnect;
+                }
+            };
+            info!("[WS {}] Connected and subscribed", ctx.market_id);
+
+            // Wait for first snapshot
+            let start = std::time::Instant::now();
+            let snapshot_received = loop {
+                if first_snapshot_received.load(Ordering::Acquire) {
+                    break true;
+                }
+                if start.elapsed() > StdDuration::from_secs(10) {
+                    error!("[WS {}] Timeout waiting for first snapshot", ctx.market_id);
+                    break false;
+                }
+                if !shutdown_flag.load(Ordering::Acquire) {
+                    info!("[WS {}] Shutdown during snapshot wait", ctx.market_id);
+                    let _ = client.shutdown().await;
+                    break 'reconnect;
+                }
+                sleep(StdDuration::from_millis(10)).await;
+            };
+
+            if !snapshot_received {
+                let _ = client.shutdown().await;
+                reconnect_attempts += 1;
+                continue 'reconnect;
+            }
+
+            // Validate all expected tokens have orderbooks
+            let has_missing_tokens = {
                 let obs = orderbooks.read().unwrap();
-                for (token_id, orderbook) in obs.iter() {
-                    let staleness = orderbook.seconds_since_update();
-                    if staleness > 60.0 {
-                        warn!(
-                            "[WS {}] Orderbook for {} is stale ({:.1}s since last update) - WebSocket may be disconnected",
-                            ctx.market_id,
-                            ctx.get_outcome_name(token_id),
-                            staleness
-                        );
+                let missing_count = ctx.token_ids.iter().filter(|t| !obs.contains_key(*t)).count();
+                if missing_count > 0 {
+                    error!("[WS {}] Missing orderbooks for {} tokens", ctx.market_id, missing_count);
+                }
+                missing_count > 0
+            };
+            if has_missing_tokens {
+                let _ = client.shutdown().await;
+                reconnect_attempts += 1;
+                continue 'reconnect;
+            }
+
+            // Track when this connection started (for reconnect counter reset logic)
+            let connection_start = std::time::Instant::now();
+
+            // Track if we've seen any updates (price_change) since connecting
+            // Used to distinguish "inactive market" from "silently disconnected"
+            let mut seen_updates_since_connect = false;
+
+            // Main tracking loop
+            let exit_reason = loop {
+                // Check shutdown flag (highest priority)
+                if !shutdown_flag.load(Ordering::Acquire) {
+                    info!("[WS {}] Shutdown signal received", ctx.market_id);
+                    break TrackingLoopExit::Shutdown;
+                }
+
+                // Check if market resolution time has passed (exit gracefully)
+                if Utc::now() > ctx.market_end_time {
+                    info!(
+                        "[WS {}] Market resolution time passed ({}), stopping tracker",
+                        ctx.market_id,
+                        ctx.market_end_time.format("%Y-%m-%d %H:%M:%S UTC")
+                    );
+                    break TrackingLoopExit::MarketEnded;
+                }
+
+                // Handle WebSocket events
+                if let Some(event) = client.try_recv_event() {
+                    if !handle_client_event(event, &ctx.market_id) {
+                        break TrackingLoopExit::WebSocketDisconnected;
                     }
                 }
-            }
 
-            // Check orderbooks and get tokens needing orders
-            let (tokens_to_order, all_empty) =
-                check_all_orderbooks(&orderbooks, &mut state, &ctx).await;
-
-            // Exit if market has ended (all orderbooks empty)
-            if all_empty {
-                log_market_ended(&ctx);
-                break;
-            }
-
-            // Place orders for tokens that exceeded threshold
-            for (token_id, outcome_name, elapsed) in tokens_to_order {
-                // Re-check orderbook before placing order (ensures fresh data)
-                let still_no_asks = {
+                // Check for stale orderbooks (WebSocket may have silently disconnected)
+                // But only if we've seen updates since connecting - inactive markets shouldn't trigger staleness
+                let (is_stale, market_has_activity) = {
                     let obs = orderbooks.read().unwrap();
-                    obs.get(&token_id).map(|ob| ob.asks.is_empty()).unwrap_or(false)
+                    let connection_age = connection_start.elapsed().as_secs_f64();
+                    let mut stale = false;
+                    let mut has_activity = seen_updates_since_connect;
+
+                    for (token_id, orderbook) in obs.iter() {
+                        let staleness = orderbook.seconds_since_update();
+
+                        // Check if we've received updates beyond the initial snapshot
+                        // If staleness is significantly less than connection age, we've had updates
+                        if !has_activity && staleness < (connection_age - 5.0) {
+                            has_activity = true;
+                        }
+
+                        // Only consider staleness if we've seen activity
+                        // (otherwise the market is just inactive, not disconnected)
+                        if has_activity && staleness > STALENESS_THRESHOLD_SECS {
+                            warn!(
+                                "[WS {}] Orderbook for {} is stale ({:.1}s since last update) - triggering reconnection",
+                                ctx.market_id,
+                                ctx.get_outcome_name(token_id),
+                                staleness
+                            );
+                            stale = true;
+                            break;
+                        }
+                    }
+                    (stale, has_activity)
                 };
 
-                if !still_no_asks {
-                    info!(
-                        "[WS {}] Skipping order for {} - asks appeared during processing",
-                        ctx.market_id, outcome_name
-                    );
-                    state.threshold_triggered.remove(&token_id);
-                    state.no_asks_timers.remove(&token_id);
-                    continue;
+                // Update our tracking of whether we've seen activity
+                if market_has_activity {
+                    seen_updates_since_connect = true;
                 }
 
-                if let Some(order_id) =
-                    place_order(&trading, &token_id, &outcome_name, elapsed, &ctx).await
-                {
-                    state.order_placed.insert(token_id, order_id);
+                if is_stale {
+                    break TrackingLoopExit::StaleOrderbook;
                 }
+
+                // Check orderbooks and get tokens needing orders
+                let (tokens_to_order, all_empty) =
+                    check_all_orderbooks(&orderbooks, &mut state, &ctx).await;
+
+                // Exit if market has ended (all orderbooks empty)
+                if all_empty {
+                    log_market_ended(&ctx);
+                    break TrackingLoopExit::AllOrderbooksEmpty;
+                }
+
+                // Place orders for tokens that exceeded threshold
+                for (token_id, outcome_name, elapsed) in tokens_to_order {
+                    // Re-check orderbook before placing order (ensures fresh data)
+                    let still_no_asks = {
+                        let obs = orderbooks.read().unwrap();
+                        obs.get(&token_id).map(|ob| ob.asks.is_empty()).unwrap_or(false)
+                    };
+
+                    if !still_no_asks {
+                        info!(
+                            "[WS {}] Skipping order for {} - asks appeared during processing",
+                            ctx.market_id, outcome_name
+                        );
+                        state.threshold_triggered.remove(&token_id);
+                        state.no_asks_timers.remove(&token_id);
+                        continue;
+                    }
+
+                    if let Some(order_id) =
+                        place_order(&trading, &token_id, &outcome_name, elapsed, &ctx).await
+                    {
+                        state.order_placed.insert(token_id, order_id);
+                    }
+                }
+
+                // Monitor for risk on placed orders and cancel if detected
+                check_risk(&orderbooks, &mut state, &ctx, &oracle_prices, &trading).await;
+
+                // Brief sleep before next iteration
+                sleep(StdDuration::from_millis(100)).await;
+            };
+
+            // Close current WebSocket connection
+            info!("[WS {}] Closing connection (reason: {:?})", ctx.market_id,
+                match &exit_reason {
+                    TrackingLoopExit::Shutdown => "shutdown",
+                    TrackingLoopExit::MarketEnded => "market_ended",
+                    TrackingLoopExit::AllOrderbooksEmpty => "all_empty",
+                    TrackingLoopExit::WebSocketDisconnected => "ws_disconnected",
+                    TrackingLoopExit::StaleOrderbook => "stale_orderbook",
+                }
+            );
+            if let Err(e) = client.shutdown().await {
+                warn!("[WS {}] Error during shutdown: {}", ctx.market_id, e);
             }
 
-            // Monitor for risk on placed orders and cancel if detected
-            check_risk(&orderbooks, &mut state, &ctx, &oracle_prices, &trading).await;
+            // Decide whether to reconnect or exit
+            match exit_reason {
+                TrackingLoopExit::StaleOrderbook | TrackingLoopExit::WebSocketDisconnected => {
+                    // Check if connection was stable (ran longer than staleness threshold)
+                    // If so, this is likely a real disconnect, not a pattern of repeated staleness
+                    let connection_duration = connection_start.elapsed().as_secs_f64();
+                    if connection_duration > STALENESS_THRESHOLD_SECS * 2.0 {
+                        // Connection was stable for a while, reset the counter
+                        reconnect_attempts = 0;
+                        info!(
+                            "[WS {}] Connection was stable for {:.1}s, resetting reconnect counter",
+                            ctx.market_id, connection_duration
+                        );
+                    }
 
-            // Brief sleep before next iteration
-            sleep(StdDuration::from_millis(100)).await;
+                    // These are recoverable - try to reconnect
+                    reconnect_attempts += 1;
+
+                    // Check if we've exceeded max attempts AFTER incrementing
+                    if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
+                        error!(
+                            "[WS {}] Exceeded max reconnection attempts ({}) due to repeated staleness/disconnects, giving up",
+                            ctx.market_id, MAX_RECONNECT_ATTEMPTS
+                        );
+                        break 'reconnect;
+                    }
+
+                    info!(
+                        "[WS {}] Will attempt reconnection (attempt {} of {})",
+                        ctx.market_id, reconnect_attempts, MAX_RECONNECT_ATTEMPTS
+                    );
+                    // Clear timer state on reconnect to avoid false triggers from stale timers
+                    state.no_asks_timers.clear();
+                    state.threshold_triggered.clear();
+                    continue 'reconnect;
+                }
+                TrackingLoopExit::Shutdown
+                | TrackingLoopExit::MarketEnded
+                | TrackingLoopExit::AllOrderbooksEmpty => {
+                    // These are terminal - exit completely
+                    break 'reconnect;
+                }
+            }
         }
-
-        // Cleanup: Cancel any remaining open orders before shutdown
         if !state.order_placed.is_empty() {
             info!(
-                "[WS {}] Cancelling {} remaining orders before shutdown",
+                "[WS {}] Tracker stopping with {} orders still open (leaving them for potential fills)",
                 ctx.market_id,
                 state.order_placed.len()
             );
-            let order_ids = state.get_order_ids();
-            cancel_orders(&trading, &order_ids, &ctx).await;
         }
 
-        // Close WebSocket connection
-        info!("[WS {}] Closing connection", ctx.market_id);
-        if let Err(e) = client.shutdown().await {
-            warn!("[WS {}] Error during shutdown: {}", ctx.market_id, e);
-        }
         info!("[WS {}] Tracker stopped", ctx.market_id);
         Ok(())
     }
