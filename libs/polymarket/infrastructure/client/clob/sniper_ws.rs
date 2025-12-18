@@ -8,8 +8,10 @@ use super::sniper_ws_types::{
     BookSnapshot, LastTradePriceEvent, MarketSubscription, PriceChangeEvent, SniperMessage,
     TickSizeChangeEvent,
 };
+use super::types::PriceLevel;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use crossbeam_channel::Sender;
 use hypersockets::core::*;
 use hypersockets::{MessageHandler, MessageRouter, WsMessage};
 use std::collections::HashMap;
@@ -20,6 +22,32 @@ use tracing::{debug, info, warn};
 
 /// Shared orderbooks accessible by both handler and main loop
 pub type SharedOrderbooks = Arc<RwLock<HashMap<String, Orderbook>>>;
+
+/// Shared precisions per token (number of decimal places)
+pub type SharedPrecisions = Arc<RwLock<HashMap<String, u8>>>;
+
+// =============================================================================
+// Precision Helper Functions
+// =============================================================================
+
+/// Get the number of decimal places from a price/tick_size string
+/// "0.01" -> 2, "0.001" -> 3, "0.55" -> 2, "0.555" -> 3, "1" -> 0
+pub fn decimal_places(s: &str) -> u8 {
+    match s.find('.') {
+        Some(pos) => (s.len() - pos - 1) as u8,
+        None => 0,
+    }
+}
+
+/// Get the maximum precision found in a slice of price levels
+/// Returns 2 as default if no levels provided
+pub fn max_precision_in_levels(levels: &[PriceLevel]) -> u8 {
+    levels
+        .iter()
+        .map(|l| decimal_places(&l.price))
+        .max()
+        .unwrap_or(2)
+}
 
 // =============================================================================
 // Configuration
@@ -158,11 +186,14 @@ impl MessageRouter for SniperRouter {
 pub struct SniperHandler {
     market_id: String,
     orderbooks: SharedOrderbooks,
+    /// Shared precisions per token (number of decimal places)
+    precisions: SharedPrecisions,
+    /// Optional channel to forward tick_size_change events to main loop
+    tick_size_tx: Option<Sender<TickSizeChangeEvent>>,
     message_count: u64,
     /// Track last trade prices per asset
     last_trade_prices: HashMap<String, (String, String)>, // asset_id -> (price, size)
-    /// Track tick sizes per asset
-    tick_sizes: HashMap<String, String>, // asset_id -> tick_size
+
     first_snapshot_received: Arc<AtomicBool>,
 }
 
@@ -170,30 +201,54 @@ impl SniperHandler {
     pub fn new(
         market_id: String,
         orderbooks: SharedOrderbooks,
+        precisions: SharedPrecisions,
+        tick_size_tx: Option<Sender<TickSizeChangeEvent>>,
         first_snapshot_received: Arc<AtomicBool>,
     ) -> Self {
         Self {
             market_id,
             orderbooks,
+            precisions,
+            tick_size_tx,
             message_count: 0,
             last_trade_prices: HashMap::new(),
-            tick_sizes: HashMap::new(),
             first_snapshot_received,
         }
     }
 
     /// Process orderbook snapshots and update shared orderbooks
+    /// Also detects precision from price levels if current precision is 2 (default)
     fn handle_snapshot(&mut self, snapshots: &[BookSnapshot]) {
         if snapshots.is_empty() {
             return;
         }
 
         let mut obs = self.orderbooks.write().unwrap();
+        let mut precs = self.precisions.write().unwrap();
+
         for snapshot in snapshots {
+            // Update orderbook
             let orderbook = obs
                 .entry(snapshot.asset_id.clone())
                 .or_insert_with(|| Orderbook::new(snapshot.asset_id.clone()));
             orderbook.process_snapshot(&snapshot.bids, &snapshot.asks);
+
+            // Detect precision from price levels if still at default (2)
+            let current = *precs.get(&snapshot.asset_id).unwrap_or(&2);
+            if current == 2 {
+                let bid_max = max_precision_in_levels(&snapshot.bids);
+                let ask_max = max_precision_in_levels(&snapshot.asks);
+                let detected = bid_max.max(ask_max);
+                if detected > 2 {
+                    debug!(
+                        "[WS {}] Detected higher precision {} for {} from book snapshot",
+                        self.market_id, detected, snapshot.asset_id
+                    );
+                    precs.insert(snapshot.asset_id.clone(), detected);
+                } else {
+                    precs.insert(snapshot.asset_id.clone(), 2);
+                }
+            }
         }
 
         self.first_snapshot_received.swap(true, Ordering::Release);
@@ -210,14 +265,24 @@ impl SniperHandler {
         }
     }
 
-    /// Process tick size change events
+    /// Process tick size change events and update precision
     fn handle_tick_size_change(&mut self, event: &TickSizeChangeEvent) {
+        let precision = decimal_places(&event.new_tick_size);
         debug!(
-            "[WS {}] Tick size change for {}: {} -> {}",
-            self.market_id, event.asset_id, event.old_tick_size, event.new_tick_size
+            "[WS {}] Tick size change for {}: {} -> {} (precision: {})",
+            self.market_id, event.asset_id, event.old_tick_size, event.new_tick_size, precision
         );
-        self.tick_sizes
-            .insert(event.asset_id.clone(), event.new_tick_size.clone());
+
+        // Update precision in shared state
+        self.precisions
+            .write()
+            .unwrap()
+            .insert(event.asset_id.clone(), precision);
+
+        // Forward event to main loop if channel configured
+        if let Some(ref tx) = self.tick_size_tx {
+            let _ = tx.send(event.clone()); // Non-blocking, ignore if receiver dropped
+        }
     }
 
     /// Process last trade price events
@@ -259,16 +324,27 @@ impl MessageHandler<SniperMessage> for SniperHandler {
 /// Note: Each WebSocket client uses a local shutdown flag because hypersockets
 /// sets the flag to false during `client.shutdown()`, which would inadvertently
 /// trigger global shutdown if shared. The global flag should be checked separately.
+///
+/// # Arguments
+/// * `tick_size_tx` - Optional channel sender for forwarding tick_size_change events to main loop
 pub async fn build_ws_client(
     config: &MarketTrackerConfig,
     orderbooks: SharedOrderbooks,
+    precisions: SharedPrecisions,
+    tick_size_tx: Option<Sender<TickSizeChangeEvent>>,
     first_snapshot_received: Arc<AtomicBool>,
 ) -> Result<WebSocketClient<SniperRouter, SniperMessage>> {
     // Local shutdown flag for this WebSocket client only
     let local_shutdown_flag = Arc::new(AtomicBool::new(true));
 
     let router = SniperRouter::new(config.market_id.clone());
-    let handler = SniperHandler::new(config.market_id.clone(), orderbooks, first_snapshot_received);
+    let handler = SniperHandler::new(
+        config.market_id.clone(),
+        orderbooks,
+        precisions,
+        tick_size_tx,
+        first_snapshot_received,
+    );
 
     let subscription = MarketSubscription::new(config.token_ids.clone());
     let subscription_json = serde_json::to_string(&subscription)?;
@@ -311,5 +387,107 @@ pub fn handle_client_event(event: ClientEvent, market_id: &str) -> bool {
             warn!("[WS {}] Error: {}", market_id, err);
             true
         }
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decimal_places_tick_sizes() {
+        // Common tick sizes
+        assert_eq!(decimal_places("0.01"), 2);
+        assert_eq!(decimal_places("0.001"), 3);
+        assert_eq!(decimal_places("0.0001"), 4);
+    }
+
+    #[test]
+    fn test_decimal_places_prices() {
+        // Normal 2-decimal prices
+        assert_eq!(decimal_places("0.55"), 2);
+        assert_eq!(decimal_places("0.99"), 2);
+        assert_eq!(decimal_places("0.01"), 2);
+
+        // 3-decimal prices
+        assert_eq!(decimal_places("0.555"), 3);
+        assert_eq!(decimal_places("0.991"), 3);
+        assert_eq!(decimal_places("0.015"), 3);
+    }
+
+    #[test]
+    fn test_decimal_places_edge_cases() {
+        // No decimal point
+        assert_eq!(decimal_places("1"), 0);
+        assert_eq!(decimal_places("100"), 0);
+
+        // One decimal place
+        assert_eq!(decimal_places("0.5"), 1);
+
+        // Many decimal places
+        assert_eq!(decimal_places("0.123456"), 6);
+    }
+
+    #[test]
+    fn test_max_precision_in_levels_detects_higher() {
+        let levels = vec![
+            PriceLevel {
+                price: "0.55".to_string(),
+                size: "100".to_string(),
+            },
+            PriceLevel {
+                price: "0.555".to_string(),
+                size: "50".to_string(),
+            },
+            PriceLevel {
+                price: "0.56".to_string(),
+                size: "75".to_string(),
+            },
+        ];
+        assert_eq!(max_precision_in_levels(&levels), 3);
+    }
+
+    #[test]
+    fn test_max_precision_in_levels_stays_at_2() {
+        let levels = vec![
+            PriceLevel {
+                price: "0.55".to_string(),
+                size: "100".to_string(),
+            },
+            PriceLevel {
+                price: "0.56".to_string(),
+                size: "50".to_string(),
+            },
+            PriceLevel {
+                price: "0.99".to_string(),
+                size: "75".to_string(),
+            },
+        ];
+        assert_eq!(max_precision_in_levels(&levels), 2);
+    }
+
+    #[test]
+    fn test_max_precision_in_levels_empty() {
+        let levels: Vec<PriceLevel> = vec![];
+        assert_eq!(max_precision_in_levels(&levels), 2);
+    }
+
+    #[test]
+    fn test_max_precision_in_levels_4_decimals() {
+        let levels = vec![
+            PriceLevel {
+                price: "0.9901".to_string(),
+                size: "100".to_string(),
+            },
+            PriceLevel {
+                price: "0.99".to_string(),
+                size: "50".to_string(),
+            },
+        ];
+        assert_eq!(max_precision_in_levels(&levels), 4);
     }
 }
