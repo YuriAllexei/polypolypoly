@@ -75,21 +75,29 @@ pub async fn heartbeat_task(
     debug!("Heartbeat task started with interval: {:?}", interval);
 
     loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                debug!("Heartbeat tick - sending payload");
-                if heartbeat_tx.send(payload.clone()).is_err() {
-                    debug!("Heartbeat channel closed, shutting down heartbeat task");
-                    break;
-                }
-            }
-            _ = async {
-                let rx = shutdown_rx.clone();
-                tokio::task::spawn_blocking(move || rx.recv()).await.ok()
-            } => {
+        // Check for shutdown signal first (non-blocking)
+        match shutdown_rx.try_recv() {
+            Ok(_) => {
                 debug!("Heartbeat task received shutdown signal");
                 break;
             }
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                debug!("Heartbeat shutdown channel disconnected");
+                break;
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => {
+                // No shutdown signal, continue
+            }
+        }
+
+        // Wait for next heartbeat tick
+        ticker.tick().await;
+
+        // Send heartbeat payload
+        debug!("Heartbeat tick - sending payload");
+        if heartbeat_tx.send(payload.clone()).is_err() {
+            debug!("Heartbeat channel closed, shutting down heartbeat task");
+            break;
         }
     }
 

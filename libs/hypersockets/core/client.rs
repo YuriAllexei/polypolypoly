@@ -554,8 +554,13 @@ where
             return Ok(());
         }
 
+        // Use biased select to prioritize WebSocket messages
+        // The timeout branch handles commands and heartbeats via non-blocking try_recv
+        // This avoids spawning blocking tasks on every iteration which would exhaust the thread pool
         tokio::select! {
-            // Handle incoming messages
+            biased;
+
+            // Handle incoming WebSocket messages (highest priority)
             msg = read.next() => {
                 match msg {
                     Some(Ok(msg)) => {
@@ -639,65 +644,52 @@ where
                 }
             }
 
-            // Handle commands (use spawn_blocking with timeout to avoid blocking select)
-            cmd = async {
-                let rx = command_rx.clone();
-                tokio::task::spawn_blocking(move || {
-                    rx.recv_timeout(std::time::Duration::from_millis(100))
-                }).await.ok()
-            } => {
-                match cmd {
-                    Some(Ok(ClientCommand::Send(msg))) => {
+            // Timeout branch: check commands and heartbeats via non-blocking try_recv
+            // This runs every 100ms when no WebSocket messages are received
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                // Process all pending commands (non-blocking)
+                loop {
+                    match command_rx.try_recv() {
+                        Ok(ClientCommand::Send(msg)) => {
+                            let tung_msg = ws_message_to_tungstenite(&msg);
+                            write.send(tung_msg).await.map_err(|e| {
+                                HyperSocketError::WebSocket(e.to_string())
+                            })?;
+                            metrics.increment_sent();
+                        }
+                        Ok(ClientCommand::Shutdown) => {
+                            info!("Received shutdown command");
+                            state.set(ConnectionState::ShuttingDown);
+                            return Ok(());
+                        }
+                        Ok(ClientCommand::GetMetrics(tx)) => {
+                            let _ = tx.send(Metrics {
+                                messages_sent: metrics.messages_sent(),
+                                messages_received: metrics.messages_received(),
+                                reconnect_count: metrics.reconnect_count(),
+                                connection_state: state.get(),
+                            });
+                        }
+                        Err(crossbeam_channel::TryRecvError::Empty) => break,
+                        Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                            debug!("Command channel closed");
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // Process all pending heartbeat messages (non-blocking)
+                if let Some(rx) = heartbeat_rx {
+                    while let Ok(msg) = rx.try_recv() {
+                        debug!("Received heartbeat from heartbeat task, sending to server");
                         let tung_msg = ws_message_to_tungstenite(&msg);
                         write.send(tung_msg).await.map_err(|e| {
-                            HyperSocketError::WebSocket(e.to_string())
+                            HyperSocketError::WebSocket(format!("Failed to send heartbeat: {}", e))
                         })?;
                         metrics.increment_sent();
-                    }
-                    Some(Ok(ClientCommand::Shutdown)) => {
-                        info!("Received shutdown command");
-                        state.set(ConnectionState::ShuttingDown);
-                        return Ok(());
-                    }
-                    Some(Ok(ClientCommand::GetMetrics(tx))) => {
-                        let _ = tx.send(Metrics {
-                            messages_sent: metrics.messages_sent(),
-                            messages_received: metrics.messages_received(),
-                            reconnect_count: metrics.reconnect_count(),
-                            connection_state: state.get(),
-                        });
-                    }
-                    Some(Err(_)) => {
-                        // Timeout is normal, just continue the loop
-                    }
-                    None => {
-                        debug!("Command channel closed");
-                        return Ok(());
+                        debug!("Heartbeat sent successfully");
                     }
                 }
-            }
-
-            // Handle heartbeat messages from dedicated heartbeat task
-            hb = async {
-                if let Some(rx) = heartbeat_rx {
-                    let rx_clone = rx.clone();
-                    tokio::task::spawn_blocking(move || {
-                        rx_clone.recv_timeout(std::time::Duration::from_millis(100))
-                    }).await.ok().and_then(|r| r.ok())
-                } else {
-                    std::future::pending().await
-                }
-            } => {
-                if let Some(msg) = hb {
-                    debug!("Received heartbeat from heartbeat task, sending to server");
-                    let tung_msg = ws_message_to_tungstenite(&msg);
-                    write.send(tung_msg).await.map_err(|e| {
-                        HyperSocketError::WebSocket(format!("Failed to send heartbeat: {}", e))
-                    })?;
-                    metrics.increment_sent();
-                    debug!("Heartbeat sent successfully");
-                }
-                // Timeout is normal, continue loop
             }
         }
     }
