@@ -1,6 +1,6 @@
 services:
   polymarket-events:
-    profiles: ["events", "strategies"]
+    profiles: ["events", "strategies", "sports-sniping", "up-or-down"]
     build: .
     container_name: polymarket-events
     restart: unless-stopped

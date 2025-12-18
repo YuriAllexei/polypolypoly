@@ -150,10 +150,16 @@ impl MessageHandler<SportsLiveDataMessage> for SportsLiveDataStateHandler {
                 return Ok(());
             }
 
-            // 2. Check if game exists in any league
+            // 2. Skip games with no league abbreviation
+            if data.league_abbreviation.is_empty() {
+                debug!(game_id = game_id, "Skipping game with empty league abbreviation");
+                return Ok(());
+            }
+
+            // 3. Check if game exists in any league
             let exists = self.shared_state.iter().any(|league| league.value().contains_key(&game_id));
 
-            // 3. If first time seeing this game and should ignore, add to ignore set
+            // 4. If first time seeing this game and should ignore, add to ignore set
             if !exists && Self::should_ignore(&data) {
                 self.ignored_games.insert(game_id);
                 info!(
@@ -166,17 +172,18 @@ impl MessageHandler<SportsLiveDataMessage> for SportsLiveDataStateHandler {
                 return Ok(());
             }
 
-            // 4. Add/update game in league-specific map
+            // 5. Add/update game in league-specific map
             let league = data.league_abbreviation.clone();
-            debug!(
+            info!(
                 game_id = game_id,
                 league = %league,
                 home = data.home_team.as_deref().unwrap_or("?"),
                 away = data.away_team.as_deref().unwrap_or("?"),
                 score = %data.score,
                 period = %data.period,
+                status = data.status.as_deref().unwrap_or("?"),
                 live = data.live,
-                "Processing game update"
+                "Game update"
             );
             self.shared_state
                 .entry(league)
