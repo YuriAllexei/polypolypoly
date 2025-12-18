@@ -486,6 +486,59 @@ async fn place_order(
     }
 }
 
+/// Pre-order risk check based on oracle price proximity.
+/// Returns:
+/// - `true` if safe to place order (oracle price far enough from price_to_beat)
+/// - `false` if risky to place order (oracle price too close)
+fn pre_order_risk_check(
+    ctx: &MarketTrackerContext,
+    oracle_prices: &Option<SharedOraclePrices>,
+) -> bool {
+    // If we don't have price_to_beat or oracle prices, allow the order (no data to check against)
+    let (price_to_beat, oracle_prices) = match (ctx.price_to_beat, oracle_prices) {
+        (Some(ptb), Some(op)) => (ptb, op),
+        _ => {
+            debug!("[WS {}] Pre-check PASS: No oracle data available", ctx.market_id);
+            return true;
+        }
+    };
+
+    // Get current oracle price
+    let current_price = match get_oracle_price(ctx.oracle_source, ctx.crypto_asset, oracle_prices) {
+        Some(price) => price,
+        None => {
+            debug!("[WS {}] Pre-check PASS: Could not get oracle price", ctx.market_id);
+            return true;
+        }
+    };
+
+    // Calculate BPS difference
+    let bps_diff = ((price_to_beat - current_price).abs() / price_to_beat) * 10000.0;
+
+    // If oracle price is too close to price_to_beat, it's risky
+    if bps_diff < ctx.oracle_bps_price_threshold {
+        warn!(
+            "[WS {}] Pre-check FAIL: Oracle ${:.2} too close to target ${:.2} ({:.1} bps < {:.1} threshold)",
+            ctx.market_id,
+            current_price,
+            price_to_beat,
+            bps_diff,
+            ctx.oracle_bps_price_threshold
+        );
+        return false;
+    }
+
+    info!(
+        "[WS {}] Pre-check PASS: Oracle ${:.2} vs target ${:.2} ({:.1} bps >= {:.1} threshold)",
+        ctx.market_id,
+        current_price,
+        price_to_beat,
+        bps_diff,
+        ctx.oracle_bps_price_threshold
+    );
+    true
+}
+
 /// Check for risk on tokens with placed orders and cancel if risk detected.
 ///
 /// Two signals must both be active to indicate risk:
@@ -1527,6 +1580,17 @@ impl UpOrDownStrategy {
                     // Log liquidity at entry
                     let top_bid_str = best_bid.map(|(p, s)| format!("{:.2} @ ${:.2}", s, p)).unwrap_or("none".to_string());
                     info!("[WS {}] Bid Liquidity: Top: {} | At $0.99: {:.2}", ctx.market_id, top_bid_str, liq_at_99);
+
+                    // Pre-order risk check: skip if oracle price too close to target
+                    if !pre_order_risk_check(&ctx, &oracle_prices) {
+                        info!(
+                            "[WS {}] Skipping order for {} - pre-order risk check failed",
+                            ctx.market_id, outcome_name
+                        );
+                        state.threshold_triggered.remove(&token_id);
+                        state.no_asks_timers.remove(&token_id);
+                        continue;
+                    }
 
                     if let Some(order_id) =
                         place_order(&trading, &token_id, &outcome_name, elapsed, &ctx, &precisions).await
