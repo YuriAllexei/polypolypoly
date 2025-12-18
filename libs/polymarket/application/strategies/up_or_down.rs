@@ -332,7 +332,7 @@ fn check_token_orderbook(
         // Asks exist - reset timer and threshold state
         if state.no_asks_timers.remove(token_id).is_some() {
             state.threshold_triggered.remove(token_id);
-            info!(
+            debug!(
                 "⏹️  Timer RESET for {} ({}) - asks appeared in orderbook",
                 token_id, outcome_name
             );
@@ -341,8 +341,15 @@ fn check_token_orderbook(
     }
 
     // No asks - start timer if not running
+    // Only log "STARTING TIMER" if:
+    // 1. Timer doesn't exist yet
+    // 2. We haven't already triggered threshold (prevents spam after order cycle)
+    // 3. We don't already have an order placed (prevents spam after order placed)
     if !state.no_asks_timers.contains_key(token_id) {
-        log_no_asks_started(ctx, token_id, &outcome_name);
+        // Only log if this is truly a new detection (not a restart after order cycle)
+        if !state.threshold_triggered.contains(token_id) && !state.order_placed.contains_key(token_id) {
+            log_no_asks_started(ctx, token_id, &outcome_name);
+        }
         state
             .no_asks_timers
             .insert(token_id.to_string(), Instant::now());
@@ -356,8 +363,7 @@ fn check_token_orderbook(
             if elapsed >= dynamic_threshold {
                 // Check if order already placed for this token
                 if state.order_placed.contains_key(token_id) {
-                    // Order already exists - silently skip and clear timer
-                    state.no_asks_timers.remove(token_id);
+                    // Order already exists - silently skip (don't remove timer to prevent restart)
                     return OrderbookCheckResult::NoAsks;
                 }
                 state.threshold_triggered.insert(token_id.to_string());
@@ -1305,6 +1311,16 @@ impl UpOrDownStrategy {
                 break;
             }
 
+            // Check if market resolution time has passed (exit gracefully)
+            if Utc::now() > ctx.market_end_time {
+                info!(
+                    "[WS {}] Market resolution time passed ({}), stopping tracker",
+                    ctx.market_id,
+                    ctx.market_end_time.format("%Y-%m-%d %H:%M:%S UTC")
+                );
+                break;
+            }
+
             // Handle WebSocket events
             if let Some(event) = client.try_recv_event() {
                 if !handle_client_event(event, &ctx.market_id) {
@@ -1312,11 +1328,27 @@ impl UpOrDownStrategy {
                 }
             }
 
+            // Check for stale orderbooks (WebSocket may have silently disconnected)
+            {
+                let obs = orderbooks.read().unwrap();
+                for (token_id, orderbook) in obs.iter() {
+                    let staleness = orderbook.seconds_since_update();
+                    if staleness > 60.0 {
+                        warn!(
+                            "[WS {}] Orderbook for {} is stale ({:.1}s since last update) - WebSocket may be disconnected",
+                            ctx.market_id,
+                            ctx.get_outcome_name(token_id),
+                            staleness
+                        );
+                    }
+                }
+            }
+
             // Check orderbooks and get tokens needing orders
             let (tokens_to_order, all_empty) =
                 check_all_orderbooks(&orderbooks, &mut state, &ctx).await;
 
-            // Exit if market has ended
+            // Exit if market has ended (all orderbooks empty)
             if all_empty {
                 log_market_ended(&ctx);
                 break;

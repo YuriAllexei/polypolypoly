@@ -3,6 +3,7 @@
 //! Simple orderbook data structure using floats for readability.
 
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 // =============================================================================
 // Price Level - Basic unit of orderbook
@@ -153,6 +154,8 @@ pub struct Orderbook {
     pub asset_id: String,
     pub bids: OrderbookSide,
     pub asks: OrderbookSide,
+    /// Last time the orderbook was updated (for staleness detection)
+    last_updated: Instant,
 }
 
 impl Orderbook {
@@ -162,6 +165,7 @@ impl Orderbook {
             asset_id,
             bids: OrderbookSide::new(true),
             asks: OrderbookSide::new(false),
+            last_updated: Instant::now(),
         }
     }
 
@@ -169,6 +173,7 @@ impl Orderbook {
     pub fn process_snapshot(&mut self, bids: &[PriceLevel], asks: &[PriceLevel]) {
         self.bids.process_snapshot(bids);
         self.asks.process_snapshot(asks);
+        self.last_updated = Instant::now();
     }
 
     /// Process a price update
@@ -182,6 +187,17 @@ impl Orderbook {
             "SELL" => self.asks.process_update(price_f64, size_f64),
             _ => {}
         }
+        self.last_updated = Instant::now();
+    }
+
+    /// Get seconds since last update
+    pub fn seconds_since_update(&self) -> f64 {
+        self.last_updated.elapsed().as_secs_f64()
+    }
+
+    /// Check if orderbook data is stale (no updates for N seconds)
+    pub fn is_stale(&self, max_age_secs: f64) -> bool {
+        self.seconds_since_update() > max_age_secs
     }
 
     /// Get best bid (highest buy price)

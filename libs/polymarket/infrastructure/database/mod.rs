@@ -47,13 +47,20 @@ impl MarketDatabase {
             .acquire_timeout(std::time::Duration::from_secs(10))  // Don't wait forever for a connection
             .idle_timeout(std::time::Duration::from_secs(300))    // Close idle connections after 5 min
             .max_lifetime(std::time::Duration::from_secs(1800))   // Recycle connections after 30 min
+            .after_connect(|conn, _meta| Box::pin(async move {
+                // Set statement timeout to 30 seconds to prevent slow queries from holding connections
+                sqlx::query("SET statement_timeout = '30s'")
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(())
+            }))
             .connect(db_url)
             .await?;
 
         // Initialize schema
         schema::initialize_schema(&pool).await?;
 
-        info!("Database initialized successfully (pool: max=50, min=5, acquire_timeout=10s)");
+        info!("Database initialized successfully (pool: max=50, min=5, acquire_timeout=10s, statement_timeout=30s)");
 
         Ok(Self { pool })
     }
