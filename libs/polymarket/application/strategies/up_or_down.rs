@@ -1476,10 +1476,13 @@ impl UpOrDownStrategy {
 
                 // Place orders for tokens that exceeded threshold
                 for (token_id, outcome_name, elapsed) in tokens_to_order {
-                    // Re-check orderbook before placing order (ensures fresh data)
-                    let still_no_asks = {
+                    // Re-check orderbook and capture liquidity before placing order
+                    let (still_no_asks, best_bid, liq_at_99) = {
                         let obs = orderbooks.read().unwrap();
-                        obs.get(&token_id).map(|ob| ob.asks.is_empty()).unwrap_or(false)
+                        match obs.get(&token_id) {
+                            Some(ob) => (ob.asks.is_empty(), ob.best_bid(), ob.bid_liquidity_at_price(0.99)),
+                            None => (false, None, 0.0),
+                        }
                     };
 
                     if !still_no_asks {
@@ -1491,6 +1494,10 @@ impl UpOrDownStrategy {
                         state.no_asks_timers.remove(&token_id);
                         continue;
                     }
+
+                    // Log liquidity at entry
+                    let top_bid_str = best_bid.map(|(p, s)| format!("{:.2} @ ${:.2}", s, p)).unwrap_or("none".to_string());
+                    info!("[WS {}] Bid Liquidity: Top: {} | At $0.99: {:.2}", ctx.market_id, top_bid_str, liq_at_99);
 
                     if let Some(order_id) =
                         place_order(&trading, &token_id, &outcome_name, elapsed, &ctx).await

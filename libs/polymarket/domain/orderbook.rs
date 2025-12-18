@@ -251,6 +251,28 @@ impl Orderbook {
         )
     }
 
+    /// Get liquidity (size) at a specific price level on the bid side
+    /// Returns 0.0 if no liquidity exists at that price
+    pub fn bid_liquidity_at_price(&self, target_price: f64) -> f64 {
+        const PRICE_TOLERANCE: f64 = 1e-6;
+        self.bids
+            .levels()
+            .iter()
+            .find(|(p, _)| (*p - target_price).abs() < PRICE_TOLERANCE)
+            .map(|(_, size)| *size)
+            .unwrap_or(0.0)
+    }
+
+    /// Get total bid-side liquidity
+    pub fn total_bid_liquidity(&self) -> f64 {
+        self.bids.total_liquidity()
+    }
+
+    /// Get total ask-side liquidity
+    pub fn total_ask_liquidity(&self) -> f64 {
+        self.asks.total_liquidity()
+    }
+
     /// Format full orderbook depth for logging (top N levels)
     pub fn format_depth(&self, max_levels: usize) -> String {
         let mut output = String::new();
