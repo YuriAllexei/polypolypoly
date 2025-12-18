@@ -14,8 +14,8 @@ pub mod shutdown;
 pub use client::{
     clob::{
         build_ws_client, handle_client_event, Market, MarketTrackerConfig, OrderArgs, OrderBook,
-        OrderType, Outcome, PriceLevel, RestClient, SharedOrderbooks, Side, SniperHandler,
-        SniperRoute, SniperRouter, WebSocketClient,
+        OrderType, Outcome, PriceLevel, RestClient, SharedOrderbooks, SharedPrecisions, Side,
+        SniperHandler, SniperRoute, SniperRouter, TickSizeChangeEvent, WebSocketClient,
     },
     gamma::{GammaClient, GammaEvent, GammaFilters, GammaMarket, GammaTag},
     oracle::{spawn_oracle_trackers, OraclePriceManager, OracleType, PriceEntry, SharedOraclePrices},

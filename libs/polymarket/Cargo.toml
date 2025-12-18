@@ -34,4 +34,5 @@ hex = "0.4"
 rand = "0.8"
 base64 = "0.22"
 dashmap = "6"
+crossbeam-channel = "0.5"
 ureq = { version = "2.9", features = ["json"] }

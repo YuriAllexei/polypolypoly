@@ -12,10 +12,11 @@ use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::config::UpOrDownConfig;
 use crate::infrastructure::{
     build_ws_client, handle_client_event, spawn_oracle_trackers, MarketTrackerConfig, OracleType,
-    SharedOraclePrices, SharedOrderbooks,
+    SharedOraclePrices, SharedOrderbooks, SharedPrecisions, TickSizeChangeEvent,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
+use crossbeam_channel::unbounded;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -459,11 +460,21 @@ async fn place_order(
     outcome_name: &str,
     elapsed: f64,
     ctx: &MarketTrackerContext,
+    precisions: &SharedPrecisions,
 ) -> Option<String> {
     let dynamic_threshold = calculate_dynamic_threshold(ctx);
     log_placing_order(ctx, token_id, outcome_name, elapsed, dynamic_threshold);
 
-    match trading.buy(token_id, 0.99, 18.0).await {
+    // Get precision for this token (default to 2)
+    let precision = {
+        let precs = precisions.read().unwrap();
+        *precs.get(token_id).unwrap_or(&2)
+    };
+
+    // Calculate price: 0.99 for precision 2, 0.999 for precision 3, etc.
+    let price = 1.0 - 10_f64.powi(-(precision as i32));
+
+    match trading.buy(token_id, price, 18.0).await {
         Ok(response) => {
             log_order_success(ctx, token_id, outcome_name, &response);
             response.order_id
@@ -1332,12 +1343,19 @@ impl UpOrDownStrategy {
                 sleep(StdDuration::from_secs(2)).await;
             }
 
-            // Create shared orderbooks and connect WebSocket
+            // Create shared orderbooks, precisions, and connect WebSocket
             let orderbooks: SharedOrderbooks = Arc::new(std::sync::RwLock::new(HashMap::new()));
+            let precisions: SharedPrecisions = Arc::new(std::sync::RwLock::new(HashMap::new()));
             let first_snapshot_received = Arc::new(AtomicBool::new(false));
+
+            // Create channel for tick_size_change events
+            let (tick_size_tx, tick_size_rx) = unbounded::<TickSizeChangeEvent>();
+
             let client = match build_ws_client(
                 &ws_config,
                 Arc::clone(&orderbooks),
+                Arc::clone(&precisions),
+                Some(tick_size_tx),
                 Arc::clone(&first_snapshot_received),
             )
             .await
@@ -1422,6 +1440,17 @@ impl UpOrDownStrategy {
                     }
                 }
 
+                // Handle tick_size_change events from the channel
+                while let Ok(event) = tick_size_rx.try_recv() {
+                    info!(
+                        "[WS {}] Tick size changed for {}: {} -> {} (detected in main loop)",
+                        ctx.market_id,
+                        ctx.get_outcome_name(&event.asset_id),
+                        event.old_tick_size,
+                        event.new_tick_size
+                    );
+                }
+
                 // Check for stale orderbooks (WebSocket may have silently disconnected)
                 // But only if we've seen updates since connecting - inactive markets shouldn't trigger staleness
                 let (is_stale, market_has_activity) = {
@@ -1500,7 +1529,7 @@ impl UpOrDownStrategy {
                     info!("[WS {}] Bid Liquidity: Top: {} | At $0.99: {:.2}", ctx.market_id, top_bid_str, liq_at_99);
 
                     if let Some(order_id) =
-                        place_order(&trading, &token_id, &outcome_name, elapsed, &ctx).await
+                        place_order(&trading, &token_id, &outcome_name, elapsed, &ctx, &precisions).await
                     {
                         state.order_placed.insert(token_id, order_id);
                     }

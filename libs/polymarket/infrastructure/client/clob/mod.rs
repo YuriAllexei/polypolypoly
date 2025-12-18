@@ -28,8 +28,10 @@ pub use hypersockets::WebSocketClient;
 pub use order_builder::{Order, OrderBuilder, SignedOrder};
 pub use rest::RestClient;
 pub use sniper_ws::{
-    build_ws_client, handle_client_event, MarketTrackerConfig, SharedOrderbooks, SniperHandler,
-    SniperRoute, SniperRouter,
+    build_ws_client, decimal_places, handle_client_event, max_precision_in_levels,
+    MarketTrackerConfig, SharedOrderbooks, SharedPrecisions, SniperHandler, SniperRoute,
+    SniperRouter,
 };
+pub use sniper_ws_types::TickSizeChangeEvent;
 pub use trading::{TradingClient, TradingError};
 pub use types::*;
