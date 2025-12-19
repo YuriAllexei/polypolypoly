@@ -111,6 +111,26 @@ impl MarketTrackerContext {
 }
 
 // =============================================================================
+// Order Info
+// =============================================================================
+
+#[derive(Debug, Clone)]
+pub struct OrderInfo {
+    pub order_id: String,
+    pub precision: u8,
+}
+
+impl OrderInfo {
+    pub fn new(order_id: String, precision: u8) -> Self {
+        Self { order_id, precision }
+    }
+
+    pub fn is_high_confidence(&self) -> bool {
+        self.precision >= 3
+    }
+}
+
+// =============================================================================
 // Tracker State
 // =============================================================================
 
@@ -120,8 +140,8 @@ pub struct TrackerState {
     pub no_asks_timers: HashMap<String, Instant>,
     /// Tokens that have exceeded the no-asks threshold
     pub threshold_triggered: HashSet<String>,
-    /// Orders placed: token_id -> order_id (for cancellation tracking)
-    pub order_placed: HashMap<String, String>,
+    /// Orders placed: token_id -> (order_id, precision)
+    pub order_placed: HashMap<String, OrderInfo>,
 }
 
 impl TrackerState {
@@ -136,7 +156,17 @@ impl TrackerState {
 
     /// Get all order IDs for cancellation
     pub fn get_order_ids(&self) -> Vec<String> {
-        self.order_placed.values().cloned().collect()
+        self.order_placed
+            .values()
+            .map(|info| info.order_id.clone())
+            .collect()
+    }
+
+    /// Check if any placed order is at high-confidence price ($0.999+)
+    pub fn has_high_confidence_order(&self) -> bool {
+        self.order_placed
+            .values()
+            .any(|info| info.is_high_confidence())
     }
 
     /// Clear timer state (used on reconnection)

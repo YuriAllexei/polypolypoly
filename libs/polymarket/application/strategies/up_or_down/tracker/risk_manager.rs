@@ -184,8 +184,8 @@ pub async fn check_risk(
         );
 
         // Cancel only this token's order
-        if let Some(order_id) = state.order_placed.remove(&token_id) {
-            cancel_order(trading, &order_id, &token_id, ctx).await;
+        if let Some(order_info) = state.order_placed.remove(&token_id) {
+            cancel_order(trading, &order_info.order_id, &token_id, ctx).await;
         }
     }
 
@@ -198,7 +198,7 @@ pub async fn check_risk(
 
 /// Place a buy order for a token.
 ///
-/// Returns the order_id if successful, None if failed.
+/// Returns (order_id, precision) if successful, None if failed.
 pub async fn place_order(
     trading: &TradingClient,
     token_id: &str,
@@ -207,7 +207,7 @@ pub async fn place_order(
     ctx: &MarketTrackerContext,
     precisions: &SharedPrecisions,
     balance_manager: &Arc<RwLock<BalanceManager>>,
-) -> Option<String> {
+) -> Option<(String, u8)> {
     let dynamic_threshold = calculate_dynamic_threshold(ctx);
     log_placing_order(ctx, token_id, outcome_name, elapsed, dynamic_threshold);
 
@@ -234,7 +234,7 @@ pub async fn place_order(
     match trading.buy(token_id, price, order_size).await {
         Ok(response) => {
             log_order_success(ctx, token_id, outcome_name, &response);
-            response.order_id
+            response.order_id.map(|id| (id, precision))
         }
         Err(e) => {
             log_order_failed(ctx, token_id, outcome_name, &e);

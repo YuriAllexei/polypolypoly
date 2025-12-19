@@ -7,8 +7,8 @@ use crate::application::strategies::up_or_down::tracker::{
     check_all_orderbooks, check_risk, place_order, pre_order_risk_check,
 };
 use crate::application::strategies::up_or_down::types::{
-    MarketTrackerContext, TrackerState, TrackingLoopExit, STALENESS_THRESHOLD_SECS,
-    MAX_RECONNECT_ATTEMPTS,
+    MarketTrackerContext, OrderInfo, TrackerState, TrackingLoopExit, MAX_RECONNECT_ATTEMPTS,
+    STALENESS_THRESHOLD_SECS,
 };
 use crate::domain::DbMarket;
 use crate::infrastructure::client::clob::TradingClient;
@@ -324,10 +324,10 @@ async fn run_tracking_loop(
             break TrackingLoopExit::Shutdown;
         }
 
-        // Check if market resolution time has passed
-        if Utc::now() > ctx.market_end_time {
+        // Check if market resolved: time passed AND we have high-confidence order ($0.999+)
+        if Utc::now() > ctx.market_end_time && state.has_high_confidence_order() {
             info!(
-                "[WS {}] Market resolution time passed ({}), stopping tracker",
+                "[WS {}] Market resolved: time passed ({}) with $0.999+ order placed",
                 ctx.market_id,
                 ctx.market_end_time.format("%Y-%m-%d %H:%M:%S UTC")
             );
@@ -489,10 +489,10 @@ async fn process_order_candidates(
         }
 
         // Place the order
-        if let Some(order_id) =
+        if let Some((order_id, precision)) =
             place_order(trading, &token_id, &outcome_name, elapsed, ctx, precisions, balance_manager).await
         {
-            state.order_placed.insert(token_id, order_id);
+            state.order_placed.insert(token_id, OrderInfo::new(order_id, precision));
         }
     }
 }

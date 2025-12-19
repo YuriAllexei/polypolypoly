@@ -8,5 +8,5 @@ pub use market_metadata::{
     STALENESS_THRESHOLD_SECS,
 };
 pub use tracker::{
-    MarketTrackerContext, OrderbookCheckResult, TrackerState, TrackingLoopExit,
+    MarketTrackerContext, OrderbookCheckResult, OrderInfo, TrackerState, TrackingLoopExit,
 };
