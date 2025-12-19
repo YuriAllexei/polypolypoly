@@ -35,6 +35,8 @@ pub struct MarketTrackerContext {
     pub price_to_beat: Option<f64>,
     /// Oracle price difference threshold in basis points
     pub oracle_bps_price_threshold: f64,
+    /// Percentage of collateral to use per order
+    pub order_pct_of_collateral: f64,
 }
 
 impl MarketTrackerContext {
@@ -82,6 +84,7 @@ impl MarketTrackerContext {
             threshold_tau: config.threshold_tau,
             price_to_beat: None,
             oracle_bps_price_threshold: config.oracle_bps_price_threshold,
+            order_pct_of_collateral: config.order_pct_of_collateral,
         })
     }
 

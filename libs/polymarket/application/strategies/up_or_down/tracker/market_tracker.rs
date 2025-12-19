@@ -14,14 +14,14 @@ use crate::domain::DbMarket;
 use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::config::UpOrDownConfig;
 use crate::infrastructure::{
-    build_ws_client, handle_client_event, MarketTrackerConfig, SharedOraclePrices,
+    build_ws_client, handle_client_event, BalanceManager, MarketTrackerConfig, SharedOraclePrices,
     SharedOrderbooks, SharedPrecisions, TickSizeChangeEvent,
 };
 use chrono::Utc;
 use crossbeam_channel::{unbounded, Receiver};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration as StdDuration, Instant};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -63,6 +63,7 @@ pub async fn run_market_tracker(
     config: UpOrDownConfig,
     trading: Arc<TradingClient>,
     oracle_prices: Option<SharedOraclePrices>,
+    balance_manager: Arc<RwLock<BalanceManager>>,
 ) -> anyhow::Result<()> {
     // Initialize context and state
     let outcomes = market.parse_outcomes()?;
@@ -152,6 +153,7 @@ pub async fn run_market_tracker(
             &shutdown_flag,
             &oracle_prices,
             &trading,
+            &balance_manager,
         )
         .await;
 
@@ -310,6 +312,7 @@ async fn run_tracking_loop(
     shutdown_flag: &Arc<AtomicBool>,
     oracle_prices: &Option<SharedOraclePrices>,
     trading: &Arc<TradingClient>,
+    balance_manager: &Arc<RwLock<BalanceManager>>,
 ) -> (TrackingLoopExit, Instant) {
     let connection_start = Instant::now();
     let mut seen_updates_since_connect = false;
@@ -380,6 +383,7 @@ async fn run_tracking_loop(
             ctx,
             oracle_prices,
             trading,
+            balance_manager,
         )
         .await;
 
@@ -438,6 +442,7 @@ async fn process_order_candidates(
     ctx: &MarketTrackerContext,
     oracle_prices: &Option<SharedOraclePrices>,
     trading: &Arc<TradingClient>,
+    balance_manager: &Arc<RwLock<BalanceManager>>,
 ) {
     for (token_id, outcome_name, elapsed) in tokens_to_order {
         // Re-check orderbook and capture liquidity before placing order
@@ -485,7 +490,7 @@ async fn process_order_candidates(
 
         // Place the order
         if let Some(order_id) =
-            place_order(trading, &token_id, &outcome_name, elapsed, ctx, precisions).await
+            place_order(trading, &token_id, &outcome_name, elapsed, ctx, precisions, balance_manager).await
         {
             state.order_placed.insert(token_id, order_id);
         }

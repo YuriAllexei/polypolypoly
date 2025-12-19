@@ -223,6 +223,7 @@ impl UpOrDownStrategy {
             let config = self.config.clone();
             let trading = Arc::clone(&ctx.trading);
             let oracle_prices = self.oracle_prices.clone();
+            let balance_manager = Arc::clone(&ctx.balance_manager);
 
             info!(
                 "[Tracker] Spawning WebSocket tracker for market {}",
@@ -231,8 +232,15 @@ impl UpOrDownStrategy {
 
             // Spawn the tracker task
             let handle = tokio::spawn(async move {
-                match run_market_tracker(market, shutdown_flag, config, trading, oracle_prices)
-                    .await
+                match run_market_tracker(
+                    market,
+                    shutdown_flag,
+                    config,
+                    trading,
+                    oracle_prices,
+                    balance_manager,
+                )
+                .await
                 {
                     Ok(()) => {}
                     Err(e) => {

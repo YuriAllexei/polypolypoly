@@ -9,8 +9,9 @@ use crate::application::strategies::up_or_down::services::{
 use crate::application::strategies::up_or_down::tracker::calculate_dynamic_threshold;
 use crate::application::strategies::up_or_down::types::{MarketTrackerContext, TrackerState};
 use crate::infrastructure::client::clob::TradingClient;
-use crate::infrastructure::{SharedOraclePrices, SharedOrderbooks, SharedPrecisions};
+use crate::infrastructure::{BalanceManager, SharedOraclePrices, SharedOrderbooks, SharedPrecisions};
 use chrono::Utc;
+use std::sync::{Arc, RwLock};
 use tracing::{debug, error, info, warn};
 
 // =============================================================================
@@ -205,6 +206,7 @@ pub async fn place_order(
     elapsed: f64,
     ctx: &MarketTrackerContext,
     precisions: &SharedPrecisions,
+    balance_manager: &Arc<RwLock<BalanceManager>>,
 ) -> Option<String> {
     let dynamic_threshold = calculate_dynamic_threshold(ctx);
     log_placing_order(ctx, token_id, outcome_name, elapsed, dynamic_threshold);
@@ -218,7 +220,18 @@ pub async fn place_order(
     // Calculate price: 0.99 for precision 2, 0.999 for precision 3, etc.
     let price = 1.0 - 10_f64.powi(-(precision as i32));
 
-    match trading.buy(token_id, price, 18.0).await {
+    // Calculate order size from current balance
+    let current_balance = balance_manager.read().unwrap().current_balance();
+    let order_size = (current_balance * ctx.order_pct_of_collateral).round();
+    // Ensure minimum order size of 1
+    let order_size = order_size.max(1.0);
+
+    info!(
+        "[WS {}] Order size: ${:.0} ({:.0}% of ${:.2} balance)",
+        ctx.market_id, order_size, ctx.order_pct_of_collateral * 100.0, current_balance
+    );
+
+    match trading.buy(token_id, price, order_size).await {
         Ok(response) => {
             log_order_success(ctx, token_id, outcome_name, &response);
             response.order_id

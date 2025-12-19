@@ -4,23 +4,31 @@
 # Log level: error, warn, info, debug, trace
 log_level: "info"
 
+# Component settings (shared infrastructure)
+components:
+  balance_manager:
+    # Halt threshold as fraction (0.10 = halt if balance drops below 10% of peak)
+    threshold: 0.10
+
 # Up or Down strategy settings
 up_or_down:
   # Time window in seconds before market ends to trigger alert
-  delta_t_seconds: 300
+  delta_t_seconds: 700
+  # Fraction of collateral to use per order (e.g., 0.10 = 10%)
+  order_pct_of_collateral: 0.10
   # How often to poll database for new markets (seconds)
-  poll_interval_secs: 60
+  poll_interval_secs: 0.2
   # Minimum price difference in basis points between oracle and market for trade signal
-  oracle_bps_price_threshold: 50.0
+  oracle_bps_price_threshold: 100.0
 
   # Dynamic threshold parameters (exponential decay based on time to market end)
   # Formula: threshold = min + (max - min) * (1 - exp(-time_remaining / tau))
   # Minimum threshold in seconds (when close to market end - more aggressive)
-  threshold_min: 0.5
+  threshold_min: 0.1
   # Maximum threshold in seconds (when far from market end - more conservative)
   threshold_max: 10.0
   # Decay time constant in seconds (controls how fast threshold decreases)
-  threshold_tau: 30.0
+  threshold_tau: 15.0
 
 # Sports Sniping strategy settings
 sports_sniping:

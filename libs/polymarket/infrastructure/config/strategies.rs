@@ -93,6 +93,14 @@ pub struct UpOrDownConfig {
     /// Decay time constant in seconds for exponential threshold decay
     #[serde(default = "default_threshold_tau")]
     pub threshold_tau: f64,
+
+    /// Fraction of collateral to use per order (e.g., 0.10 = 10%)
+    #[serde(default = "default_order_pct")]
+    pub order_pct_of_collateral: f64,
+}
+
+fn default_order_pct() -> f64 {
+    0.10 // 10% default
 }
 
 fn default_delta_t() -> f64 {
@@ -165,6 +173,7 @@ impl Default for UpOrDownConfig {
             threshold_min: default_threshold_min(),
             threshold_max: default_threshold_max(),
             threshold_tau: default_threshold_tau(),
+            order_pct_of_collateral: default_order_pct(),
         }
     }
 }
@@ -239,6 +248,10 @@ impl StrategiesConfig {
         info!(
             "  Threshold tau: {} seconds",
             self.up_or_down.threshold_tau
+        );
+        info!(
+            "  Order pct of collateral: {:.0}%",
+            self.up_or_down.order_pct_of_collateral * 100.0
         );
         info!("Sports Sniping Strategy:");
         info!(
