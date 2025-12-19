@@ -9,6 +9,7 @@ pub mod config;
 pub mod database;
 pub mod heartbeat;
 pub mod logging;
+pub mod position_manager;
 pub mod shutdown;
 
 // Re-export commonly used types from client
@@ -44,4 +45,5 @@ pub use config::{BotConfig, EventsConfig, SniperConfig};
 pub use balance_manager::BalanceManager;
 pub use heartbeat::Heartbeat;
 pub use logging::{init_tracing, init_tracing_with_level};
+pub use position_manager::PositionManager;
 pub use shutdown::ShutdownManager;

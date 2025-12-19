@@ -8,7 +8,8 @@
 
 use anyhow::{bail, Result};
 use polymarket::application::{
-    create_strategy, init_logging_with_level, BalanceManager, Strategy, StrategyContext, StrategyType,
+    create_strategy, init_logging_with_level, BalanceManager, PositionManager, Strategy,
+    StrategyContext, StrategyType,
 };
 use std::sync::RwLock;
 use polymarket::infrastructure::client::clob::TradingClient;
@@ -90,6 +91,11 @@ async fn main() -> Result<()> {
         .await?;
     let balance_manager = Arc::new(RwLock::new(balance_manager));
 
+    // Initialize position manager
+    info!("Initializing position manager...");
+    let mut position_manager = PositionManager::from_env()?;
+    position_manager.start(shutdown.flag());
+
     // Create strategy context
     let ctx = StrategyContext::new(database, shutdown.clone(), trading, balance_manager.clone());
 
@@ -113,6 +119,9 @@ async fn main() -> Result<()> {
 
     // Stop balance manager
     balance_manager.write().unwrap().stop().await;
+
+    // Stop position manager
+    position_manager.stop().await;
 
     print_shutdown(strategy.name());
     Ok(())

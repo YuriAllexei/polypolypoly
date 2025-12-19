@@ -23,5 +23,5 @@ pub use strategies::{
     StrategyType, UpOrDownStrategy,
 };
 
-// Re-export BalanceManager from infrastructure
-pub use crate::infrastructure::BalanceManager;
+// Re-export BalanceManager and PositionManager from infrastructure
+pub use crate::infrastructure::{BalanceManager, PositionManager};
