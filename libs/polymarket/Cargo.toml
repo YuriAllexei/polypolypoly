@@ -9,6 +9,10 @@ repository.workspace = true
 [lib]
 path = "mod.rs"
 
+[[bin]]
+name = "redeem-test"
+path = "bin/redeem_test.rs"
+
 [dependencies]
 # Workspace dependencies
 hypersockets = { workspace = true }

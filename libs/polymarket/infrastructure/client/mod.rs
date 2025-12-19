@@ -7,6 +7,7 @@ pub mod clob;
 pub mod data;
 pub mod gamma;
 pub mod oracle;
+pub mod redeem;
 pub mod sports;
 pub mod user;
 
@@ -17,3 +18,10 @@ pub use gamma::{GammaClient, GammaEvent, GammaMarket, GammaTag, GammaFilters};
 pub use oracle::{spawn_oracle_trackers, OraclePriceManager, SharedOraclePrices, OracleType, PriceEntry};
 pub use sports::{spawn_sports_live_data_tracker, SportsLiveData, SportsLiveDataMessage, SportsRoute};
 pub use user::{spawn_user_order_tracker, OrderManager, SharedOrderManager, OrderState, OrderStatus, TradeState};
+pub use redeem::{
+    RedeemClient, RedeemError, RedemptionResult,
+    create_signer_provider, fetch_redeemable_positions,
+    redeem_all_positions, redeem_single, redeem_all,
+    redeem_via_safe,
+    POLYGON_RPC_URL, POLYGON_CHAIN_ID,
+};
