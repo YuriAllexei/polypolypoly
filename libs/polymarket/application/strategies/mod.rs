@@ -2,14 +2,14 @@
 //!
 //! Pluggable strategy system for the market sniper.
 
+pub mod sports_sniping;
 pub mod traits;
 pub mod up_or_down;
-pub mod sports_sniping;
 
 // Re-exports
+pub use sports_sniping::SportsSnipingStrategy;
 pub use traits::{Strategy, StrategyContext, StrategyError, StrategyResult};
 pub use up_or_down::UpOrDownStrategy;
-pub use sports_sniping::SportsSnipingStrategy;
 
 use crate::infrastructure::config::StrategiesConfig;
 

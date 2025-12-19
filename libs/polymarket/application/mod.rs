@@ -19,6 +19,9 @@ pub use sync::{EventSyncService, MarketSyncService};
 
 // Re-export pluggable strategies system
 pub use strategies::{
-    create_strategy, Strategy, StrategyContext, StrategyError, StrategyResult, StrategyType,
-    UpOrDownStrategy,
+    create_strategy, Strategy, StrategyContext, StrategyError, StrategyResult,
+    StrategyType, UpOrDownStrategy,
 };
+
+// Re-export BalanceManager from infrastructure
+pub use crate::infrastructure::BalanceManager;

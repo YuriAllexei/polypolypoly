@@ -8,8 +8,9 @@
 
 use anyhow::{bail, Result};
 use polymarket::application::{
-    create_strategy, init_logging_with_level, Strategy, StrategyContext, StrategyType,
+    create_strategy, init_logging_with_level, BalanceManager, Strategy, StrategyContext, StrategyType,
 };
+use std::sync::RwLock;
 use polymarket::infrastructure::client::clob::TradingClient;
 use polymarket::infrastructure::config::StrategiesConfig;
 use polymarket::infrastructure::database::MarketDatabase;
@@ -81,8 +82,16 @@ async fn main() -> Result<()> {
         trading.maker_address()
     );
 
+    // Initialize balance manager with configured threshold
+    info!("Initializing balance manager...");
+    let mut balance_manager = BalanceManager::new(config.components.balance_manager.threshold);
+    balance_manager
+        .start(Arc::clone(&trading), shutdown.flag())
+        .await?;
+    let balance_manager = Arc::new(RwLock::new(balance_manager));
+
     // Create strategy context
-    let ctx = StrategyContext::new(database, shutdown.clone(), trading);
+    let ctx = StrategyContext::new(database, shutdown.clone(), trading, balance_manager.clone());
 
     // Run strategy lifecycle
     info!("Initializing strategy: {}", strategy.name());
@@ -101,6 +110,9 @@ async fn main() -> Result<()> {
     if let Err(e) = strategy.stop().await {
         error!("Strategy stop failed: {}", e);
     }
+
+    // Stop balance manager
+    balance_manager.write().unwrap().stop().await;
 
     print_shutdown(strategy.name());
     Ok(())

@@ -2,12 +2,13 @@
 //!
 //! Defines the contract that all sniper strategies must implement.
 
+use crate::infrastructure::BalanceManager;
 use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::database::{DatabaseError, MarketDatabase};
 use crate::infrastructure::shutdown::ShutdownManager;
 use async_trait::async_trait;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
 /// Result type for strategy operations
@@ -39,6 +40,8 @@ pub struct StrategyContext {
     pub shutdown: Arc<ShutdownManager>,
     /// Trading client for order placement
     pub trading: Arc<TradingClient>,
+    /// Balance manager for monitoring and halt control
+    pub balance_manager: Arc<RwLock<BalanceManager>>,
 }
 
 impl StrategyContext {
@@ -46,18 +49,25 @@ impl StrategyContext {
         database: Arc<MarketDatabase>,
         shutdown: Arc<ShutdownManager>,
         trading: Arc<TradingClient>,
+        balance_manager: Arc<RwLock<BalanceManager>>,
     ) -> Self {
         Self {
             database,
             shutdown_flag: shutdown.flag(),
             shutdown,
             trading,
+            balance_manager,
         }
     }
 
     /// Check if the strategy should continue running
     pub fn is_running(&self) -> bool {
         self.shutdown.is_running()
+    }
+
+    /// Check if trading is halted due to balance drop
+    pub fn is_trading_halted(&self) -> bool {
+        self.balance_manager.read().unwrap().is_halted()
     }
 }
 

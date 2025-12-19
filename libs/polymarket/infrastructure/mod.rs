@@ -3,6 +3,7 @@
 //! Contains implementations of external interfaces (database, API clients, etc.)
 //! This layer depends on the domain layer but not on the application layer.
 
+pub mod balance_manager;
 pub mod client;
 pub mod config;
 pub mod database;
@@ -40,6 +41,7 @@ pub use database::{DatabaseError, MarketDatabase, Result};
 pub use config::{BotConfig, EventsConfig, SniperConfig};
 
 // Re-export infrastructure services
+pub use balance_manager::BalanceManager;
 pub use heartbeat::Heartbeat;
 pub use logging::{init_tracing, init_tracing_with_level};
 pub use shutdown::ShutdownManager;

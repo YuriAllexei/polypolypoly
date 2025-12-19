@@ -30,7 +30,7 @@ use super::super::auth::PolymarketAuth;
 use super::order_builder::OrderBuilder;
 use super::rest::{RestClient, RestError};
 use super::types::{
-    ApiCredentials, BalanceAllowance, BalanceAllowanceParams, CancelResponse, OpenOrder,
+    ApiCredentials, AssetType, BalanceAllowance, BalanceAllowanceParams, CancelResponse, OpenOrder,
     OpenOrderParams, OrderPlacementResponse, OrderType, Side, Trade, TradeParams,
 };
 use super::POLYGON_CHAIN_ID;
@@ -440,6 +440,22 @@ impl TradingClient {
             .get_balance_allowance(&self.auth, params)
             .await
             .map_err(TradingError::from)
+    }
+
+    /// Get USDC balance as a human-readable float
+    ///
+    /// Fetches the collateral balance and converts from raw units (6 decimals) to USD.
+    pub async fn get_usd_balance(&self) -> Result<f64> {
+        let params = BalanceAllowanceParams {
+            asset_type: Some(AssetType::Collateral),
+            token_id: None,
+            signature_type: Some(2), // POLY_GNOSIS_SAFE for proxy wallets
+        };
+        let balance = self.get_balance_allowance(Some(&params)).await?;
+
+        // Parse balance string and divide by 1_000_000 (USDC has 6 decimals)
+        let raw_balance: f64 = balance.balance.parse().unwrap_or(0.0);
+        Ok(raw_balance / 1_000_000.0)
     }
 }
 

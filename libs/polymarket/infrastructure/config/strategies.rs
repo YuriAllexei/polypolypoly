@@ -14,6 +14,10 @@ pub struct StrategiesConfig {
     #[serde(default = "default_log_level")]
     pub log_level: String,
 
+    /// Components configuration (shared infrastructure)
+    #[serde(default)]
+    pub components: ComponentsConfig,
+
     /// Up or Down strategy configuration
     #[serde(default)]
     pub up_or_down: UpOrDownConfig,
@@ -21,6 +25,42 @@ pub struct StrategiesConfig {
     /// Sports Sniping strategy configuration
     #[serde(default)]
     pub sports_sniping: SportsSnipingConfig,
+}
+
+/// Components configuration (shared infrastructure)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentsConfig {
+    /// Balance manager configuration
+    #[serde(default)]
+    pub balance_manager: BalanceManagerConfig,
+}
+
+impl Default for ComponentsConfig {
+    fn default() -> Self {
+        Self {
+            balance_manager: BalanceManagerConfig::default(),
+        }
+    }
+}
+
+/// Balance manager configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalanceManagerConfig {
+    /// Halt threshold as fraction (e.g., 0.10 = 10% of peak)
+    #[serde(default = "default_balance_threshold")]
+    pub threshold: f64,
+}
+
+fn default_balance_threshold() -> f64 {
+    0.10 // 10%
+}
+
+impl Default for BalanceManagerConfig {
+    fn default() -> Self {
+        Self {
+            threshold: default_balance_threshold(),
+        }
+    }
 }
 
 fn default_log_level() -> String {
@@ -133,6 +173,7 @@ impl Default for StrategiesConfig {
     fn default() -> Self {
         Self {
             log_level: default_log_level(),
+            components: ComponentsConfig::default(),
             up_or_down: UpOrDownConfig::default(),
             sports_sniping: SportsSnipingConfig::default(),
         }
@@ -172,6 +213,11 @@ impl StrategiesConfig {
     pub fn log(&self) {
         info!("Strategies Configuration:");
         info!("  Log level: {}", self.log_level);
+        info!("Components:");
+        info!(
+            "  Balance manager threshold: {:.0}%",
+            self.components.balance_manager.threshold * 100.0
+        );
         info!("Up or Down Strategy:");
         info!("  Delta T: {} seconds", self.up_or_down.delta_t_seconds);
         info!(
