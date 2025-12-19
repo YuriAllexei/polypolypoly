@@ -302,6 +302,7 @@ impl Strategy for SportsSnipingStrategy {
         let fetched_games = Arc::clone(&self.fetched_games);
         let markets_cache = Arc::clone(&self.markets_cache);
         let database = Arc::clone(&ctx.database);
+        let runtime_handle = tokio::runtime::Handle::current();
 
         let task = tokio::spawn(async move {
             if let Err(e) = spawn_sports_tracker_with_state(
@@ -309,6 +310,7 @@ impl Strategy for SportsSnipingStrategy {
                 fetched_games,
                 markets_cache,
                 database,
+                runtime_handle,
                 Some(ft_tx),
             )
             .await

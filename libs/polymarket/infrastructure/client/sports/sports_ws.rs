@@ -128,6 +128,8 @@ pub struct SportsLiveDataStateHandler {
     markets_cache: MarketsByGame,
     /// Database access for fetching markets
     database: Arc<MarketDatabase>,
+    /// Tokio runtime handle for blocking async calls
+    runtime_handle: tokio::runtime::Handle,
     /// Optional channel to forward Full Time events to main loop
     ft_tx: Option<Sender<FullTimeEvent>>,
     /// Track which games we've already sent FT events for (prevent duplicates)
@@ -139,12 +141,14 @@ impl SportsLiveDataStateHandler {
         fetched_games: FetchedGames,
         markets_cache: MarketsByGame,
         database: Arc<MarketDatabase>,
+        runtime_handle: tokio::runtime::Handle,
         ft_tx: Option<Sender<FullTimeEvent>>,
     ) -> Self {
         Self {
             fetched_games,
             markets_cache,
             database,
+            runtime_handle,
             ft_tx,
             ft_sent: HashSet::new(),
         }
@@ -169,13 +173,17 @@ impl MessageHandler<SportsLiveDataMessage> for SportsLiveDataStateHandler {
             if !self.fetched_games.contains(&game_id) {
                 // Use blocking runtime to call async DB method
                 let db = Arc::clone(&self.database);
-                let markets = tokio::runtime::Handle::current().block_on(async move {
-                    db.get_markets_by_game_id(game_id).await
-                });
+                let markets = self
+                    .runtime_handle
+                    .block_on(async move { db.get_markets_by_game_id(game_id).await });
 
                 match markets {
                     Ok(m) => {
-                        debug!(game_id = game_id, count = m.len(), "Fetched markets for game");
+                        debug!(
+                            game_id = game_id,
+                            count = m.len(),
+                            "Fetched markets for game"
+                        );
                         self.markets_cache.insert(game_id, m);
                     }
                     Err(e) => {
@@ -188,6 +196,17 @@ impl MessageHandler<SportsLiveDataMessage> for SportsLiveDataStateHandler {
             // Check for Full Time and send event if not already sent
             let is_ft = data.period == "FT" || data.period == "VFT";
             if is_ft && !self.ft_sent.contains(&game_id) {
+                info!(
+                    game_id = game_id,
+                    league = %data.league_abbreviation,
+                    home = data.home_team.as_deref().unwrap_or("?"),
+                    away = data.away_team.as_deref().unwrap_or("?"),
+                    score = %data.score,
+                    period = %data.period,
+                    status = data.status.as_deref().unwrap_or("?"),
+                    "Game reached Full Time/Virtually Full Time"
+                );
+
                 if let Some(ref tx) = self.ft_tx {
                     let event = FullTimeEvent {
                         game_id,
@@ -203,17 +222,17 @@ impl MessageHandler<SportsLiveDataMessage> for SportsLiveDataStateHandler {
                 self.ft_sent.insert(game_id);
             }
 
-            debug!(
-                game_id = game_id,
-                league = %data.league_abbreviation,
-                home = data.home_team.as_deref().unwrap_or("?"),
-                away = data.away_team.as_deref().unwrap_or("?"),
-                score = %data.score,
-                period = %data.period,
-                status = data.status.as_deref().unwrap_or("?"),
-                live = data.live,
-                "Game update"
-            );
+            // debug!(
+            //     game_id = game_id,
+            //     league = %data.league_abbreviation,
+            //     home = data.home_team.as_deref().unwrap_or("?"),
+            //     away = data.away_team.as_deref().unwrap_or("?"),
+            //     score = %data.score,
+            //     period = %data.period,
+            //     status = data.status.as_deref().unwrap_or("?"),
+            //     live = data.live,
+            //     "Game update"
+            // );
         }
         Ok(())
     }
@@ -256,17 +275,25 @@ async fn build_sports_ws_client(
 /// * `fetched_games` - Shared set tracking which games have had markets fetched
 /// * `markets_cache` - Shared cache of markets per game_id
 /// * `database` - Database access for fetching markets
+/// * `runtime_handle` - Tokio runtime handle for blocking async calls in sync handler
 /// * `ft_tx` - Optional channel sender for forwarding Full Time events to main loop
 async fn build_sports_ws_client_with_state(
     fetched_games: FetchedGames,
     markets_cache: MarketsByGame,
     database: Arc<MarketDatabase>,
+    runtime_handle: tokio::runtime::Handle,
     ft_tx: Option<Sender<FullTimeEvent>>,
 ) -> Result<WebSocketClient<SportsLiveDataRouter, SportsLiveDataMessage>> {
     let local_shutdown_flag = Arc::new(AtomicBool::new(true));
 
     let router = SportsLiveDataRouter::new();
-    let handler = SportsLiveDataStateHandler::new(fetched_games, markets_cache, database, ft_tx);
+    let handler = SportsLiveDataStateHandler::new(
+        fetched_games,
+        markets_cache,
+        database,
+        runtime_handle,
+        ft_tx,
+    );
 
     let client = WebSocketClientBuilder::new()
         .url(SPORTS_WS_URL)
@@ -361,12 +388,14 @@ pub async fn spawn_sports_live_data_tracker(shutdown_flag: Arc<AtomicBool>) -> R
 /// * `fetched_games` - Shared set tracking which games have had markets fetched
 /// * `markets_cache` - Shared cache of markets per game_id
 /// * `database` - Database access for fetching markets
+/// * `runtime_handle` - Tokio runtime handle for blocking async calls in sync handler
 /// * `ft_tx` - Optional channel sender for forwarding Full Time events to main loop
 pub async fn spawn_sports_tracker_with_state(
     shutdown_flag: Arc<AtomicBool>,
     fetched_games: FetchedGames,
     markets_cache: MarketsByGame,
     database: Arc<MarketDatabase>,
+    runtime_handle: tokio::runtime::Handle,
     ft_tx: Option<Sender<FullTimeEvent>>,
 ) -> Result<()> {
     info!("════════════════════════════════════════════════════════════════");
@@ -375,7 +404,14 @@ pub async fn spawn_sports_tracker_with_state(
     info!("  URL: {}", SPORTS_WS_URL);
     info!("════════════════════════════════════════════════════════════════");
 
-    let client = build_sports_ws_client_with_state(fetched_games, markets_cache, database, ft_tx).await?;
+    let client = build_sports_ws_client_with_state(
+        fetched_games,
+        markets_cache,
+        database,
+        runtime_handle,
+        ft_tx,
+    )
+    .await?;
     info!("[Sports WS] Connected and updating shared state");
 
     // Main tracking loop

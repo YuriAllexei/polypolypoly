@@ -72,16 +72,14 @@ impl UpOrDownStrategy {
         let now = Utc::now();
         markets
             .into_iter()
-            .filter(|m| {
-                match DateTime::parse_from_rfc3339(&m.end_date) {
-                    Ok(end_time) => end_time.with_timezone(&Utc) > now,
-                    Err(_) => {
-                        warn!(
-                            "Failed to parse end_date for market {}: {}",
-                            m.id, m.end_date
-                        );
-                        false
-                    }
+            .filter(|m| match DateTime::parse_from_rfc3339(&m.end_date) {
+                Ok(end_time) => end_time.with_timezone(&Utc) > now,
+                Err(_) => {
+                    warn!(
+                        "Failed to parse end_date for market {}: {}",
+                        m.id, m.end_date
+                    );
+                    false
                 }
             })
             .collect()
@@ -233,7 +231,8 @@ impl UpOrDownStrategy {
 
             // Spawn the tracker task
             let handle = tokio::spawn(async move {
-                match run_market_tracker(market, shutdown_flag, config, trading, oracle_prices).await
+                match run_market_tracker(market, shutdown_flag, config, trading, oracle_prices)
+                    .await
                 {
                     Ok(()) => {}
                     Err(e) => {
