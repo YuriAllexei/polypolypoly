@@ -224,6 +224,7 @@ impl UpOrDownStrategy {
             let trading = Arc::clone(&ctx.trading);
             let oracle_prices = self.oracle_prices.clone();
             let balance_manager = Arc::clone(&ctx.balance_manager);
+            let active_orders = Arc::clone(&ctx.active_orders);
 
             info!(
                 "[Tracker] Spawning WebSocket tracker for market {}",
@@ -239,6 +240,7 @@ impl UpOrDownStrategy {
                     trading,
                     oracle_prices,
                     balance_manager,
+                    active_orders,
                 )
                 .await
                 {

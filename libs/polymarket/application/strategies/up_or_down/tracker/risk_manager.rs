@@ -7,7 +7,7 @@ use crate::application::strategies::up_or_down::services::{
     get_oracle_price, log_order_failed, log_order_success, log_placing_order, log_risk_detected,
 };
 use crate::application::strategies::up_or_down::tracker::calculate_dynamic_threshold;
-use crate::application::strategies::up_or_down::types::{MarketTrackerContext, TrackerState};
+use crate::application::strategies::up_or_down::types::{MarketTrackerContext, OrderInfo, TrackerState};
 use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::{BalanceManager, SharedOraclePrices, SharedOrderbooks, SharedPrecisions};
 use chrono::Utc;
@@ -313,6 +313,72 @@ pub async fn cancel_orders(trading: &TradingClient, order_ids: &[String], ctx: &
         }
         Err(e) => {
             error!("[WS {}] ❌ Failed to cancel orders: {}", ctx.market_id, e);
+        }
+    }
+}
+
+// =============================================================================
+// Order Upgrade (Tick Size Change)
+// =============================================================================
+
+/// Upgrade an existing order when tick size changes to a higher precision.
+///
+/// This allows us to bid higher (e.g., $0.999 instead of $0.99) when the market
+/// allows more decimal places.
+///
+/// Returns the new OrderInfo if upgrade successful, None otherwise.
+pub async fn upgrade_order_on_tick_change(
+    trading: &TradingClient,
+    token_id: &str,
+    current_order: &OrderInfo,
+    new_precision: u8,
+    ctx: &MarketTrackerContext,
+    balance_manager: &Arc<RwLock<BalanceManager>>,
+) -> Option<OrderInfo> {
+    let outcome_name = ctx.get_outcome_name(token_id);
+
+    // Only upgrade if new precision is higher
+    if new_precision <= current_order.precision {
+        return None;
+    }
+
+    let old_price = 1.0 - 10_f64.powi(-(current_order.precision as i32));
+    let new_price = 1.0 - 10_f64.powi(-(new_precision as i32));
+
+    info!(
+        "[WS {}] Upgrading order for {}: ${:.3} -> ${:.4} (precision {} -> {})",
+        ctx.market_id, outcome_name, old_price, new_price, current_order.precision, new_precision
+    );
+
+    // Cancel existing order
+    cancel_order(trading, &current_order.order_id, token_id, ctx).await;
+
+    // Place new order at higher precision
+    let current_balance = balance_manager.read().unwrap().current_balance();
+    let order_size = (current_balance * ctx.order_pct_of_collateral).round().max(1.0);
+
+    match trading.buy(token_id, new_price, order_size).await {
+        Ok(response) => {
+            if let Some(order_id) = response.order_id {
+                info!(
+                    "[WS {}] Upgraded order placed for {}: {}",
+                    ctx.market_id, outcome_name, order_id
+                );
+                Some(OrderInfo::new(order_id, new_precision))
+            } else {
+                warn!(
+                    "[WS {}] Upgrade order placed but no order_id returned for {}",
+                    ctx.market_id, outcome_name
+                );
+                None
+            }
+        }
+        Err(e) => {
+            error!(
+                "[WS {}] Failed to place upgraded order for {}: {}",
+                ctx.market_id, outcome_name, e
+            );
+            None
         }
     }
 }

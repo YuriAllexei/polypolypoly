@@ -4,7 +4,7 @@
 
 use crate::application::strategies::up_or_down::services::{get_price_to_beat, log_market_ended};
 use crate::application::strategies::up_or_down::tracker::{
-    check_all_orderbooks, check_risk, place_order, pre_order_risk_check,
+    check_all_orderbooks, check_risk, place_order, pre_order_risk_check, upgrade_order_on_tick_change,
 };
 use crate::application::strategies::up_or_down::types::{
     MarketTrackerContext, OrderInfo, TrackerState, TrackingLoopExit, MAX_RECONNECT_ATTEMPTS,
@@ -14,8 +14,8 @@ use crate::domain::DbMarket;
 use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::config::UpOrDownConfig;
 use crate::infrastructure::{
-    build_ws_client, handle_client_event, BalanceManager, MarketTrackerConfig, SharedOraclePrices,
-    SharedOrderbooks, SharedPrecisions, TickSizeChangeEvent,
+    build_ws_client, decimal_places, handle_client_event, ActiveOrderManager, BalanceManager,
+    MarketTrackerConfig, SharedOraclePrices, SharedOrderbooks, SharedPrecisions, TickSizeChangeEvent,
 };
 use chrono::Utc;
 use crossbeam_channel::{unbounded, Receiver};
@@ -64,6 +64,7 @@ pub async fn run_market_tracker(
     trading: Arc<TradingClient>,
     oracle_prices: Option<SharedOraclePrices>,
     balance_manager: Arc<RwLock<BalanceManager>>,
+    active_orders: Arc<RwLock<ActiveOrderManager>>,
 ) -> anyhow::Result<()> {
     // Initialize context and state
     let outcomes = market.parse_outcomes()?;
@@ -154,6 +155,7 @@ pub async fn run_market_tracker(
             &oracle_prices,
             &trading,
             &balance_manager,
+            &active_orders,
         )
         .await;
 
@@ -313,6 +315,7 @@ async fn run_tracking_loop(
     oracle_prices: &Option<SharedOraclePrices>,
     trading: &Arc<TradingClient>,
     balance_manager: &Arc<RwLock<BalanceManager>>,
+    active_orders: &Arc<RwLock<ActiveOrderManager>>,
 ) -> (TrackingLoopExit, Instant) {
     let connection_start = Instant::now();
     let mut seen_updates_since_connect = false;
@@ -343,13 +346,58 @@ async fn run_tracking_loop(
 
         // Handle tick_size_change events
         while let Ok(event) = conn.tick_size_rx.try_recv() {
+            let new_precision = decimal_places(&event.new_tick_size);
             info!(
-                "[WS {}] Tick size changed for {}: {} -> {} (detected in main loop)",
+                "[WS {}] Tick size changed for {}: {} -> {} (precision: {})",
                 ctx.market_id,
                 ctx.get_outcome_name(&event.asset_id),
                 event.old_tick_size,
-                event.new_tick_size
+                event.new_tick_size,
+                new_precision
             );
+
+            // Check if we have an order for this token that could be upgraded
+            if let Some(current_order) = state.order_placed.get(&event.asset_id).cloned() {
+                // Verify order exists in OMS before attempting upgrade
+                let order_exists_in_oms = active_orders
+                    .read()
+                    .unwrap()
+                    .has_order(&current_order.order_id);
+
+                if !order_exists_in_oms {
+                    info!(
+                        "[WS {}] Order {} not found in OMS for {}, removing from local state",
+                        ctx.market_id,
+                        current_order.order_id,
+                        ctx.get_outcome_name(&event.asset_id)
+                    );
+                    state.order_placed.remove(&event.asset_id);
+                    continue;
+                }
+
+                if new_precision > current_order.precision {
+                    if let Some(new_order_info) = upgrade_order_on_tick_change(
+                        trading,
+                        &event.asset_id,
+                        &current_order,
+                        new_precision,
+                        ctx,
+                        balance_manager,
+                    )
+                    .await
+                    {
+                        state.order_placed.insert(event.asset_id.clone(), new_order_info);
+                    } else {
+                        // Upgrade failed - remove from tracking since old order was cancelled
+                        state.order_placed.remove(&event.asset_id);
+                        warn!(
+                            "[WS {}] Order upgrade failed for {}, removed from tracking",
+                            ctx.market_id,
+                            ctx.get_outcome_name(&event.asset_id)
+                        );
+                    }
+                }
+            }
         }
 
         // Check for stale orderbooks
@@ -477,8 +525,9 @@ async fn process_order_candidates(
             ctx.market_id, top_bid_str, liq_at_99
         );
 
-        // Pre-order risk check
-        if !pre_order_risk_check(ctx, oracle_prices) {
+        // Pre-order risk check (skip if market timer has ended - orderbooks still active after resolution)
+        let market_timer_ended = Utc::now() > ctx.market_end_time;
+        if !market_timer_ended && !pre_order_risk_check(ctx, oracle_prices) {
             info!(
                 "[WS {}] Skipping order for {} - pre-order risk check failed",
                 ctx.market_id, outcome_name
@@ -486,6 +535,12 @@ async fn process_order_candidates(
             state.threshold_triggered.remove(&token_id);
             state.no_asks_timers.remove(&token_id);
             continue;
+        }
+        if market_timer_ended {
+            info!(
+                "[WS {}] Market timer ended - bypassing pre-order risk check for {}",
+                ctx.market_id, outcome_name
+            );
         }
 
         // Place the order
