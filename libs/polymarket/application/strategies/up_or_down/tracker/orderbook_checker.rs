@@ -4,12 +4,12 @@
 
 use crate::application::strategies::up_or_down::services::log_no_asks_started;
 use crate::application::strategies::up_or_down::types::{
-    MarketTrackerContext, OrderbookCheckResult, TrackerState,
+    MarketTrackerContext, OrderbookCheckResult, TrackerState, FINAL_SECONDS_BYPASS,
 };
 use crate::infrastructure::SharedOrderbooks;
 use chrono::Utc;
 use std::time::Instant;
-use tracing::debug;
+use tracing::{debug, info};
 
 // =============================================================================
 // Dynamic Threshold Calculation
@@ -64,6 +64,27 @@ pub fn check_token_orderbook(
             );
         }
         return OrderbookCheckResult::HasAsks;
+    }
+
+    // Check if we're in final seconds - bypass all waits
+    let now = Utc::now();
+    let time_remaining = ctx
+        .market_end_time
+        .signed_duration_since(now)
+        .num_milliseconds() as f64
+        / 1000.0;
+    let in_final_seconds = time_remaining > 0.0 && time_remaining <= FINAL_SECONDS_BYPASS;
+
+    // If in final seconds and no order placed yet, immediately trigger
+    if in_final_seconds && !state.order_placed.contains_key(token_id) {
+        info!(
+            "[WS {}] Final {:.1}s - bypassing threshold wait for {}",
+            ctx.market_id, time_remaining, outcome_name
+        );
+        state.threshold_triggered.insert(token_id.to_string());
+        return OrderbookCheckResult::ThresholdExceeded {
+            elapsed_secs: 0.0,
+        };
     }
 
     // No asks - start timer if not running

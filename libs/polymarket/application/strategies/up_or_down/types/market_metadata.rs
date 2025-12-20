@@ -15,6 +15,9 @@ pub const STALENESS_THRESHOLD_SECS: f64 = 60.0;
 /// Maximum WebSocket reconnection attempts before giving up
 pub const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
+/// Seconds before market end when we bypass all risk checks and threshold waits
+pub const FINAL_SECONDS_BYPASS: f64 = 5.0;
+
 // =============================================================================
 // Oracle Source
 // =============================================================================

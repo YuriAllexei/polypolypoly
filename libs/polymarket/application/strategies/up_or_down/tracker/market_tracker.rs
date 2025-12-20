@@ -7,8 +7,8 @@ use crate::application::strategies::up_or_down::tracker::{
     check_all_orderbooks, check_risk, place_order, pre_order_risk_check, upgrade_order_on_tick_change,
 };
 use crate::application::strategies::up_or_down::types::{
-    MarketTrackerContext, OrderInfo, TrackerState, TrackingLoopExit, MAX_RECONNECT_ATTEMPTS,
-    STALENESS_THRESHOLD_SECS,
+    MarketTrackerContext, OrderInfo, TrackerState, TrackingLoopExit, FINAL_SECONDS_BYPASS,
+    MAX_RECONNECT_ATTEMPTS, STALENESS_THRESHOLD_SECS,
 };
 use crate::domain::DbMarket;
 use crate::infrastructure::client::clob::TradingClient;
@@ -525,9 +525,18 @@ async fn process_order_candidates(
             ctx.market_id, top_bid_str, liq_at_99
         );
 
-        // Pre-order risk check (skip if market timer has ended - orderbooks still active after resolution)
-        let market_timer_ended = Utc::now() > ctx.market_end_time;
-        if !market_timer_ended && !pre_order_risk_check(ctx, oracle_prices) {
+        // Pre-order risk check (skip if market timer ended OR in final seconds before end)
+        let now = Utc::now();
+        let time_remaining = ctx
+            .market_end_time
+            .signed_duration_since(now)
+            .num_milliseconds() as f64
+            / 1000.0;
+        let market_timer_ended = time_remaining <= 0.0;
+        let in_final_seconds = time_remaining > 0.0 && time_remaining <= FINAL_SECONDS_BYPASS;
+        let bypass_risk_check = market_timer_ended || in_final_seconds;
+
+        if !bypass_risk_check && !pre_order_risk_check(ctx, oracle_prices) {
             info!(
                 "[WS {}] Skipping order for {} - pre-order risk check failed",
                 ctx.market_id, outcome_name
@@ -536,10 +545,10 @@ async fn process_order_candidates(
             state.no_asks_timers.remove(&token_id);
             continue;
         }
-        if market_timer_ended {
+        if bypass_risk_check {
             info!(
-                "[WS {}] Market timer ended - bypassing pre-order risk check for {}",
-                ctx.market_id, outcome_name
+                "[WS {}] Bypassing pre-order risk check for {} (time remaining: {:.1}s)",
+                ctx.market_id, outcome_name, time_remaining
             );
         }
 

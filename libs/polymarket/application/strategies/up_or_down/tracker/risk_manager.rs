@@ -7,7 +7,9 @@ use crate::application::strategies::up_or_down::services::{
     get_oracle_price, log_order_failed, log_order_success, log_placing_order, log_risk_detected,
 };
 use crate::application::strategies::up_or_down::tracker::calculate_dynamic_threshold;
-use crate::application::strategies::up_or_down::types::{MarketTrackerContext, OrderInfo, TrackerState};
+use crate::application::strategies::up_or_down::types::{
+    MarketTrackerContext, OrderInfo, TrackerState, FINAL_SECONDS_BYPASS,
+};
 use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::{BalanceManager, SharedOraclePrices, SharedOrderbooks, SharedPrecisions};
 use chrono::Utc;
@@ -105,8 +107,17 @@ pub async fn check_risk(
         return false;
     }
 
-    // If market has ended, no point in checking risk
-    if Utc::now() > ctx.market_end_time {
+    // Skip risk check if market ended OR in final seconds before end
+    let now = Utc::now();
+    let time_remaining = ctx
+        .market_end_time
+        .signed_duration_since(now)
+        .num_milliseconds() as f64
+        / 1000.0;
+    let market_ended = time_remaining <= 0.0;
+    let in_final_seconds = time_remaining > 0.0 && time_remaining <= FINAL_SECONDS_BYPASS;
+
+    if market_ended || in_final_seconds {
         return false;
     }
 
