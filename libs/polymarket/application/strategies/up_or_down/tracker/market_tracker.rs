@@ -376,6 +376,15 @@ async fn run_tracking_loop(
                 }
 
                 if new_precision > current_order.precision {
+                    // Check if trading is halted
+                    if balance_manager.read().unwrap().is_halted() {
+                        info!(
+                            "[WS {}] Order upgrade blocked - trading halted",
+                            ctx.market_id
+                        );
+                        continue;
+                    }
+
                     if let Some(new_order_info) = upgrade_order_on_tick_change(
                         trading,
                         &event.asset_id,
@@ -550,6 +559,17 @@ async fn process_order_candidates(
                 "[WS {}] Bypassing pre-order risk check for {} (time remaining: {:.1}s)",
                 ctx.market_id, outcome_name, time_remaining
             );
+        }
+
+        // Check if trading is halted due to balance drop
+        if balance_manager.read().unwrap().is_halted() {
+            info!(
+                "[WS {}] Order blocked - trading halted due to balance drop",
+                ctx.market_id
+            );
+            state.threshold_triggered.remove(&token_id);
+            state.no_asks_timers.remove(&token_id);
+            continue;
         }
 
         // Place the order
