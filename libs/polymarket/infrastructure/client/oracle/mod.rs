@@ -28,5 +28,5 @@ mod types;
 pub use oracle_ws::{
     parse_binance_symbol, parse_chainlink_symbol, spawn_oracle_trackers, OracleRoute,
 };
-pub use price_manager::{OraclePriceManager, PriceEntry, SharedOraclePrices};
+pub use price_manager::{OracleHealthState, OraclePriceManager, PriceEntry, SharedOraclePrices};
 pub use types::{OracleMessage, OraclePricePayload, OraclePriceUpdate, OracleSubscription, OracleType};

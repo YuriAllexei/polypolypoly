@@ -9,7 +9,7 @@ use super::order_manager::{OrderManager, SharedOrderManager};
 use super::types::{OrderMessage, TradeMessage, UserMessage, UserSubscription};
 use anyhow::Result;
 use hypersockets::core::*;
-use hypersockets::{MessageHandler, MessageRouter, WsMessage};
+use hypersockets::{MessageHandler, MessageRouter, TextPongDetector, WsMessage};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -204,6 +204,10 @@ async fn build_ws_client(
     let subscription = config.subscription();
     let subscription_json = serde_json::to_string(&subscription)?;
 
+    // Create PONG detector for "PONG" text messages
+    // Timeout is 15s (3x heartbeat interval of 5s)
+    let pong_detector = Arc::new(TextPongDetector::new("PONG".to_string()));
+
     let client = WebSocketClientBuilder::new()
         .url(USER_WS_URL)
         .router(router, move |routing| {
@@ -213,6 +217,8 @@ async fn build_ws_client(
             Duration::from_secs(HEARTBEAT_INTERVAL_SECS),
             WsMessage::Text("PING".to_string()),
         )
+        .pong_detector(pong_detector)
+        .pong_timeout(Duration::from_secs(15))
         .subscription(WsMessage::Text(subscription_json))
         .shutdown_flag(local_shutdown_flag)
         .build()

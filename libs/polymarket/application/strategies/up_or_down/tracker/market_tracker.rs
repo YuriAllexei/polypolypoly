@@ -2,7 +2,9 @@
 //!
 //! Handles WebSocket connection, orderbook monitoring, and the main tracking loop.
 
-use crate::application::strategies::up_or_down::services::{get_price_to_beat, log_market_ended};
+use crate::application::strategies::up_or_down::services::{
+    get_market_oracle_age, get_price_to_beat, log_market_ended,
+};
 use crate::application::strategies::up_or_down::tracker::{
     check_all_orderbooks, check_risk, place_order, pre_order_risk_check, upgrade_order_on_tick_change,
 };
@@ -320,6 +322,7 @@ async fn run_tracking_loop(
 ) -> (TrackingLoopExit, Instant) {
     let connection_start = Instant::now();
     let mut seen_updates_since_connect = false;
+    let mut last_oracle_warning: Option<Instant> = None;
 
     let exit_reason = loop {
         // Check shutdown flag (highest priority)
@@ -424,6 +427,10 @@ async fn run_tracking_loop(
             break TrackingLoopExit::StaleOrderbook;
         }
 
+        // Check oracle health (logs warnings for stale data)
+        // Note: This just logs warnings - pre_order_risk_check blocks orders at 10s
+        check_oracle_health(oracle_prices, ctx, &mut last_oracle_warning);
+
         // Check orderbooks and get tokens needing orders
         let (tokens_to_order, all_empty) =
             check_all_orderbooks(&conn.orderbooks, state, ctx).await;
@@ -455,6 +462,56 @@ async fn run_tracking_loop(
     };
 
     (exit_reason, connection_start)
+}
+
+/// Oracle staleness warning threshold (seconds)
+const ORACLE_STALENESS_WARNING_SECS: u64 = 15;
+
+/// Oracle staleness critical threshold (seconds)
+const ORACLE_STALENESS_CRITICAL_SECS: u64 = 30;
+
+/// Check this market's specific oracle health and log warnings.
+///
+/// Returns true if oracle is healthy enough for trading, false if critically stale.
+fn check_oracle_health(
+    oracle_prices: &Option<SharedOraclePrices>,
+    ctx: &MarketTrackerContext,
+    last_oracle_warning: &mut Option<Instant>,
+) -> bool {
+    let Some(age) = get_market_oracle_age(oracle_prices, ctx.oracle_source) else {
+        // Unknown oracle source - skip health check
+        return true;
+    };
+
+    let age_secs = age.as_secs();
+
+    // Rate-limit warnings to once every 5 seconds
+    let should_log = match last_oracle_warning {
+        Some(last) => last.elapsed() > StdDuration::from_secs(5),
+        None => true,
+    };
+
+    if age_secs < ORACLE_STALENESS_WARNING_SECS {
+        return true; // Healthy
+    } else if age_secs < ORACLE_STALENESS_CRITICAL_SECS {
+        if should_log {
+            warn!(
+                "[WS {}] {} oracle STALE: {:.1}s since last update (warning threshold: {}s)",
+                ctx.market_id, ctx.oracle_source, age.as_secs_f64(), ORACLE_STALENESS_WARNING_SECS
+            );
+            *last_oracle_warning = Some(Instant::now());
+        }
+        return true; // Warning but allow trading (pre_order_risk_check will block)
+    } else {
+        if should_log {
+            error!(
+                "[WS {}] {} oracle CRITICAL: {:.1}s since last update - new orders blocked",
+                ctx.market_id, ctx.oracle_source, age.as_secs_f64()
+            );
+            *last_oracle_warning = Some(Instant::now());
+        }
+        return false; // Critical - block trading
+    }
 }
 
 /// Check if any orderbooks are stale (haven't received updates recently).

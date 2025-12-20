@@ -4,7 +4,8 @@
 //! and order cancellation.
 
 use crate::application::strategies::up_or_down::services::{
-    get_oracle_price, log_order_failed, log_order_success, log_placing_order, log_risk_detected,
+    get_market_oracle_age, get_oracle_price, is_market_oracle_fresh, log_order_failed,
+    log_order_success, log_placing_order, log_risk_detected,
 };
 use crate::application::strategies::up_or_down::tracker::calculate_dynamic_threshold;
 use crate::application::strategies::up_or_down::types::{
@@ -21,19 +22,38 @@ use tracing::{debug, error, info, warn};
 // Pre-Order Risk Check
 // =============================================================================
 
-/// Pre-order risk check based on oracle price proximity.
+/// Maximum age of oracle data for trading (in seconds).
+/// If no price update has been received within this time, orders are blocked.
+const MAX_ORACLE_AGE_SECS: u64 = 10;
+
+/// Pre-order risk check based on oracle data freshness and price proximity.
 ///
-/// Checks if |price_to_beat - oracle_price| in bps < oracle_bps_price_threshold.
+/// First checks if oracle data is fresh enough (received within MAX_ORACLE_AGE_SECS).
+/// Then checks if |price_to_beat - oracle_price| in bps < oracle_bps_price_threshold.
 /// If the oracle price is too close to price_to_beat, the outcome is uncertain
 /// and we should NOT place the order.
 ///
 /// Returns:
-/// - `true` if safe to place order (oracle price far enough from price_to_beat)
-/// - `false` if risky to place order (oracle price too close)
+/// - `true` if safe to place order (oracle fresh and price far enough from price_to_beat)
+/// - `false` if risky to place order (oracle stale or price too close)
 pub fn pre_order_risk_check(
     ctx: &MarketTrackerContext,
     oracle_prices: &Option<SharedOraclePrices>,
 ) -> bool {
+    // CRITICAL: Check oracle data freshness FIRST
+    // This protects against zombie WebSocket connections where the socket appears
+    // connected but no data is flowing.
+    if !is_market_oracle_fresh(oracle_prices, ctx.oracle_source, MAX_ORACLE_AGE_SECS) {
+        let age = get_market_oracle_age(oracle_prices, ctx.oracle_source)
+            .map(|d| format!("{:.1}s", d.as_secs_f64()))
+            .unwrap_or_else(|| "unknown".to_string());
+        warn!(
+            "[WS {}] Pre-check FAIL: {} oracle data is STALE ({} old, max {}s allowed)",
+            ctx.market_id, ctx.oracle_source, age, MAX_ORACLE_AGE_SECS
+        );
+        return false;
+    }
+
     // If we don't have price_to_beat or oracle prices, allow the order (no data to check against)
     let (price_to_beat, oracle_prices) = match (ctx.price_to_beat, oracle_prices) {
         (Some(ptb), Some(op)) => (ptb, op),

@@ -41,7 +41,9 @@
 //! ```
 
 use crossbeam_channel::{Receiver, Sender};
+use crate::core::pong_tracker::PongTracker;
 use crate::traits::WsMessage;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::debug;
 
@@ -53,18 +55,21 @@ use tracing::debug;
 /// The task will:
 /// 1. Wait for the first interval (skips immediate first tick)
 /// 2. On each tick, send the payload through the channel
-/// 3. Continue until shutdown signal received or channel closed
+/// 3. Record PING sent time if pong_tracker is provided
+/// 4. Continue until shutdown signal received or channel closed
 ///
 /// # Arguments
 /// * `interval` - Duration between heartbeat messages
 /// * `payload` - The message to send on each heartbeat
 /// * `heartbeat_tx` - Channel to send heartbeat messages to main loop
 /// * `shutdown_rx` - Channel to receive shutdown signal
+/// * `pong_tracker` - Optional tracker for PONG response monitoring
 pub async fn heartbeat_task(
     interval: Duration,
     payload: WsMessage,
     heartbeat_tx: Sender<WsMessage>,
     shutdown_rx: Receiver<()>,
+    pong_tracker: Option<Arc<PongTracker>>,
 ) {
     let mut ticker = tokio::time::interval(interval);
     // Skip the first immediate tick - wait for the first interval
@@ -99,6 +104,11 @@ pub async fn heartbeat_task(
             debug!("Heartbeat channel closed, shutting down heartbeat task");
             break;
         }
+
+        // Record PING sent time for PONG tracking
+        if let Some(ref tracker) = pong_tracker {
+            tracker.record_ping_sent();
+        }
     }
 
     debug!("Heartbeat task exiting");
@@ -107,15 +117,21 @@ pub async fn heartbeat_task(
 /// Spawn a heartbeat task
 ///
 /// Returns channels for receiving heartbeat messages and shutting down the task
+///
+/// # Arguments
+/// * `interval` - Duration between heartbeat messages
+/// * `payload` - The message to send on each heartbeat
+/// * `pong_tracker` - Optional tracker for PONG response monitoring
 pub fn spawn_heartbeat(
     interval: Duration,
     payload: WsMessage,
+    pong_tracker: Option<Arc<PongTracker>>,
 ) -> (tokio::task::JoinHandle<()>, Sender<()>, Receiver<WsMessage>) {
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
     let (heartbeat_tx, heartbeat_rx) = crossbeam_channel::unbounded();
 
     let handle = tokio::spawn(async move {
-        heartbeat_task(interval, payload, heartbeat_tx, shutdown_rx).await;
+        heartbeat_task(interval, payload, heartbeat_tx, shutdown_rx, pong_tracker).await;
     });
 
     (handle, shutdown_tx, heartbeat_rx)

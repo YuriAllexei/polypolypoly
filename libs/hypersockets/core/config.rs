@@ -54,6 +54,12 @@ where
     pub(crate) halted_flag: Option<Arc<AtomicBool>>,
 
     pub(crate) handlers_not_ready: Option<Arc<AtomicUsize>>,
+
+    /// Optional PONG detector for tracking PONG responses
+    pub(crate) pong_detector: Option<Arc<dyn PongDetector>>,
+
+    /// PONG timeout - if no PONG received within this duration after PING, connection is unhealthy
+    pub(crate) pong_timeout: Option<Duration>,
 }
 
 impl<R, M> ClientConfig<R, M>
@@ -89,5 +95,10 @@ where
     /// Get the number of configured handlers
     pub fn handler_count(&self) -> usize {
         self.route_senders.len()
+    }
+
+    /// Check if PONG tracking is configured
+    pub fn has_pong_tracking(&self) -> bool {
+        self.pong_detector.is_some() && self.pong_timeout.is_some()
     }
 }

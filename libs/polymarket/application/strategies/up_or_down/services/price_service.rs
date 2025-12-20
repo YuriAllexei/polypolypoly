@@ -165,3 +165,57 @@ pub fn get_oracle_price(
         .get_price(oracle_type, symbol)
         .map(|entry| entry.value)
 }
+
+// =============================================================================
+// Oracle Health Tracking
+// =============================================================================
+
+/// Check if the SPECIFIC oracle for this market is fresh enough for trading.
+///
+/// Each market uses only one oracle (ChainLink OR Binance) for resolution.
+/// This checks if that specific oracle has received data recently.
+///
+/// # Arguments
+/// * `oracle_prices` - Shared oracle price manager
+/// * `oracle_source` - Which oracle to check (from market context)
+/// * `max_age_secs` - Maximum allowed age of oracle data in seconds
+///
+/// # Returns
+/// True if the oracle has received data within max_age_secs, false otherwise
+pub fn is_market_oracle_fresh(
+    oracle_prices: &Option<SharedOraclePrices>,
+    oracle_source: OracleSource,
+    max_age_secs: u64,
+) -> bool {
+    let Some(prices) = oracle_prices else {
+        return false;
+    };
+
+    // Skip check for unknown oracle sources
+    let Some(oracle_type) = oracle_source.to_oracle_type() else {
+        return true;
+    };
+
+    let prices = prices.read();
+    let max_age = Duration::from_secs(max_age_secs);
+    prices.is_oracle_healthy(oracle_type, max_age)
+}
+
+/// Get the age of the last update for the specific oracle this market uses.
+///
+/// # Arguments
+/// * `oracle_prices` - Shared oracle price manager
+/// * `oracle_source` - Which oracle to check (from market context)
+///
+/// # Returns
+/// Duration since last update, or None if oracle source is unknown
+pub fn get_market_oracle_age(
+    oracle_prices: &Option<SharedOraclePrices>,
+    oracle_source: OracleSource,
+) -> Option<Duration> {
+    let prices = oracle_prices.as_ref()?;
+
+    let oracle_type = oracle_source.to_oracle_type()?;
+
+    Some(prices.read().oracle_age(oracle_type))
+}

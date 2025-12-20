@@ -1,5 +1,6 @@
 use crate::config::ClientConfig;
 use crate::connection_state::{AtomicConnectionState, AtomicMetrics, ConnectionState};
+use crate::core::pong_tracker::PongTracker;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use futures::{SinkExt, StreamExt};
 use crate::traits::*;
@@ -480,13 +481,18 @@ where
         debug!("Sent subscription message");
     }
 
+    // Create PONG tracker if configured
+    let pong_tracker: Option<Arc<PongTracker>> = config.pong_timeout.map(|timeout| {
+        Arc::new(PongTracker::new(timeout))
+    });
+
     // Spawn heartbeat task if configured
     let heartbeat_handle = if let Some((interval, payload)) = &config.heartbeat {
         let interval = *interval;
         let payload = payload.clone();
 
         let (handle, shutdown_tx, heartbeat_rx) =
-            crate::heartbeat::spawn_heartbeat(interval, payload);
+            crate::heartbeat::spawn_heartbeat(interval, payload, pong_tracker.clone());
 
         Some((handle, shutdown_tx, heartbeat_rx))
     } else {
@@ -502,6 +508,7 @@ where
         metrics,
         command_rx,
         heartbeat_handle.as_ref().map(|(_, _, rx)| rx),
+        pong_tracker.as_ref(),
     )
     .await;
 
@@ -530,6 +537,7 @@ async fn message_loop<R, M>(
     metrics: Arc<AtomicMetrics>,
     command_rx: &Receiver<ClientCommand>,
     heartbeat_rx: Option<&Receiver<WsMessage>>,
+    pong_tracker: Option<&Arc<PongTracker>>,
 ) -> Result<()>
 where
     R: MessageRouter<Message = M>,
@@ -586,6 +594,18 @@ where
                                     debug!("Passive pong sent successfully");
 
                                     // Don't parse this message - it was a ping
+                                    continue;
+                                }
+                            }
+
+                            // Check for PONG response (for PONG tracking)
+                            if let Some(ref detector) = config.pong_detector {
+                                if detector.is_pong(&ws_msg) {
+                                    debug!("PONG detected from server");
+                                    if let Some(tracker) = pong_tracker {
+                                        tracker.record_pong_received();
+                                    }
+                                    // Don't route PONG messages - they're for health tracking only
                                     continue;
                                 }
                             }
@@ -688,6 +708,22 @@ where
                         })?;
                         metrics.increment_sent();
                         debug!("Heartbeat sent successfully");
+                    }
+                }
+
+                // Check PONG health - trigger reconnection if unhealthy
+                if let Some(tracker) = pong_tracker {
+                    if !tracker.is_healthy() {
+                        let since_pong = tracker.time_since_last_pong()
+                            .map(|d| format!("{:.1}s", d.as_secs_f64()))
+                            .unwrap_or_else(|| "never".to_string());
+                        warn!(
+                            "PONG timeout - no PONG received for {} - connection appears dead, triggering reconnect",
+                            since_pong
+                        );
+                        return Err(HyperSocketError::ConnectionClosed(
+                            "PONG timeout - connection appears dead".to_string()
+                        ));
                     }
                 }
             }

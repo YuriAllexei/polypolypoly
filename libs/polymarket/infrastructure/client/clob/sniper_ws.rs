@@ -13,7 +13,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use crossbeam_channel::Sender;
 use hypersockets::core::*;
-use hypersockets::{MessageHandler, MessageRouter, WsMessage};
+use hypersockets::{MessageHandler, MessageRouter, TextPongDetector, WsMessage};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -364,6 +364,10 @@ pub async fn build_ws_client(
     let subscription = MarketSubscription::new(config.token_ids.clone());
     let subscription_json = serde_json::to_string(&subscription)?;
 
+    // Create PONG detector for "PONG" text messages
+    // Timeout is 15s (3x heartbeat interval of 5s)
+    let pong_detector = Arc::new(TextPongDetector::new("PONG".to_string()));
+
     let market_id_for_route = config.market_id.clone();
     let market_id_for_log = config.market_id.clone();
     let client = WebSocketClientBuilder::new()
@@ -372,6 +376,8 @@ pub async fn build_ws_client(
             routing.handler(SniperRoute::Market(market_id_for_route.clone()), handler)
         })
         .heartbeat(Duration::from_secs(5), WsMessage::Text("PING".to_string()))
+        .pong_detector(pong_detector)
+        .pong_timeout(Duration::from_secs(15))
         .subscription(WsMessage::Text(subscription_json))
         .shutdown_flag(local_shutdown_flag)
         .build()

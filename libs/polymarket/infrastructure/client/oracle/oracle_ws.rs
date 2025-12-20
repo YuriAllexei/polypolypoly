@@ -7,7 +7,7 @@ use super::price_manager::{OraclePriceManager, SharedOraclePrices};
 use super::types::{OracleMessage, OraclePriceUpdate, OracleSubscription, OracleType};
 use anyhow::Result;
 use hypersockets::core::*;
-use hypersockets::{MessageHandler, MessageRouter, WsMessage};
+use hypersockets::{MessageHandler, MessageRouter, TextPongDetector, WsMessage};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -20,6 +20,10 @@ const ORACLE_WS_URL: &str = "wss://ws-live-data.polymarket.com";
 
 /// Heartbeat interval in seconds
 const HEARTBEAT_INTERVAL_SECS: u64 = 5;
+
+/// PONG timeout in seconds (3x heartbeat interval)
+/// If no PONG received within this time, connection is considered dead
+const PONG_TIMEOUT_SECS: u64 = 15;
 
 /// Maximum reconnection attempts before giving up
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
@@ -189,6 +193,9 @@ async fn build_oracle_ws_client(
     let subscription = OracleSubscription::new(oracle_type);
     let subscription_json = serde_json::to_string(&subscription)?;
 
+    // Create PONG detector for "PONG" text messages
+    let pong_detector = Arc::new(TextPongDetector::new("PONG".to_string()));
+
     let client = WebSocketClientBuilder::new()
         .url(ORACLE_WS_URL)
         .router(router, move |routing| {
@@ -198,6 +205,8 @@ async fn build_oracle_ws_client(
             Duration::from_secs(HEARTBEAT_INTERVAL_SECS),
             WsMessage::Text("PING".to_string()),
         )
+        .pong_detector(pong_detector)
+        .pong_timeout(Duration::from_secs(PONG_TIMEOUT_SECS))
         .subscription(WsMessage::Text(subscription_json))
         .shutdown_flag(local_shutdown_flag)
         .build()

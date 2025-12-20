@@ -32,6 +32,8 @@ where
     headers: Option<Arc<dyn HeaderProvider>>,
     heartbeat: Option<(Duration, WsMessage)>,
     passive_ping: Option<Arc<dyn PassivePingDetector>>,
+    pong_detector: Option<Arc<dyn PongDetector>>,
+    pong_timeout: Option<Duration>,
     reconnect_strategy: Option<Box<dyn ReconnectionStrategy>>,
     reconnection_delay_offset: Duration,
     subscriptions: Vec<WsMessage>,
@@ -53,6 +55,8 @@ impl WebSocketClientBuilder<NoUrl, NoRouter, (), ()> {
             headers: None,
             heartbeat: None,
             passive_ping: None,
+            pong_detector: None,
+            pong_timeout: None,
             reconnect_strategy: None,
             reconnection_delay_offset: Duration::from_secs(0), // Default: no offset
             subscriptions: Vec::new(),
@@ -85,6 +89,8 @@ where
             headers: self.headers,
             heartbeat: self.heartbeat,
             passive_ping: self.passive_ping,
+            pong_detector: self.pong_detector,
+            pong_timeout: self.pong_timeout,
             reconnect_strategy: self.reconnect_strategy,
             reconnection_delay_offset: self.reconnection_delay_offset,
             subscriptions: self.subscriptions,
@@ -216,6 +222,8 @@ where
             headers: self.headers,
             heartbeat: self.heartbeat,
             passive_ping: self.passive_ping,
+            pong_detector: self.pong_detector,
+            pong_timeout: self.pong_timeout,
             reconnect_strategy: self.reconnect_strategy,
             reconnection_delay_offset: self.reconnection_delay_offset,
             subscriptions: self.subscriptions,
@@ -248,6 +256,30 @@ where
 
     pub fn passive_ping(mut self, detector: impl PassivePingDetector + 'static) -> Self {
         self.passive_ping = Some(Arc::new(detector));
+        self
+    }
+
+    /// Set a PONG detector for tracking PONG responses
+    ///
+    /// The PONG detector is used to identify PONG messages in the WebSocket stream.
+    /// When a PONG is detected, it's recorded for health tracking.
+    ///
+    /// Should be used together with `pong_timeout()` for full PONG tracking.
+    pub fn pong_detector(mut self, detector: Arc<dyn PongDetector>) -> Self {
+        self.pong_detector = Some(detector);
+        self
+    }
+
+    /// Set the PONG timeout for connection health tracking
+    ///
+    /// If no PONG is received within this duration after a PING was sent,
+    /// the connection is considered unhealthy and will trigger a reconnection.
+    ///
+    /// Recommended value: 3x the heartbeat interval (e.g., 15s for 5s heartbeat)
+    ///
+    /// Should be used together with `pong_detector()` for full PONG tracking.
+    pub fn pong_timeout(mut self, timeout: Duration) -> Self {
+        self.pong_timeout = Some(timeout);
         self
     }
 
@@ -392,6 +424,8 @@ where
             headers: self.headers,
             heartbeat: self.heartbeat,
             passive_ping: self.passive_ping,
+            pong_detector: self.pong_detector,
+            pong_timeout: self.pong_timeout,
             reconnect_strategy,
             reconnection_delay_offset: self.reconnection_delay_offset,
             subscriptions: self.subscriptions,

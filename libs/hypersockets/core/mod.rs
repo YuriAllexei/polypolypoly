@@ -49,12 +49,14 @@ pub mod client;
 pub mod config;
 pub mod connection_state;
 pub mod heartbeat;
+pub mod pong_tracker;
 
 // Re-export main types
 pub use builder::{states, RoutingBuilder, WebSocketClientBuilder};
 pub use client::{ClientEvent, Metrics, WebSocketClient};
 pub use config::ClientConfig;
 pub use connection_state::{AtomicConnectionState, AtomicMetrics, ConnectionState};
+pub use pong_tracker::PongTracker;
 
 // Re-export traits for convenience
 pub use crate::traits::*;

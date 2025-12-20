@@ -2,35 +2,109 @@
 //!
 //! Manages crypto prices from multiple oracle sources (ChainLink and Binance).
 //! Provides thread-safe access to current prices via shared state.
+//!
+//! ## Health Tracking
+//!
+//! The price manager tracks the health of each oracle connection:
+//! - `received_at` on each price entry tracks when we received data
+//! - `OracleHealthState` tracks the last update time for each oracle
+//!
+//! This allows strategies to detect stale data even when the WebSocket
+//! appears connected (zombie connection detection).
 
 use super::types::OracleType;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Shared price manager accessible by handlers and consumers
 pub type SharedOraclePrices = Arc<RwLock<OraclePriceManager>>;
 
-/// A single price entry with value and timestamp
+/// A single price entry with value, timestamp, and local receive time
 #[derive(Debug, Clone, Copy)]
 pub struct PriceEntry {
+    /// The price value
     pub value: f64,
+    /// Server-side timestamp (from oracle)
     pub timestamp: u64,
+    /// When we locally received this update (for staleness detection)
+    pub received_at: Instant,
 }
 
 impl PriceEntry {
     pub fn new(value: f64, timestamp: u64) -> Self {
-        Self { value, timestamp }
+        Self {
+            value,
+            timestamp,
+            received_at: Instant::now(),
+        }
+    }
+
+    /// Get the age of this price entry (time since we received it)
+    pub fn age(&self) -> Duration {
+        self.received_at.elapsed()
+    }
+
+    /// Check if this price entry is stale (older than max_age)
+    pub fn is_stale(&self, max_age: Duration) -> bool {
+        self.age() > max_age
+    }
+}
+
+/// Health state for a single oracle connection
+#[derive(Debug)]
+pub struct OracleHealthState {
+    /// When we last received ANY update from this oracle
+    pub last_update: Instant,
+    /// Total number of messages received from this oracle
+    pub message_count: u64,
+}
+
+impl Default for OracleHealthState {
+    fn default() -> Self {
+        Self {
+            last_update: Instant::now(),
+            message_count: 0,
+        }
+    }
+}
+
+impl OracleHealthState {
+    /// Create a new health state
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that we received an update
+    pub fn record_update(&mut self) {
+        self.last_update = Instant::now();
+        self.message_count += 1;
+    }
+
+    /// Get time since last update
+    pub fn time_since_update(&self) -> Duration {
+        self.last_update.elapsed()
     }
 }
 
 /// Manages crypto prices from multiple oracle sources
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct OraclePriceManager {
     /// ChainLink oracle prices (symbol -> price entry)
     pub chainlink: HashMap<String, PriceEntry>,
     /// Binance oracle prices (symbol -> price entry)
     pub binance: HashMap<String, PriceEntry>,
+    /// Health state for ChainLink oracle connection
+    pub chainlink_health: OracleHealthState,
+    /// Health state for Binance oracle connection
+    pub binance_health: OracleHealthState,
+}
+
+impl Default for OraclePriceManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OraclePriceManager {
@@ -39,17 +113,46 @@ impl OraclePriceManager {
         Self {
             chainlink: HashMap::new(),
             binance: HashMap::new(),
+            chainlink_health: OracleHealthState::new(),
+            binance_health: OracleHealthState::new(),
         }
     }
 
     /// Update a price for the given oracle and symbol
+    /// Also updates the health state for that oracle
     pub fn update_price(&mut self, oracle: OracleType, symbol: &str, value: f64, timestamp: u64) {
         let entry = PriceEntry::new(value, timestamp);
-        let prices = match oracle {
-            OracleType::ChainLink => &mut self.chainlink,
-            OracleType::Binance => &mut self.binance,
+        let (prices, health) = match oracle {
+            OracleType::ChainLink => (&mut self.chainlink, &mut self.chainlink_health),
+            OracleType::Binance => (&mut self.binance, &mut self.binance_health),
         };
         prices.insert(symbol.to_uppercase(), entry);
+        health.record_update();
+    }
+
+    /// Check if a specific oracle has received data recently
+    pub fn is_oracle_healthy(&self, oracle: OracleType, max_age: Duration) -> bool {
+        let health = match oracle {
+            OracleType::ChainLink => &self.chainlink_health,
+            OracleType::Binance => &self.binance_health,
+        };
+        health.time_since_update() < max_age
+    }
+
+    /// Get age of last update for a specific oracle
+    pub fn oracle_age(&self, oracle: OracleType) -> Duration {
+        match oracle {
+            OracleType::ChainLink => self.chainlink_health.time_since_update(),
+            OracleType::Binance => self.binance_health.time_since_update(),
+        }
+    }
+
+    /// Get the message count for a specific oracle
+    pub fn oracle_message_count(&self, oracle: OracleType) -> u64 {
+        match oracle {
+            OracleType::ChainLink => self.chainlink_health.message_count,
+            OracleType::Binance => self.binance_health.message_count,
+        }
     }
 
     /// Get a price for the given oracle and symbol
