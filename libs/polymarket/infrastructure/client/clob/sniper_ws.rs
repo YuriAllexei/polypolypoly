@@ -16,8 +16,9 @@ use hypersockets::core::*;
 use hypersockets::{MessageHandler, MessageRouter, WsMessage};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
+use parking_lot::RwLock;
 use tracing::{debug, info, warn};
 
 /// Shared orderbooks accessible by both handler and main loop
@@ -227,7 +228,7 @@ impl SniperHandler {
         // This minimizes lock contention by doing computation outside the critical section
         let mut precision_updates: Vec<(String, u8)> = Vec::new();
         {
-            let precs = self.precisions.read().unwrap();
+            let precs = self.precisions.read();
             for snapshot in snapshots {
                 let current = *precs.get(&snapshot.asset_id).unwrap_or(&2);
                 if current == 2 {
@@ -249,7 +250,7 @@ impl SniperHandler {
 
         // Second pass: Update orderbooks (separate lock)
         {
-            let mut obs = self.orderbooks.write().unwrap();
+            let mut obs = self.orderbooks.write();
             for snapshot in snapshots {
                 let orderbook = obs
                     .entry(snapshot.asset_id.clone())
@@ -260,7 +261,7 @@ impl SniperHandler {
 
         // Third pass: Apply precision updates (separate lock, brief hold)
         if !precision_updates.is_empty() {
-            let mut precs = self.precisions.write().unwrap();
+            let mut precs = self.precisions.write();
             for (asset_id, precision) in precision_updates {
                 precs.insert(asset_id, precision);
             }
@@ -271,7 +272,7 @@ impl SniperHandler {
 
     /// Process price change events and update shared orderbooks
     fn handle_price_change(&mut self, event: &PriceChangeEvent) {
-        let mut obs = self.orderbooks.write().unwrap();
+        let mut obs = self.orderbooks.write();
         for change in &event.price_changes {
             let orderbook = obs
                 .entry(change.asset_id.clone())
@@ -291,7 +292,6 @@ impl SniperHandler {
         // Update precision in shared state
         self.precisions
             .write()
-            .unwrap()
             .insert(event.asset_id.clone(), precision);
 
         // Forward event to main loop if channel configured

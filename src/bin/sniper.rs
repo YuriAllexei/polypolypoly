@@ -11,7 +11,7 @@ use polymarket::application::{
     create_strategy, init_logging_with_level, ActiveOrderManager, BalanceManager, PositionManager,
     Strategy, StrategyContext, StrategyType,
 };
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use polymarket::infrastructure::client::clob::TradingClient;
 use polymarket::infrastructure::config::StrategiesConfig;
 use polymarket::infrastructure::database::MarketDatabase;
@@ -132,10 +132,10 @@ async fn main() -> Result<()> {
     }
 
     // Stop balance manager
-    balance_manager.write().unwrap().stop().await;
+    balance_manager.write().stop().await;
 
     // Stop active order manager
-    active_order_manager.write().unwrap().stop().await;
+    active_order_manager.write().stop().await;
 
     // Stop position manager
     position_manager.stop().await;

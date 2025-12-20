@@ -10,8 +10,9 @@ use super::types::{OrderMessage, TradeMessage, UserMessage, UserSubscription};
 use anyhow::Result;
 use hypersockets::core::*;
 use hypersockets::{MessageHandler, MessageRouter, WsMessage};
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
@@ -144,9 +145,7 @@ impl UserHandler {
         );
 
         // Update order manager
-        if let Ok(mut mgr) = self.orders.write() {
-            mgr.process_trade(trade);
-        }
+        self.orders.write().process_trade(trade);
     }
 
     fn handle_order(&mut self, order: &OrderMessage) {
@@ -164,9 +163,7 @@ impl UserHandler {
         );
 
         // Update order manager
-        if let Ok(mut mgr) = self.orders.write() {
-            mgr.process_order(order);
-        }
+        self.orders.write().process_order(order);
     }
 }
 

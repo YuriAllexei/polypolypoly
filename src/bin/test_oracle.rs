@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
             break;
         }
 
-        let manager = prices.read().unwrap();
+        let manager = prices.read();
         let chainlink_count = manager.symbol_count(OracleType::ChainLink);
         let binance_count = manager.symbol_count(OracleType::Binance);
         let now = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");

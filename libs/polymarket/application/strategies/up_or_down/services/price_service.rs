@@ -160,7 +160,7 @@ pub fn get_oracle_price(
     let symbol = crypto_asset.oracle_symbol()?;
 
     // Get price from oracle manager
-    let manager = oracle_prices.read().unwrap();
+    let manager = oracle_prices.read();
     manager
         .get_price(oracle_type, symbol)
         .map(|entry| entry.value)

@@ -4,9 +4,10 @@ use crate::domain::DbMarket;
 use crate::infrastructure::{
     build_ws_client, FullTimeEvent, MarketTrackerConfig, SharedOrderbooks, SharedPrecisions,
 };
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};

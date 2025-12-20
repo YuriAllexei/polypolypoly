@@ -12,7 +12,7 @@ pub fn analyze_orderbooks_for_winner(
     token_ids: &[String],
     outcomes: &[String],
 ) -> Option<WinnerAnalysis> {
-    let obs = orderbooks.read().unwrap();
+    let obs = orderbooks.read();
     let mut best_candidate: Option<WinnerAnalysis> = None;
 
     for (token_id, outcome) in token_ids.iter().zip(outcomes.iter()) {

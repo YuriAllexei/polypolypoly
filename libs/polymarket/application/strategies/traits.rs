@@ -7,8 +7,9 @@ use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::database::{DatabaseError, MarketDatabase};
 use crate::infrastructure::shutdown::ShutdownManager;
 use async_trait::async_trait;
+use parking_lot::RwLock;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Result type for strategy operations
@@ -71,7 +72,7 @@ impl StrategyContext {
 
     /// Check if trading is halted due to balance drop
     pub fn is_trading_halted(&self) -> bool {
-        self.balance_manager.read().unwrap().is_halted()
+        self.balance_manager.read().is_halted()
     }
 }
 

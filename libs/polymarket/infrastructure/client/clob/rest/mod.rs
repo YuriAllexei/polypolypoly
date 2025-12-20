@@ -12,6 +12,7 @@ mod queries;
 
 use super::helpers::{parse_json, require_success};
 use super::types::*;
+use parking_lot::RwLock;
 use reqwest::Client;
 use std::error::Error as StdError;
 use std::time::Duration;
@@ -121,27 +122,27 @@ pub type Result<T> = std::result::Result<T, RestError>;
 /// Uses a persistent HTTP connection with auto-recreation on failure.
 pub struct RestClient {
     pub(crate) base_url: String,
-    client: std::sync::RwLock<Client>,
+    client: RwLock<Client>,
 }
 
 impl RestClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            client: std::sync::RwLock::new(build_http_client()),
+            client: RwLock::new(build_http_client()),
         }
     }
 
     /// Get the HTTP client
     pub(crate) fn client(&self) -> Client {
-        self.client.read().unwrap().clone()
+        self.client.read().clone()
     }
 
     /// Recreate the HTTP client (forces new DNS resolution and connection)
     pub fn recreate_client(&self) {
         info!("[RestClient] Recreating HTTP client to force fresh connection");
         let new_client = build_http_client();
-        *self.client.write().unwrap() = new_client;
+        *self.client.write() = new_client;
         info!("[RestClient] HTTP client recreated successfully");
     }
 

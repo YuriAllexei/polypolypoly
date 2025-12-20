@@ -13,7 +13,8 @@ use crate::application::strategies::up_or_down::types::{
 use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::{BalanceManager, SharedOraclePrices, SharedOrderbooks, SharedPrecisions};
 use chrono::Utc;
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 // =============================================================================
@@ -145,7 +146,7 @@ pub async fn check_risk(
 
     // Signal 1: Check bid levels per token
     let bid_data: Vec<(String, Vec<f64>)> = {
-        let obs = orderbooks.read().unwrap();
+        let obs = orderbooks.read();
         state
             .order_placed
             .keys()
@@ -232,7 +233,7 @@ pub async fn place_order(
 
     // Get precision for this token (default to 2)
     let precision = {
-        let precs = precisions.read().unwrap();
+        let precs = precisions.read();
         *precs.get(token_id).unwrap_or(&2)
     };
 
@@ -240,7 +241,7 @@ pub async fn place_order(
     let price = 1.0 - 10_f64.powi(-(precision as i32));
 
     // Calculate order size from current balance
-    let current_balance = balance_manager.read().unwrap().current_balance();
+    let current_balance = balance_manager.read().current_balance();
     let order_size = (current_balance * ctx.order_pct_of_collateral).round();
     // Ensure minimum order size of 1
     let order_size = order_size.max(1.0);
@@ -384,7 +385,7 @@ pub async fn upgrade_order_on_tick_change(
     }
 
     // Place new order at higher precision
-    let current_balance = balance_manager.read().unwrap().current_balance();
+    let current_balance = balance_manager.read().current_balance();
     let order_size = (current_balance * ctx.order_pct_of_collateral).round().max(1.0);
 
     match trading.buy(token_id, new_price, order_size).await {

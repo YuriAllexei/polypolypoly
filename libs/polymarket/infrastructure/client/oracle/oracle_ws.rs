@@ -8,8 +8,9 @@ use super::types::{OracleMessage, OraclePriceUpdate, OracleSubscription, OracleT
 use anyhow::Result;
 use hypersockets::core::*;
 use hypersockets::{MessageHandler, MessageRouter, WsMessage};
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
@@ -137,7 +138,7 @@ impl OracleHandler {
 
         // Update the price in shared state
         {
-            let mut prices = self.prices.write().unwrap();
+            let mut prices = self.prices.write();
             prices.update_price(
                 self.oracle_type,
                 &symbol,

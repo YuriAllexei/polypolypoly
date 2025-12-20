@@ -4,8 +4,9 @@
 //! Provides thread-safe access to current prices via shared state.
 
 use super::types::OracleType;
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// Shared price manager accessible by handlers and consumers
 pub type SharedOraclePrices = Arc<RwLock<OraclePriceManager>>;

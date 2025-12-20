@@ -4,8 +4,9 @@
 //! Halts trading when balance drops below a configurable threshold of the peak.
 
 use crate::infrastructure::client::clob::TradingClient;
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -52,8 +53,8 @@ impl BalanceManager {
     ) -> anyhow::Result<()> {
         // Fetch initial balance
         let initial = trading.get_usd_balance().await?;
-        *self.balance_pivot.write().unwrap() = initial;
-        *self.balance_current.write().unwrap() = initial;
+        *self.balance_pivot.write() = initial;
+        *self.balance_current.write() = initial;
 
         let threshold_pct = self.halt_threshold * 100.0;
         info!(
@@ -80,8 +81,8 @@ impl BalanceManager {
                     Ok(new_balance) => {
                         // Scope for holding locks - extract values before async operations
                         let (should_halt, should_resume, pivot_val, threshold) = {
-                            let mut pivot_guard = pivot.write().unwrap();
-                            let mut current_guard = current.write().unwrap();
+                            let mut pivot_guard = pivot.write();
+                            let mut current_guard = current.write();
 
                             // Update pivot if new balance is higher (high watermark)
                             if new_balance > *pivot_guard {
@@ -171,12 +172,12 @@ impl BalanceManager {
 
     /// Get current balance
     pub fn current_balance(&self) -> f64 {
-        *self.balance_current.read().unwrap()
+        *self.balance_current.read()
     }
 
     /// Get pivot (high watermark) balance
     pub fn pivot_balance(&self) -> f64 {
-        *self.balance_pivot.read().unwrap()
+        *self.balance_pivot.read()
     }
 
     /// Get the configured halt threshold (as fraction, e.g., 0.10 for 10%)

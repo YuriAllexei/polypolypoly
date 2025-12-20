@@ -4,8 +4,9 @@
 //! and storage for trades (by trade_id).
 
 use super::types::{OrderMessage, OrderType, TradeMessage, TradeStatus};
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// Shared order manager accessible across threads
 pub type SharedOrderManager = Arc<RwLock<OrderManager>>;

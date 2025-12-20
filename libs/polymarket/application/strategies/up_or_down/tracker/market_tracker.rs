@@ -19,9 +19,10 @@ use crate::infrastructure::{
 };
 use chrono::Utc;
 use crossbeam_channel::{unbounded, Receiver};
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -234,8 +235,8 @@ async fn create_ws_connection(
     ws_config: &MarketTrackerConfig,
     market_id: &str,
 ) -> anyhow::Result<ConnectionResult> {
-    let orderbooks: SharedOrderbooks = Arc::new(std::sync::RwLock::new(HashMap::new()));
-    let precisions: SharedPrecisions = Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let orderbooks: SharedOrderbooks = Arc::new(RwLock::new(HashMap::new()));
+    let precisions: SharedPrecisions = Arc::new(RwLock::new(HashMap::new()));
     let first_snapshot_received = Arc::new(AtomicBool::new(false));
 
     // Create channel for tick_size_change events
@@ -289,7 +290,7 @@ async fn wait_for_snapshot(
 /// Validate that all expected tokens have orderbooks.
 /// Returns true if all tokens have orderbooks, false otherwise.
 fn validate_orderbooks(orderbooks: &SharedOrderbooks, ctx: &MarketTrackerContext) -> bool {
-    let obs = orderbooks.read().unwrap();
+    let obs = orderbooks.read();
     let missing_count = ctx
         .token_ids
         .iter()
@@ -361,7 +362,6 @@ async fn run_tracking_loop(
                 // Verify order exists in OMS before attempting upgrade
                 let order_exists_in_oms = active_orders
                     .read()
-                    .unwrap()
                     .has_order(&current_order.order_id);
 
                 if !order_exists_in_oms {
@@ -377,7 +377,7 @@ async fn run_tracking_loop(
 
                 if new_precision > current_order.precision {
                     // Check if trading is halted
-                    if balance_manager.read().unwrap().is_halted() {
+                    if balance_manager.read().is_halted() {
                         info!(
                             "[WS {}] Order upgrade blocked - trading halted",
                             ctx.market_id
@@ -465,7 +465,7 @@ fn check_orderbook_staleness(
     connection_start: Instant,
     seen_updates: bool,
 ) -> (bool, bool) {
-    let obs = orderbooks.read().unwrap();
+    let obs = orderbooks.read();
     let connection_age = connection_start.elapsed().as_secs_f64();
     let mut stale = false;
     let mut has_activity = seen_updates;
@@ -507,7 +507,7 @@ async fn process_order_candidates(
     for (token_id, outcome_name, elapsed) in tokens_to_order {
         // Re-check orderbook and capture liquidity before placing order
         let (still_no_asks, best_bid, liq_at_99) = {
-            let obs = orderbooks.read().unwrap();
+            let obs = orderbooks.read();
             match obs.get(&token_id) {
                 Some(ob) => (
                     ob.asks.is_empty(),
@@ -565,7 +565,7 @@ async fn process_order_candidates(
         }
 
         // Check if trading is halted due to balance drop
-        if balance_manager.read().unwrap().is_halted() {
+        if balance_manager.read().is_halted() {
             info!(
                 "[WS {}] Order blocked - trading halted due to balance drop",
                 ctx.market_id

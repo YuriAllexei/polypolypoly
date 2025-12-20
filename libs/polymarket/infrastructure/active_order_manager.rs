@@ -4,9 +4,10 @@
 //! Provides a source of truth for order state.
 
 use crate::infrastructure::client::clob::TradingClient;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -64,7 +65,7 @@ impl ActiveOrderManager {
         self.update_orders(&initial);
         info!(
             "ActiveOrderManager started: {} orders",
-            self.orders.read().unwrap().len()
+            self.orders.read().len()
         );
 
         let orders = Arc::clone(&self.orders);
@@ -93,12 +94,12 @@ impl ActiveOrderManager {
                             }
                         }
 
-                        *orders.write().unwrap() = new_orders;
-                        *orders_by_token.write().unwrap() = new_by_token;
+                        *orders.write() = new_orders;
+                        *orders_by_token.write() = new_by_token;
 
                         debug!(
                             "ActiveOrderManager: {} active orders",
-                            orders.read().unwrap().len()
+                            orders.read().len()
                         );
                     }
                     Err(e) => {
@@ -121,8 +122,8 @@ impl ActiveOrderManager {
     }
 
     fn update_orders(&self, api_orders: &[serde_json::Value]) {
-        let mut orders = self.orders.write().unwrap();
-        let mut by_token = self.orders_by_token.write().unwrap();
+        let mut orders = self.orders.write();
+        let mut by_token = self.orders_by_token.write();
         orders.clear();
         by_token.clear();
 
@@ -138,16 +139,16 @@ impl ActiveOrderManager {
     }
 
     pub fn has_order(&self, order_id: &str) -> bool {
-        self.orders.read().unwrap().contains_key(order_id)
+        self.orders.read().contains_key(order_id)
     }
 
     pub fn get_order(&self, order_id: &str) -> Option<ActiveOrder> {
-        self.orders.read().unwrap().get(order_id).cloned()
+        self.orders.read().get(order_id).cloned()
     }
 
     pub fn get_orders_for_token(&self, token_id: &str) -> Vec<ActiveOrder> {
-        let orders = self.orders.read().unwrap();
-        let by_token = self.orders_by_token.read().unwrap();
+        let orders = self.orders.read();
+        let by_token = self.orders_by_token.read();
         by_token
             .get(token_id)
             .map(|ids| ids.iter().filter_map(|id| orders.get(id).cloned()).collect())
@@ -155,7 +156,7 @@ impl ActiveOrderManager {
     }
 
     pub fn order_count(&self) -> usize {
-        self.orders.read().unwrap().len()
+        self.orders.read().len()
     }
 }
 

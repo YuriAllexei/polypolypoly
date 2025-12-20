@@ -98,3 +98,4 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 dotenv = { workspace = true }
 ethers = { workspace = true }
+parking_lot = { workspace = true }

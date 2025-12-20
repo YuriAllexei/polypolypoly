@@ -40,3 +40,4 @@ base64 = "0.22"
 dashmap = "6"
 crossbeam-channel = "0.5"
 ureq = { version = "2.9", features = ["json"] }
+parking_lot = "0.12"

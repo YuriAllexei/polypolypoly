@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
 
     // Main loop: refresh display every second
     while shutdown.is_running() {
-        let manager = orders.read().unwrap();
+        let manager = orders.read();
         let order_count = manager.order_count();
         let trade_count = manager.trade_count();
         let asset_count = manager.asset_count();

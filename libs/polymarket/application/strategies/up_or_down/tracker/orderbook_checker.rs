@@ -145,7 +145,7 @@ pub async fn check_all_orderbooks(
     let mut all_empty = true;
 
     let token_data: Vec<(String, bool, bool)> = {
-        let obs = orderbooks.read().unwrap();
+        let obs = orderbooks.read();
         ctx.token_ids
             .iter()
             .filter_map(|token_id| {
