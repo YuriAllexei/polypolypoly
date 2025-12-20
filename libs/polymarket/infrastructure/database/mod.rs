@@ -700,6 +700,7 @@ impl MarketDatabase {
             FROM markets m
             WHERE m.closed = false
               AND m.tags IS NOT NULL
+              AND m.end_date > NOW()
               AND (SELECT COUNT(DISTINCT tag->>'label')
                    FROM jsonb_array_elements(m.tags::jsonb) AS tag
                    WHERE tag->>'label' IN ({})) = ${}
