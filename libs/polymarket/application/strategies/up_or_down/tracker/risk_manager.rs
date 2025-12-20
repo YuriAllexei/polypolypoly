@@ -194,9 +194,17 @@ pub async fn check_risk(
             oracle_price,
         );
 
-        // Cancel only this token's order
-        if let Some(order_info) = state.order_placed.remove(&token_id) {
-            cancel_order(trading, &order_info.order_id, &token_id, ctx).await;
+        // Only remove from state if cancellation succeeds
+        if let Some(order_info) = state.order_placed.get(&token_id) {
+            let cancelled = cancel_order(trading, &order_info.order_id, &token_id, ctx).await;
+            if cancelled {
+                state.order_placed.remove(&token_id);
+            } else {
+                warn!(
+                    "[WS {}] Failed to cancel order for {} - keeping in state for retry",
+                    ctx.market_id, outcome_name
+                );
+            }
         }
     }
 
@@ -258,13 +266,14 @@ pub async fn place_order(
 // Order Cancellation
 // =============================================================================
 
-/// Cancel a single order and log the result
+/// Cancel a single order and log the result.
+/// Returns true if cancellation succeeded, false otherwise.
 pub async fn cancel_order(
     trading: &TradingClient,
     order_id: &str,
     token_id: &str,
     ctx: &MarketTrackerContext,
-) {
+) -> bool {
     let outcome_name = ctx.get_outcome_name(token_id);
     info!(
         "[WS {}] 🚨 Cancelling order {} for {}",
@@ -278,6 +287,7 @@ pub async fn cancel_order(
                     "[WS {}] ✅ Cancelled order for {}",
                     ctx.market_id, outcome_name
                 );
+                return true;
             }
             if !response.not_canceled.is_empty() {
                 warn!(
@@ -285,12 +295,14 @@ pub async fn cancel_order(
                     ctx.market_id, order_id, response.not_canceled
                 );
             }
+            false
         }
         Err(e) => {
             error!(
                 "[WS {}] ❌ Failed to cancel order {}: {}",
                 ctx.market_id, order_id, e
             );
+            false
         }
     }
 }
@@ -361,8 +373,15 @@ pub async fn upgrade_order_on_tick_change(
         ctx.market_id, outcome_name, old_price, new_price, current_order.precision, new_precision
     );
 
-    // Cancel existing order
-    cancel_order(trading, &current_order.order_id, token_id, ctx).await;
+    // Cancel existing order - only proceed if cancelled successfully
+    if !cancel_order(trading, &current_order.order_id, token_id, ctx).await {
+        warn!(
+            "[WS {}] Failed to cancel old order for upgrade, keeping existing order for {}",
+            ctx.market_id, outcome_name
+        );
+        // Return the current order so caller keeps tracking it
+        return Some(current_order.clone());
+    }
 
     // Place new order at higher precision
     let current_balance = balance_manager.read().unwrap().current_balance();

@@ -397,10 +397,13 @@ async fn run_tracking_loop(
                     {
                         state.order_placed.insert(event.asset_id.clone(), new_order_info);
                     } else {
-                        // Upgrade failed - remove from tracking since old order was cancelled
+                        // Upgrade failed - remove from tracking and reset timer state
+                        // so a fresh order can be attempted on next no-asks detection
                         state.order_placed.remove(&event.asset_id);
+                        state.threshold_triggered.remove(&event.asset_id);
+                        state.no_asks_timers.remove(&event.asset_id);
                         warn!(
-                            "[WS {}] Order upgrade failed for {}, removed from tracking",
+                            "[WS {}] Order upgrade failed for {}, reset state for fresh order attempt",
                             ctx.market_id,
                             ctx.get_outcome_name(&event.asset_id)
                         );
