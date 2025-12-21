@@ -62,6 +62,54 @@ pub enum TradingError {
 
 pub type Result<T> = std::result::Result<T, TradingError>;
 
+/// Result of a batch order placement with partitioned success/failure responses.
+#[derive(Debug, Clone)]
+pub struct BatchOrderResult {
+    pub succeeded: Vec<(String, OrderPlacementResponse)>,
+    pub failed: Vec<(String, OrderPlacementResponse)>,
+}
+
+impl BatchOrderResult {
+    pub fn all_succeeded(&self) -> bool {
+        self.failed.is_empty()
+    }
+
+    pub fn any_failed(&self) -> bool {
+        !self.failed.is_empty()
+    }
+
+    pub fn all_failed(&self) -> bool {
+        self.succeeded.is_empty()
+    }
+
+    pub fn success_count(&self) -> usize {
+        self.succeeded.len()
+    }
+
+    pub fn failure_count(&self) -> usize {
+        self.failed.len()
+    }
+
+    pub fn order_ids(&self) -> Vec<String> {
+        self.succeeded
+            .iter()
+            .filter_map(|(_, r)| r.order_id.clone())
+            .collect()
+    }
+
+    pub fn error_messages(&self) -> Vec<(String, String)> {
+        self.failed
+            .iter()
+            .map(|(token_id, r)| {
+                (
+                    token_id.clone(),
+                    r.error_msg.clone().unwrap_or_else(|| "Unknown error".to_string()),
+                )
+            })
+            .collect()
+    }
+}
+
 /// High-level trading client for Polymarket
 ///
 /// Encapsulates all the complexity of authentication, credential management,
@@ -326,6 +374,63 @@ impl TradingClient {
             .await?;
 
         Ok(result)
+    }
+
+    /// Place multiple orders in a single batch (max 15)
+    pub async fn place_batch_orders(
+        &self,
+        orders: Vec<(String, f64, f64, Side, OrderType)>,
+        fee_rate_bps: Option<u64>,
+    ) -> Result<BatchOrderResult> {
+        if orders.is_empty() {
+            return Ok(BatchOrderResult {
+                succeeded: Vec::new(),
+                failed: Vec::new(),
+            });
+        }
+
+        if orders.len() > 15 {
+            return Err(TradingError::InvalidParameter(
+                "Maximum 15 orders per batch".to_string(),
+            ));
+        }
+
+        for (token_id, price, size, _, _) in &orders {
+            if *price <= 0.0 || *price >= 1.0 {
+                return Err(TradingError::InvalidParameter(format!(
+                    "Price must be between 0 and 1 (exclusive), got: {} for token {}",
+                    price, token_id
+                )));
+            }
+            if *size <= 0.0 {
+                return Err(TradingError::InvalidParameter(format!(
+                    "Size must be positive, got: {} for token {}",
+                    size, token_id
+                )));
+            }
+        }
+
+        let token_ids: Vec<String> = orders.iter().map(|(id, _, _, _, _)| id.clone()).collect();
+        let order_builder = self.order_builder(&orders[0].0);
+
+        let responses = self
+            .rest
+            .place_batch_orders(&self.auth, &order_builder, orders, fee_rate_bps)
+            .await
+            .map_err(TradingError::from)?;
+
+        let mut succeeded = Vec::new();
+        let mut failed = Vec::new();
+
+        for (token_id, response) in token_ids.into_iter().zip(responses.into_iter()) {
+            if response.success {
+                succeeded.push((token_id, response));
+            } else {
+                failed.push((token_id, response));
+            }
+        }
+
+        Ok(BatchOrderResult { succeeded, failed })
     }
 
     /// Place a market buy order at best ask

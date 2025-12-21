@@ -6,8 +6,8 @@ use super::super::order_builder::{build_batch_order_payload, build_order_payload
 use super::super::types::*;
 use super::{RestClient, Result, RestError};
 use serde_json::json;
-use std::time::{Duration, Instant};
-use tracing::{debug, info, warn, error};
+use std::time::Instant;
+use tracing::{debug, info, error};
 
 impl RestClient {
     /// Place a limit order
@@ -213,6 +213,91 @@ impl RestClient {
         }
     }
 
+    /// Submit multiple pre-built signed orders to the exchange
+    pub async fn submit_batch_orders(
+        &self,
+        auth: &PolymarketAuth,
+        signed_orders: &[(SignedOrder, OrderType)],
+        timestamp: u64,
+    ) -> Result<Vec<OrderPlacementResponse>> {
+        let url = format!("{}/orders", self.base_url);
+
+        let api_key = auth
+            .api_key()
+            .ok_or_else(|| RestError::ApiError("API key not set".to_string()))?;
+
+        let payload = build_batch_order_payload(signed_orders, &api_key.key);
+        let body = serde_json::to_string(&payload)
+            .map_err(|e| RestError::ApiError(format!("Failed to serialize orders: {}", e)))?;
+
+        let headers = auth.l2_headers(timestamp, "POST", "/orders", &body)?;
+
+        info!("📤 SENDING BATCH ORDER REQUEST ({} orders)", signed_orders.len());
+        info!("   URL: {}", url);
+        info!("   Body length: {} bytes", body.len());
+        debug!("   Full body: {}", body);
+
+        let start = Instant::now();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let headers_clone = headers.clone();
+
+        std::thread::spawn(move || {
+            info!("⏳ [Dedicated thread] Starting batch HTTP request...");
+            let thread_start = Instant::now();
+
+            let result = (|| -> std::result::Result<Vec<OrderPlacementResponse>, String> {
+                let mut request = ureq::post(&url)
+                    .set("Content-Type", "application/json")
+                    .set("User-Agent", "rs_clob_client")
+                    .set("Accept", "*/*");
+
+                for (key, value) in &headers_clone {
+                    request = request.set(key, value);
+                }
+
+                info!("⏳ [Dedicated thread] Sending batch request...");
+
+                let response = request
+                    .timeout(std::time::Duration::from_secs(30))
+                    .send_string(&body)
+                    .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+                let status = response.status();
+                let response_body = response.into_string()
+                    .map_err(|e| format!("Failed to read response: {}", e))?;
+
+                info!("📥 [Dedicated thread] Got response: status={}, body_len={}", status, response_body.len());
+
+                if status == 200 || status == 201 {
+                    serde_json::from_str(&response_body)
+                        .map_err(|e| format!("Failed to parse response: {} - body: {}", e, response_body))
+                } else {
+                    Err(format!("Batch order failed with status {}: {}", status, response_body))
+                }
+            })();
+
+            info!("📥 [Dedicated thread] Batch HTTP completed in {:?}", thread_start.elapsed());
+            let _ = tx.send(result);
+        });
+
+        let result = rx.await
+            .map_err(|_| RestError::ApiError("Thread channel closed".to_string()))?;
+
+        let elapsed = start.elapsed();
+
+        match result {
+            Ok(responses) => {
+                info!("✅ Batch order request successful in {:?} ({} orders)", elapsed, responses.len());
+                Ok(responses)
+            }
+            Err(e) => {
+                error!("❌ Batch order request failed after {:?}: {}", elapsed, e);
+                Err(RestError::ApiError(e))
+            }
+        }
+    }
+
     /// Place multiple orders in a batch (max 15)
     pub async fn place_batch_orders(
         &self,
@@ -231,7 +316,6 @@ impl RestClient {
             ));
         }
 
-        let url = format!("{}/orders", self.base_url);
         let timestamp = PolymarketAuth::current_timestamp();
 
         let mut nonce = self.get_nonce(auth).await?;
@@ -258,28 +342,7 @@ impl RestClient {
             nonce += 1;
         }
 
-        let api_key = auth
-            .api_key()
-            .ok_or_else(|| RestError::ApiError("API key not set".to_string()))?;
-
-        let payload = build_batch_order_payload(&signed_orders, &api_key.key);
-        let body = serde_json::to_string(&payload)
-            .map_err(|e| RestError::ApiError(format!("Failed to serialize orders: {}", e)))?;
-
-        debug!("Batch order payload: {}", body);
-
-        let headers = auth.l2_headers(timestamp, "POST", "/orders", &body)?;
-        let req = with_headers(
-            self.client().post(&url).header("Content-Type", "application/json"),
-            headers,
-        );
-        let response = req.body(body).send().await?;
-
-        if !response.status().is_success() {
-            return Err(extract_api_error(response, "Batch order placement failed").await);
-        }
-
-        parse_json(response).await
+        self.submit_batch_orders(auth, &signed_orders, timestamp).await
     }
 
     /// Convenience method: Place a market buy order with proper signing

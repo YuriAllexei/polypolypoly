@@ -33,5 +33,5 @@ pub use sniper_ws::{
     SniperRouter,
 };
 pub use sniper_ws_types::{SniperMessage, TickSizeChangeEvent};
-pub use trading::{TradingClient, TradingError};
+pub use trading::{BatchOrderResult, TradingClient, TradingError};
 pub use types::*;
