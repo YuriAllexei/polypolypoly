@@ -1,12 +1,14 @@
 use crate::application::strategies::traits::{Strategy, StrategyContext, StrategyResult};
+use crate::infrastructure::client::TradingClient;
 use crate::infrastructure::config::SportsSnipingConfig;
 use crate::infrastructure::{
-    spawn_sports_tracker_with_state, FetchedGames, FullTimeEvent, MarketsByGame,
+    spawn_sports_tracker_with_state, BalanceManager, FetchedGames, FullTimeEvent, MarketsByGame,
 };
 use super::tracker::run_sports_market_tracker;
 use async_trait::async_trait;
 use crossbeam_channel::{unbounded, Receiver};
 use dashmap::DashSet;
+use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use tokio::task::JoinHandle;
@@ -30,6 +32,10 @@ pub struct SportsSnipingStrategy {
     ft_rx: Option<Receiver<FullTimeEvent>>,
     /// Handle to the WebSocket tracker task
     ws_task: Option<JoinHandle<()>>,
+    /// Trading client for order placement
+    trading: Option<Arc<TradingClient>>,
+    /// Balance manager for reading current balance
+    balance_manager: Option<Arc<RwLock<BalanceManager>>>,
 }
 
 impl SportsSnipingStrategy {
@@ -42,6 +48,8 @@ impl SportsSnipingStrategy {
             processed_games: DashSet::new(),
             ft_rx: None,
             ws_task: None,
+            trading: None,
+            balance_manager: None,
         }
     }
 }
@@ -60,8 +68,14 @@ impl Strategy for SportsSnipingStrategy {
         info!(
             poll_interval_secs = self.config.poll_interval_secs,
             enabled = self.config.enabled,
+            order_pct = self.config.order_pct_of_collateral,
+            bid_threshold = self.config.bid_threshold,
             "Initializing Sports Sniping strategy"
         );
+
+        // Store trading client and balance manager for order placement
+        self.trading = Some(Arc::clone(&ctx.trading));
+        self.balance_manager = Some(Arc::clone(&ctx.balance_manager));
 
         // Create channel for FT events
         let (ft_tx, ft_rx) = unbounded::<FullTimeEvent>();
@@ -132,6 +146,11 @@ impl Strategy for SportsSnipingStrategy {
                                 let market_clone = market.clone();
                                 let event_clone = event.clone();
                                 let shutdown_flag = ctx.shutdown.flag();
+                                let trading = Arc::clone(self.trading.as_ref().unwrap());
+                                let balance_manager =
+                                    Arc::clone(self.balance_manager.as_ref().unwrap());
+                                let order_pct = self.config.order_pct_of_collateral;
+                                let bid_threshold = self.config.bid_threshold;
 
                                 // Spawn a tracker task for each market
                                 tokio::spawn(async move {
@@ -139,6 +158,10 @@ impl Strategy for SportsSnipingStrategy {
                                         market_clone,
                                         event_clone,
                                         shutdown_flag,
+                                        trading,
+                                        balance_manager,
+                                        order_pct,
+                                        bid_threshold,
                                     )
                                     .await
                                     {

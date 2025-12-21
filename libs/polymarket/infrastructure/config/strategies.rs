@@ -132,6 +132,14 @@ fn default_sports_poll_interval() -> f64 {
     1.0 // 1 second
 }
 
+fn default_sports_order_pct() -> f64 {
+    0.10 // 10% of collateral per order
+}
+
+fn default_sports_bid_threshold() -> f64 {
+    0.80 // Minimum best_bid price to execute
+}
+
 /// Configuration for the Sports Sniping strategy
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SportsSnipingConfig {
@@ -142,6 +150,14 @@ pub struct SportsSnipingConfig {
     /// Enable/disable the strategy (placeholder for future use)
     #[serde(default)]
     pub enabled: bool,
+
+    /// Percentage of collateral to use per order (e.g., 0.10 = 10%)
+    #[serde(default = "default_sports_order_pct")]
+    pub order_pct_of_collateral: f64,
+
+    /// Minimum best_bid price required to execute an order
+    #[serde(default = "default_sports_bid_threshold")]
+    pub bid_threshold: f64,
 }
 
 impl Default for SportsSnipingConfig {
@@ -149,6 +165,8 @@ impl Default for SportsSnipingConfig {
         Self {
             poll_interval_secs: default_sports_poll_interval(),
             enabled: true,
+            order_pct_of_collateral: default_sports_order_pct(),
+            bid_threshold: default_sports_bid_threshold(),
         }
     }
 }
@@ -158,6 +176,16 @@ impl SportsSnipingConfig {
         if self.poll_interval_secs <= 0.0 {
             return Err(ConfigError::ValidationError(
                 "sports_sniping.poll_interval_secs must be greater than 0".to_string(),
+            ));
+        }
+        if self.order_pct_of_collateral <= 0.0 || self.order_pct_of_collateral > 1.0 {
+            return Err(ConfigError::ValidationError(
+                "sports_sniping.order_pct_of_collateral must be between 0 and 1".to_string(),
+            ));
+        }
+        if self.bid_threshold <= 0.0 || self.bid_threshold >= 1.0 {
+            return Err(ConfigError::ValidationError(
+                "sports_sniping.bid_threshold must be between 0 and 1".to_string(),
             ));
         }
         Ok(())

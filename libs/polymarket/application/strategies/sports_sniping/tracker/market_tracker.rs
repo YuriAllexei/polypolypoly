@@ -1,8 +1,10 @@
 use super::super::services::log_winning_token;
 use super::winner_analyzer::analyze_orderbooks_for_winner;
 use crate::domain::DbMarket;
+use crate::infrastructure::client::TradingClient;
 use crate::infrastructure::{
-    build_ws_client, FullTimeEvent, MarketTrackerConfig, SharedOrderbooks, SharedPrecisions,
+    build_ws_client, BalanceManager, FullTimeEvent, MarketTrackerConfig, SharedOrderbooks,
+    SharedPrecisions,
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -54,11 +56,15 @@ async fn wait_for_snapshot(
 /// Run a market tracker for a single sports market
 ///
 /// Connects to the orderbook WebSocket, waits for snapshot,
-/// analyzes orderbooks to find the winning token, and logs the result.
+/// analyzes orderbooks to find the winning token, and places an order if threshold met.
 pub async fn run_sports_market_tracker(
     market: DbMarket,
     event: FullTimeEvent,
     shutdown_flag: Arc<AtomicBool>,
+    trading: Arc<TradingClient>,
+    balance_manager: Arc<RwLock<BalanceManager>>,
+    order_pct: f64,
+    bid_threshold: f64,
 ) -> anyhow::Result<()> {
     // Parse market data
     let token_ids = market.parse_token_ids()?;
@@ -126,10 +132,10 @@ pub async fn run_sports_market_tracker(
     // Analyze orderbooks to find winner
     let winner = analyze_orderbooks_for_winner(&orderbooks, &token_ids, &outcomes);
 
-    // Check if best bid meets threshold (> 0.80)
+    // Check if best bid meets threshold
     let should_execute = match &winner {
         Some(w) => match w.best_bid {
-            Some((price, _)) => price > 0.80,
+            Some((price, _)) => price > bid_threshold,
             None => false,
         },
         None => false,
@@ -143,8 +149,8 @@ pub async fn run_sports_market_tracker(
             .unwrap_or_else(|| "None".to_string());
 
         debug!(
-            "[Sports Tracker] Not executing for market {} - best bid {} is not above threshold 0.80",
-            market.id, bid_info
+            "[Sports Tracker] Not executing for market {} - best bid {} is not above threshold {:.2}",
+            market.id, bid_info, bid_threshold
         );
 
         // Cleanup and return
@@ -152,8 +158,42 @@ pub async fn run_sports_market_tracker(
         return Ok(());
     }
 
-    // Log the result
+    // Log the winner analysis
     log_winning_token(&market, &event, &winner);
+
+    // Place order for the winning token
+    if let Some(ref w) = winner {
+        // Get precision from SharedPrecisions (default to 2 if not found)
+        let precision = precisions.read().get(&w.token_id).copied().unwrap_or(2);
+
+        // Calculate price: 1.0 - 10^(-precision)
+        // precision=2 -> 0.99, precision=3 -> 0.999, etc.
+        let price = 1.0 - 10_f64.powi(-(precision as i32));
+
+        // Calculate order size from balance percentage
+        let current_balance = balance_manager.read().current_balance();
+        let size = (current_balance * order_pct).round().max(1.0);
+
+        info!(
+            "[Sports Tracker] Placing order for {} @ ${:.4} x ${:.2} (precision: {})",
+            w.outcome_name, price, size, precision
+        );
+
+        match trading.buy(&w.token_id, price, size).await {
+            Ok(response) => {
+                info!(
+                    "[Sports Tracker] ✅ Order placed successfully for market {}: {:?}",
+                    market.id, response
+                );
+            }
+            Err(e) => {
+                error!(
+                    "[Sports Tracker] ❌ Order failed for market {}: {}",
+                    market.id, e
+                );
+            }
+        }
+    }
 
     // Cleanup
     if let Err(e) = client.shutdown().await {
