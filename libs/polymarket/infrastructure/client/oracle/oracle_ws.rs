@@ -31,6 +31,14 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 /// Delay between reconnection attempts in seconds
 const RECONNECT_DELAY_SECS: u64 = 5;
 
+/// Data flow staleness threshold - if no price update received for this duration,
+/// trigger a reconnection. This catches "zombie subscription" scenarios where
+/// the TCP connection is alive but no data is flowing.
+const DATA_FLOW_STALENESS_SECS: u64 = 30;
+
+/// How often to check data flow staleness (avoid checking too frequently)
+const STALENESS_CHECK_INTERVAL_SECS: u64 = 10;
+
 // =============================================================================
 // Symbol Parsing
 // =============================================================================
@@ -279,11 +287,17 @@ async fn spawn_single_oracle_tracker(
         };
         info!("[Oracle {}] Connected and subscribed", oracle_type);
 
+        // Reset oracle health state to avoid immediate staleness detection
+        prices.write().reset_oracle_health(oracle_type);
+
         // Track connection start time (for stable connection detection)
         let connection_start = std::time::Instant::now();
 
         // Track if we should reconnect after this loop
         let mut should_reconnect = false;
+
+        // Track last time we checked for data flow staleness
+        let mut last_staleness_check = std::time::Instant::now();
 
         // Main tracking loop
         loop {
@@ -305,6 +319,23 @@ async fn spawn_single_oracle_tracker(
                 None => {
                     // No event available, sleep briefly before checking again
                     sleep(Duration::from_millis(10)).await;
+                }
+            }
+
+            // Periodically check for data flow staleness (zombie subscription detection)
+            if last_staleness_check.elapsed().as_secs() >= STALENESS_CHECK_INTERVAL_SECS {
+                last_staleness_check = std::time::Instant::now();
+
+                let staleness = prices.read().oracle_age(oracle_type);
+                if staleness.as_secs() >= DATA_FLOW_STALENESS_SECS {
+                    warn!(
+                        "[Oracle {}] Data flow STALE for {:.1}s (threshold: {}s) - triggering reconnection",
+                        oracle_type,
+                        staleness.as_secs_f64(),
+                        DATA_FLOW_STALENESS_SECS
+                    );
+                    should_reconnect = true;
+                    break;
                 }
             }
         }

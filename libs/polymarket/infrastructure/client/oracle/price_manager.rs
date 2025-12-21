@@ -86,6 +86,12 @@ impl OracleHealthState {
     pub fn time_since_update(&self) -> Duration {
         self.last_update.elapsed()
     }
+
+    /// Reset health state (call after reconnection)
+    pub fn reset(&mut self) {
+        self.last_update = Instant::now();
+        // Keep message_count for cumulative stats
+    }
 }
 
 /// Manages crypto prices from multiple oracle sources
@@ -152,6 +158,14 @@ impl OraclePriceManager {
         match oracle {
             OracleType::ChainLink => self.chainlink_health.message_count,
             OracleType::Binance => self.binance_health.message_count,
+        }
+    }
+
+    /// Reset health state for a specific oracle (call after reconnection)
+    pub fn reset_oracle_health(&mut self, oracle: OracleType) {
+        match oracle {
+            OracleType::ChainLink => self.chainlink_health.reset(),
+            OracleType::Binance => self.binance_health.reset(),
         }
     }
 

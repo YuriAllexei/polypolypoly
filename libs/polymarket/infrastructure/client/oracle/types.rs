@@ -37,6 +37,9 @@ pub struct SubscriptionEntry {
     pub topic: String,
     #[serde(rename = "type")]
     pub msg_type: String,
+    /// Filters field - required for ChainLink (empty string), optional for Binance
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filters: Option<String>,
 }
 
 /// Subscription message sent after connecting
@@ -48,12 +51,21 @@ pub struct OracleSubscription {
 
 impl OracleSubscription {
     /// Create a new subscription for the given oracle type
+    ///
+    /// Note: ChainLink uses type "*" (all types) and requires "filters": ""
+    /// Binance uses type "update" and doesn't require filters.
+    /// Per Polymarket documentation.
     pub fn new(oracle_type: OracleType) -> Self {
+        let (msg_type, filters) = match oracle_type {
+            OracleType::ChainLink => ("*".to_string(), Some(String::new())),
+            OracleType::Binance => ("update".to_string(), None),
+        };
         Self {
             action: "subscribe".to_string(),
             subscriptions: vec![SubscriptionEntry {
                 topic: oracle_type.topic().to_string(),
-                msg_type: "update".to_string(),
+                msg_type,
+                filters,
             }],
         }
     }
@@ -99,12 +111,27 @@ mod tests {
     }
 
     #[test]
-    fn test_subscription_serialization() {
+    fn test_subscription_serialization_chainlink() {
         let sub = OracleSubscription::new(OracleType::ChainLink);
         let json = serde_json::to_string(&sub).unwrap();
         assert!(json.contains("crypto_prices_chainlink"));
         assert!(json.contains("subscribe"));
-        assert!(json.contains("update"));
+        // ChainLink uses "*" type per Polymarket docs
+        assert!(json.contains(r#""type":"*""#));
+        // ChainLink requires "filters":"" per Polymarket docs
+        assert!(json.contains(r#""filters":"""#));
+    }
+
+    #[test]
+    fn test_subscription_serialization_binance() {
+        let sub = OracleSubscription::new(OracleType::Binance);
+        let json = serde_json::to_string(&sub).unwrap();
+        assert!(json.contains("crypto_prices"));
+        assert!(json.contains("subscribe"));
+        // Binance uses "update" type per Polymarket docs
+        assert!(json.contains(r#""type":"update""#));
+        // Binance doesn't require filters field
+        assert!(!json.contains("filters"));
     }
 
     #[test]
