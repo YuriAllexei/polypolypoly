@@ -196,6 +196,9 @@ docker compose --profile strategies up
 # Start only a SPECIFIC strategy (+ events syncer)
 docker compose --profile events --profile up-or-down up
 docker compose --profile events --profile sports-sniping up
+docker compose --profile up-or-down up --build
+docker compose --profile sports-sniping up --build
+docker compose --profile strategies up --build
 
 # Build and start
 docker compose --profile strategies up --build

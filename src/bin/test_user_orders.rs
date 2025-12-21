@@ -72,16 +72,9 @@ async fn main() -> Result<()> {
 
     // Main loop: refresh display every second
     while shutdown.is_running() {
-<<<<<<< HEAD
-        let manager = orders.read();
-        let order_count = manager.order_count();
-        let trade_count = manager.trade_count();
-        let asset_count = manager.asset_count();
-=======
         let order_count = order_manager.order_count();
         let fill_count = order_manager.fill_count();
         let asset_count = order_manager.asset_count();
->>>>>>> 4e93a3c (aja)
         let now = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
 
         clear_screen();
@@ -109,8 +102,14 @@ async fn main() -> Result<()> {
             let total_ask = order_manager.total_ask_size(asset_id);
 
             println!("ASSET: {}...", short_id);
-            println!("  Bids: {} (size: {:.2}) | Asks: {} (size: {:.2}) | Fills: {}",
-                bids.len(), total_bid, asks.len(), total_ask, fills.len());
+            println!(
+                "  Bids: {} (size: {:.2}) | Asks: {} (size: {:.2}) | Fills: {}",
+                bids.len(),
+                total_bid,
+                asks.len(),
+                total_ask,
+                fills.len()
+            );
 
             // Show open orders
             let open_orders = order_manager.get_open_orders(asset_id);
