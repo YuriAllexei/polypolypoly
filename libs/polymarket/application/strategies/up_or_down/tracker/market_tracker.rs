@@ -362,23 +362,27 @@ async fn run_tracking_loop(
 
             // Check if we have an order for this token that could be upgraded
             if let Some(current_order) = state.order_placed.get(&event.asset_id).cloned() {
-                // Verify order exists in OMS before attempting upgrade
-                let order_exists_in_oms = active_orders
-                    .read()
-                    .has_order(&current_order.order_id);
-
-                if !order_exists_in_oms {
-                    info!(
-                        "[WS {}] Order {} not found in OMS for {}, removing from local state",
-                        ctx.market_id,
-                        current_order.order_id,
-                        ctx.get_outcome_name(&event.asset_id)
-                    );
-                    state.order_placed.remove(&event.asset_id);
-                    continue;
-                }
-
+                // Only proceed if upgrade is actually needed (new precision is higher)
                 if new_precision > current_order.precision {
+                    // Skip OMS check for recently-placed orders (OMS polls every 1s, so wait 2s)
+                    // This prevents removing orders that were just placed but not yet indexed
+                    if !current_order.is_recently_placed(2) {
+                        let order_exists_in_oms = active_orders
+                            .read()
+                            .has_order(&current_order.order_id);
+
+                        if !order_exists_in_oms {
+                            info!(
+                                "[WS {}] Order {} not found in OMS for {}, removing from local state",
+                                ctx.market_id,
+                                current_order.order_id,
+                                ctx.get_outcome_name(&event.asset_id)
+                            );
+                            state.order_placed.remove(&event.asset_id);
+                            continue;
+                        }
+                    }
+
                     // Check if trading is halted
                     if balance_manager.read().is_halted() {
                         info!(

@@ -118,15 +118,27 @@ impl MarketTrackerContext {
 pub struct OrderInfo {
     pub order_id: String,
     pub precision: u8,
+    /// When this order was placed (for skipping OMS checks on fresh orders)
+    pub placed_at: Instant,
 }
 
 impl OrderInfo {
     pub fn new(order_id: String, precision: u8) -> Self {
-        Self { order_id, precision }
+        Self {
+            order_id,
+            precision,
+            placed_at: Instant::now(),
+        }
     }
 
     pub fn is_high_confidence(&self) -> bool {
         self.precision >= 3
+    }
+
+    /// Check if order was placed recently (within given seconds)
+    /// Used to skip OMS checks for orders that haven't been indexed yet
+    pub fn is_recently_placed(&self, threshold_secs: u64) -> bool {
+        self.placed_at.elapsed().as_secs() < threshold_secs
     }
 }
 

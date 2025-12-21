@@ -271,7 +271,46 @@ impl SniperHandler {
     }
 
     /// Process price change events and update shared orderbooks
+    /// Also detects precision upgrades from price levels
     fn handle_price_change(&mut self, event: &PriceChangeEvent) {
+        // First, detect any precision changes from incoming prices
+        for change in &event.price_changes {
+            let price_precision = decimal_places(&change.price);
+            let current_precision = *self.precisions.read().get(&change.asset_id).unwrap_or(&2);
+
+            // If incoming price has higher precision than what we know, upgrade
+            if price_precision > current_precision {
+                info!(
+                    "[WS {}] Detected precision upgrade from price_change: {} -> {} for {}",
+                    self.market_id, current_precision, price_precision, change.asset_id
+                );
+
+                // Calculate old and new tick sizes for the event
+                let old_tick_size = format!("{}", 10_f64.powi(-(current_precision as i32)));
+                let new_tick_size = format!("{}", 10_f64.powi(-(price_precision as i32)));
+
+                // Update precision
+                self.precisions
+                    .write()
+                    .insert(change.asset_id.clone(), price_precision);
+
+                // Emit synthetic tick_size_change event to trigger order upgrade
+                if let Some(ref tx) = self.tick_size_tx {
+                    let synthetic_event = TickSizeChangeEvent {
+                        event_type: "tick_size_change".to_string(),
+                        asset_id: change.asset_id.clone(),
+                        market: event.market.clone(),
+                        old_tick_size,
+                        new_tick_size,
+                        side: Some(change.side.clone()),
+                        timestamp: event.timestamp.clone(),
+                    };
+                    let _ = tx.send(synthetic_event);
+                }
+            }
+        }
+
+        // Then update the orderbooks
         let mut obs = self.orderbooks.write();
         for change in &event.price_changes {
             let orderbook = obs
