@@ -97,10 +97,19 @@ pub struct UpOrDownConfig {
     /// Fraction of collateral to use per order (e.g., 0.10 = 10%)
     #[serde(default = "default_order_pct")]
     pub order_pct_of_collateral: f64,
+
+    /// Guardian safety threshold in basis points - cancels orders if oracle is within this
+    /// distance of price_to_beat. Never bypassed, runs until market timer ends.
+    #[serde(default = "default_guardian_safety_bps")]
+    pub guardian_safety_bps: f64,
 }
 
 fn default_order_pct() -> f64 {
     0.10 // 10% default
+}
+
+fn default_guardian_safety_bps() -> f64 {
+    2.0 // 2 basis points (0.02%)
 }
 
 fn default_delta_t() -> f64 {
@@ -202,6 +211,7 @@ impl Default for UpOrDownConfig {
             threshold_max: default_threshold_max(),
             threshold_tau: default_threshold_tau(),
             order_pct_of_collateral: default_order_pct(),
+            guardian_safety_bps: default_guardian_safety_bps(),
         }
     }
 }

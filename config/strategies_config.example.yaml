@@ -19,7 +19,11 @@ up_or_down:
   # How often to poll database for new markets (seconds)
   poll_interval_secs: 0.2
   # Minimum price difference in basis points between oracle and market for trade signal
+  # (bypassable in final 5 seconds)
   oracle_bps_price_threshold: 100.0
+  # Guardian safety threshold in basis points - cancels orders if oracle is within this
+  # distance of price_to_beat. Never bypassed, runs until market timer ends.
+  guardian_safety_bps: 2.0
 
   # Dynamic threshold parameters (exponential decay based on time to market end)
   # Formula: threshold = min + (max - min) * (1 - exp(-time_remaining / tau))

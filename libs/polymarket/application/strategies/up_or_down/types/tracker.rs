@@ -37,6 +37,8 @@ pub struct MarketTrackerContext {
     pub oracle_bps_price_threshold: f64,
     /// Percentage of collateral to use per order
     pub order_pct_of_collateral: f64,
+    /// Guardian safety threshold in basis points (cancels if oracle within this of price_to_beat)
+    pub guardian_safety_bps: f64,
 }
 
 impl MarketTrackerContext {
@@ -85,6 +87,7 @@ impl MarketTrackerContext {
             price_to_beat: None,
             oracle_bps_price_threshold: config.oracle_bps_price_threshold,
             order_pct_of_collateral: config.order_pct_of_collateral,
+            guardian_safety_bps: config.guardian_safety_bps,
         })
     }
 

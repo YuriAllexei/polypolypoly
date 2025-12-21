@@ -9,7 +9,7 @@ use crate::application::strategies::up_or_down::services::{
 };
 use crate::application::strategies::up_or_down::tracker::calculate_dynamic_threshold;
 use crate::application::strategies::up_or_down::types::{
-    MarketTrackerContext, OrderInfo, TrackerState, FINAL_SECONDS_BYPASS, GUARDIAN_SAFETY_BPS,
+    MarketTrackerContext, OrderInfo, TrackerState, FINAL_SECONDS_BYPASS,
 };
 use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::{BalanceManager, SharedOraclePrices, SharedOrderbooks, SharedPrecisions};
@@ -484,7 +484,7 @@ pub async fn guardian_check(
     let bps_diff = ((price_to_beat - current_price).abs() / price_to_beat) * 10000.0;
 
     // Only act if within safety threshold
-    if bps_diff >= GUARDIAN_SAFETY_BPS {
+    if bps_diff >= ctx.guardian_safety_bps {
         return false;
     }
 
@@ -517,7 +517,7 @@ pub async fn guardian_check(
                 current_price,
                 price_to_beat,
                 bps_diff,
-                GUARDIAN_SAFETY_BPS
+                ctx.guardian_safety_bps
             );
             warn!(
                 "[WS {}] 🛡️ GUARDIAN: Cancelling {} order {} - too close to call!",
