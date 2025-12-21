@@ -17,7 +17,7 @@ pub use data::{DataApiClient, Position, PositionFilters, PositionSortBy, SortDir
 pub use gamma::{GammaClient, GammaEvent, GammaMarket, GammaTag, GammaFilters};
 pub use oracle::{spawn_oracle_trackers, OraclePriceManager, SharedOraclePrices, OracleType, PriceEntry};
 pub use sports::{spawn_sports_live_data_tracker, SportsLiveData, SportsLiveDataMessage, SportsRoute};
-pub use user::{spawn_user_order_tracker, OrderManager, SharedOrderManager, OrderState, OrderStatus, TradeState};
+// Note: OrderManager and related types moved to infrastructure::order_manager
 pub use redeem::{
     RedeemClient, RedeemError, RedemptionResult,
     create_signer_provider, fetch_redeemable_positions,

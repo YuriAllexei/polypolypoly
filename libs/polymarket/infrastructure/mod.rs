@@ -10,6 +10,7 @@ pub mod config;
 pub mod database;
 pub mod heartbeat;
 pub mod logging;
+pub mod order_manager;
 pub mod position_manager;
 pub mod shutdown;
 
@@ -30,10 +31,7 @@ pub use client::{
         FullTimeEvent, IgnoredGames, MarketsByGame, NewGameEvent, SharedSportsLiveData,
         SportsLiveData, SportsLiveDataMessage, SportsRoute,
     },
-    user::{
-        spawn_user_order_tracker, OrderManager, OrderState, OrderStatus, SharedOrderManager,
-        TradeState,
-    },
+    // Note: user module types are now in order_manager module
     PolymarketAuth,
 };
 
@@ -48,5 +46,9 @@ pub use active_order_manager::{ActiveOrder, ActiveOrderManager};
 pub use balance_manager::BalanceManager;
 pub use heartbeat::Heartbeat;
 pub use logging::{init_tracing, init_tracing_with_level};
+pub use order_manager::{
+    AssetOrderBook, Fill, MakerOrderInfo, Order, OrderManager, OrderStateStore, OrderStatus,
+    SharedOrderState, Side as OrderSide, TradeStatus,
+};
 pub use position_manager::PositionManager;
 pub use shutdown::ShutdownManager;

@@ -13,8 +13,9 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use polymarket::infrastructure::{spawn_user_order_tracker, OrderStatus, ShutdownManager};
+use polymarket::infrastructure::{OrderManager, OrderStatus, ShutdownManager};
 use std::io::{self, Write};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -44,7 +45,7 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let shutdown = ShutdownManager::new();
+    let shutdown = Arc::new(ShutdownManager::new());
     shutdown.spawn_signal_handler();
 
     // Show initial message
@@ -62,17 +63,25 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let orders = spawn_user_order_tracker(shutdown.flag()).await?;
+    // Create and start OrderManager
+    let mut order_manager = OrderManager::new();
+    order_manager.start(shutdown.flag()).await?;
 
     // Wait a moment for connection
     sleep(Duration::from_secs(2)).await;
 
     // Main loop: refresh display every second
     while shutdown.is_running() {
+<<<<<<< HEAD
         let manager = orders.read();
         let order_count = manager.order_count();
         let trade_count = manager.trade_count();
         let asset_count = manager.asset_count();
+=======
+        let order_count = order_manager.order_count();
+        let fill_count = order_manager.fill_count();
+        let asset_count = order_manager.asset_count();
+>>>>>>> 4e93a3c (aja)
         let now = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
 
         clear_screen();
@@ -82,25 +91,32 @@ async fn main() -> Result<()> {
         println!("════════════════════════════════════════════════════════════════");
         println!("  Last Update: {}", now);
         println!(
-            "  Orders: {} | Trades: {} | Assets: {}",
-            order_count, trade_count, asset_count
+            "  Orders: {} | Fills: {} | Assets: {}",
+            order_count, fill_count, asset_count
         );
         println!("  Press Ctrl+C to stop");
         println!("════════════════════════════════════════════════════════════════");
         println!();
 
-        // Recent Orders
-        println!("ORDERS ({} total)", order_count);
-        println!("────────────────────────────────────────────────────────────────");
-        if order_count == 0 {
-            println!("  (no orders yet - place an order to see updates)");
-        } else {
-            // Show up to 10 most recent orders
-            let mut all_orders: Vec<_> = manager.all_orders().collect();
-            all_orders.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-            for order in all_orders.iter().take(10) {
+        // Per-asset breakdown
+        let asset_ids = order_manager.asset_ids();
+        for asset_id in asset_ids.iter().take(5) {
+            let short_id = &asset_id[..12.min(asset_id.len())];
+            let bids = order_manager.get_bids(asset_id);
+            let asks = order_manager.get_asks(asset_id);
+            let fills = order_manager.get_fills(asset_id);
+            let total_bid = order_manager.total_bid_size(asset_id);
+            let total_ask = order_manager.total_ask_size(asset_id);
+
+            println!("ASSET: {}...", short_id);
+            println!("  Bids: {} (size: {:.2}) | Asks: {} (size: {:.2}) | Fills: {}",
+                bids.len(), total_bid, asks.len(), total_ask, fills.len());
+
+            // Show open orders
+            let open_orders = order_manager.get_open_orders(asset_id);
+            for order in open_orders.iter().take(3) {
                 println!(
-                    "  {} {:>4} {:>3} @ {:>6} | {:>6}/{:>6} | {}",
+                    "    {} {} {:>4} @ {:>6} | {:>6}/{:>6} | {}",
                     format_status(order.status),
                     order.side,
                     order.outcome,
@@ -110,47 +126,26 @@ async fn main() -> Result<()> {
                     &order.order_id[..12.min(order.order_id.len())]
                 );
             }
-            if order_count > 10 {
-                println!("  ... and {} more", order_count - 10);
-            }
-        }
-        println!();
-
-        // Recent Trades
-        println!("TRADES ({} total)", trade_count);
-        println!("────────────────────────────────────────────────────────────────");
-        if trade_count == 0 {
-            println!("  (no trades yet)");
-        } else {
-            // Show up to 10 most recent trades
-            let mut all_trades: Vec<_> = manager.all_trades().collect();
-            all_trades.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-            for trade in all_trades.iter().take(10) {
-                println!(
-                    "  {:>10} {:>4} {:>3} @ {:>6} (size: {:>6}) | {}",
-                    format!("{:?}", trade.status),
-                    trade.side,
-                    trade.outcome,
-                    trade.price,
-                    trade.size,
-                    &trade.trade_id[..12.min(trade.trade_id.len())]
-                );
-            }
-            if trade_count > 10 {
-                println!("  ... and {} more", trade_count - 10);
-            }
+            println!();
         }
 
-        println!();
+        if asset_ids.is_empty() {
+            println!("  (no orders yet - place an order to see updates)");
+            println!();
+        }
+
         println!("════════════════════════════════════════════════════════════════");
         println!("  Waiting for order/trade updates from WebSocket...");
         println!("════════════════════════════════════════════════════════════════");
 
-        drop(manager); // Release lock before sleeping
         sleep(Duration::from_secs(1)).await;
     }
 
     clear_screen();
     println!("Shutting down...");
+
+    // Stop order manager
+    order_manager.stop().await;
+
     Ok(())
 }
