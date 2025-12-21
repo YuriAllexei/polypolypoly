@@ -18,6 +18,10 @@ pub const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 /// Seconds before market end when we bypass all risk checks and threshold waits
 pub const FINAL_SECONDS_BYPASS: f64 = 5.0;
 
+/// Safety BPS threshold for guardian check - cancels if oracle is within this
+/// distance of price_to_beat. Never bypassed, runs until market ends.
+pub const GUARDIAN_SAFETY_BPS: f64 = 2.0;
+
 // =============================================================================
 // Oracle Source
 // =============================================================================

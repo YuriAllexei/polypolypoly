@@ -6,7 +6,8 @@ use crate::application::strategies::up_or_down::services::{
     get_market_oracle_age, get_price_to_beat, log_market_ended,
 };
 use crate::application::strategies::up_or_down::tracker::{
-    check_all_orderbooks, check_risk, place_order, pre_order_risk_check, upgrade_order_on_tick_change,
+    check_all_orderbooks, check_risk, guardian_check, place_order, pre_order_risk_check,
+    upgrade_order_on_tick_change,
 };
 use crate::application::strategies::up_or_down::types::{
     MarketTrackerContext, OrderInfo, TrackerState, TrackingLoopExit, FINAL_SECONDS_BYPASS,
@@ -460,6 +461,9 @@ async fn run_tracking_loop(
 
         // Monitor for risk on placed orders
         check_risk(&conn.orderbooks, state, ctx, oracle_prices, trading).await;
+
+        // Guardian safety net - runs ALWAYS, never bypassed
+        guardian_check(state, ctx, oracle_prices, trading).await;
 
         // Brief sleep before next iteration
         sleep(StdDuration::from_millis(100)).await;

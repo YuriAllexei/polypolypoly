@@ -75,8 +75,12 @@ pub fn check_token_orderbook(
         / 1000.0;
     let in_final_seconds = time_remaining > 0.0 && time_remaining <= FINAL_SECONDS_BYPASS;
 
-    // If in final seconds and no order placed yet, immediately trigger
-    if in_final_seconds && !state.order_placed.contains_key(token_id) {
+    // If in final seconds and no order placed yet (and not already triggered), immediately trigger
+    // The threshold_triggered check prevents re-triggering after guardian cancels an order
+    if in_final_seconds
+        && !state.order_placed.contains_key(token_id)
+        && !state.threshold_triggered.contains(token_id)
+    {
         info!(
             "[WS {}] Final {:.1}s - bypassing threshold wait for {}",
             ctx.market_id, time_remaining, outcome_name

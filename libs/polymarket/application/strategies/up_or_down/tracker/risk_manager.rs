@@ -9,7 +9,7 @@ use crate::application::strategies::up_or_down::services::{
 };
 use crate::application::strategies::up_or_down::tracker::calculate_dynamic_threshold;
 use crate::application::strategies::up_or_down::types::{
-    MarketTrackerContext, OrderInfo, TrackerState, FINAL_SECONDS_BYPASS,
+    MarketTrackerContext, OrderInfo, TrackerState, FINAL_SECONDS_BYPASS, GUARDIAN_SAFETY_BPS,
 };
 use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::{BalanceManager, SharedOraclePrices, SharedOrderbooks, SharedPrecisions};
@@ -432,4 +432,110 @@ pub async fn upgrade_order_on_tick_change(
             None
         }
     }
+}
+
+// =============================================================================
+// Guardian Safety Check
+// =============================================================================
+
+/// Guardian safety check - cancels orders if oracle is too close to price_to_beat.
+///
+/// Unlike other risk checks, this is NEVER bypassed (runs until market ends).
+/// Only cancels the specific outcome that's losing based on oracle direction:
+/// - If oracle > price_to_beat → "Up" is winning → cancel "Down" orders
+/// - If oracle < price_to_beat → "Down" is winning → cancel "Up" orders
+///
+/// Returns true if any orders were cancelled.
+pub async fn guardian_check(
+    state: &mut TrackerState,
+    ctx: &MarketTrackerContext,
+    oracle_prices: &Option<SharedOraclePrices>,
+    trading: &TradingClient,
+) -> bool {
+    // Skip if no orders placed
+    if state.order_placed.is_empty() {
+        return false;
+    }
+
+    // Skip if market timer has ended - outcome is already locked, placing is risk-free
+    let now = Utc::now();
+    let time_remaining = ctx
+        .market_end_time
+        .signed_duration_since(now)
+        .num_milliseconds() as f64
+        / 1000.0;
+    if time_remaining <= 0.0 {
+        return false;
+    }
+
+    // Get price_to_beat and oracle prices
+    let (price_to_beat, oracle_prices) = match (ctx.price_to_beat, oracle_prices) {
+        (Some(ptb), Some(op)) => (ptb, op),
+        _ => return false,
+    };
+
+    // Get current oracle price
+    let current_price = match get_oracle_price(ctx.oracle_source, ctx.crypto_asset, oracle_prices) {
+        Some(price) => price,
+        None => return false,
+    };
+
+    // Calculate BPS difference
+    let bps_diff = ((price_to_beat - current_price).abs() / price_to_beat) * 10000.0;
+
+    // Only act if within safety threshold
+    if bps_diff >= GUARDIAN_SAFETY_BPS {
+        return false;
+    }
+
+    // Determine which outcome is LOSING based on oracle direction
+    // oracle > price_to_beat → "Up" wins → "Down" loses
+    // oracle < price_to_beat → "Down" wins → "Up" loses
+    let losing_outcome = if current_price > price_to_beat {
+        "Down"
+    } else {
+        "Up"
+    };
+
+    // Find and cancel orders for the losing outcome
+    let mut cancelled_any = false;
+    let orders_to_check: Vec<(String, OrderInfo)> = state
+        .order_placed
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    for (token_id, order_info) in orders_to_check {
+        let outcome_name = ctx.get_outcome_name(&token_id);
+
+        if outcome_name == losing_outcome {
+            // LOUD WARNING - this is a save!
+            warn!(
+                "[WS {}] 🛡️ GUARDIAN SAVE: {} at risk! Oracle ${:.2} vs target ${:.2} ({:.2} bps < {} threshold)",
+                ctx.market_id,
+                outcome_name,
+                current_price,
+                price_to_beat,
+                bps_diff,
+                GUARDIAN_SAFETY_BPS
+            );
+            warn!(
+                "[WS {}] 🛡️ GUARDIAN: Cancelling {} order {} - too close to call!",
+                ctx.market_id,
+                outcome_name,
+                order_info.order_id
+            );
+
+            if cancel_order(trading, &order_info.order_id, &token_id, ctx).await {
+                state.order_placed.remove(&token_id);
+                cancelled_any = true;
+                info!(
+                    "[WS {}] 🛡️ GUARDIAN: Successfully cancelled {} order - disaster averted!",
+                    ctx.market_id, outcome_name
+                );
+            }
+        }
+    }
+
+    cancelled_any
 }
