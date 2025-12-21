@@ -158,6 +158,16 @@ pub async fn run_sports_market_tracker(
         return Ok(());
     }
 
+    // Check if trading is halted before placing order
+    if balance_manager.read().is_halted() {
+        warn!(
+            "[Sports Tracker] Order blocked - trading halted for market {}",
+            market.id
+        );
+        let _ = client.shutdown().await;
+        return Ok(());
+    }
+
     // Log the winner analysis
     log_winning_token(&market, &event, &winner);
 
