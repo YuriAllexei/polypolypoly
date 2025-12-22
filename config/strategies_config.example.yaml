@@ -40,3 +40,7 @@ sports_sniping:
   poll_interval_secs: 1.0
   # Enable/disable the strategy
   enabled: true
+  # Fraction of collateral to use per order (e.g., 0.10 = 10%)
+  order_pct_of_collateral: 0.10
+  # Minimum best bid price to execute (e.g., 0.80 = only sell if bid > $0.80)
+  bid_threshold: 0.80
