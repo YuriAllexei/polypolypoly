@@ -107,6 +107,20 @@ pub struct TradeMessage {
     /// Message type - always "TRADE"
     #[serde(rename = "type")]
     pub msg_type: String,
+
+    // --- Additional fields from REST API / docs ---
+
+    /// Fee rate in basis points
+    #[serde(default)]
+    pub fee_rate_bps: Option<String>,
+
+    /// On-chain transaction hash (available after MINED)
+    #[serde(default)]
+    pub transaction_hash: Option<String>,
+
+    /// Whether user was TAKER or MAKER in this trade
+    #[serde(default)]
+    pub trader_side: Option<String>,
 }
 
 /// Maker order details within a trade
@@ -118,6 +132,10 @@ pub struct MakerOrder {
     pub outcome: String,
     pub owner: String,
     pub price: String,
+
+    /// Side of the maker order (BUY/SELL) - added Aug 2025
+    #[serde(default)]
+    pub side: Option<String>,
 }
 
 // =============================================================================
@@ -176,24 +194,46 @@ pub struct OrderMessage {
     /// Message type: PLACEMENT, UPDATE, or CANCELLATION
     #[serde(rename = "type")]
     pub msg_type: String,
+
+    // --- Additional fields from REST API / docs ---
+
+    /// Unix timestamp when the order was created
+    #[serde(default)]
+    pub created_at: Option<String>,
+
+    /// Unix timestamp when the order expires (0 = no expiration)
+    #[serde(default)]
+    pub expiration: Option<String>,
+
+    /// Order type: GTC, FOK, GTD, FAK
+    #[serde(default)]
+    pub order_type: Option<String>,
+
+    /// Maker address (funder wallet)
+    #[serde(default)]
+    pub maker_address: Option<String>,
+
+    /// Order status from REST API
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
-/// Order type enum for easier matching
+/// Message type enum for order events (PLACEMENT, UPDATE, CANCELLATION)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OrderType {
+pub enum MessageType {
     Placement,
     Update,
     Cancellation,
 }
 
 impl OrderMessage {
-    /// Parse the order type from the message
-    pub fn order_type(&self) -> OrderType {
+    /// Parse the message type from the message
+    pub fn message_type(&self) -> MessageType {
         match self.msg_type.as_str() {
-            "PLACEMENT" => OrderType::Placement,
-            "UPDATE" => OrderType::Update,
-            "CANCELLATION" => OrderType::Cancellation,
-            _ => OrderType::Update, // Default to update for unknown types
+            "PLACEMENT" => MessageType::Placement,
+            "UPDATE" => MessageType::Update,
+            "CANCELLATION" => MessageType::Cancellation,
+            _ => MessageType::Update, // Default to update for unknown types
         }
     }
 }
@@ -274,7 +314,7 @@ mod tests {
         }"#;
         let order: OrderMessage = serde_json::from_str(json).unwrap();
         assert_eq!(order.id, "order-1");
-        assert_eq!(order.order_type(), OrderType::Placement);
+        assert_eq!(order.message_type(), MessageType::Placement);
     }
 
     #[test]

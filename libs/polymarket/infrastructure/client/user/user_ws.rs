@@ -1,11 +1,13 @@
 //! User Channel WebSocket Client
 //!
 //! Connects to the Polymarket user WebSocket channel for real-time
-//! order and trade updates.
+//! order and trade updates. Automatically hydrates from REST API on startup.
 //!
 //! See: https://docs.polymarket.com/developers/CLOB/websocket/user-channel
 
-use super::order_manager::{OrderManager, SharedOrderManager};
+use super::super::auth::PolymarketAuth;
+use super::super::clob::rest::RestClient;
+use super::order_manager::{OrderEvent, OrderEventCallback, OrderStateStore, SharedOrderState};
 use super::types::{OrderMessage, TradeMessage, UserMessage, UserSubscription};
 use anyhow::Result;
 use hypersockets::core::*;
@@ -120,37 +122,29 @@ impl MessageRouter for UserRouter {
 
 /// Handler for processing user channel messages
 pub struct UserHandler {
-    orders: SharedOrderManager,
-    message_count: u64,
-    order_count: u64,
-    trade_count: u64,
+    state: SharedOrderState,
+    callback: Arc<dyn OrderEventCallback>,
 }
 
 impl UserHandler {
-    pub fn new(orders: SharedOrderManager) -> Self {
-        Self {
-            orders,
-            message_count: 0,
-            order_count: 0,
-            trade_count: 0,
-        }
+    pub fn new(state: SharedOrderState) -> Self {
+        let callback = state.read().callback().clone();
+        Self { state, callback }
     }
 
     fn handle_trade(&mut self, trade: &TradeMessage) {
-        self.trade_count += 1;
-
         info!(
             "[UserWS] Trade: {} {} {} @ {} (size: {}, status: {})",
             trade.side, trade.outcome, trade.asset_id, trade.price, trade.size, trade.status
         );
 
-        // Update order manager
-        self.orders.write().process_trade(trade);
+        let event = self.state.write().process_trade(trade);
+        if let Some(event) = event {
+            self.fire_callback(&event);
+        }
     }
 
     fn handle_order(&mut self, order: &OrderMessage) {
-        self.order_count += 1;
-
         info!(
             "[UserWS] Order {}: {} {} {} @ {} (matched: {}/{})",
             order.msg_type,
@@ -162,15 +156,25 @@ impl UserHandler {
             order.original_size
         );
 
-        // Update order manager
-        self.orders.write().process_order(order);
+        let event = self.state.write().process_order(order);
+        if let Some(event) = event {
+            self.fire_callback(&event);
+        }
+    }
+
+    fn fire_callback(&self, event: &OrderEvent) {
+        match event {
+            OrderEvent::Placed(order) => self.callback.on_order_placed(order),
+            OrderEvent::Updated(order) => self.callback.on_order_updated(order),
+            OrderEvent::Filled(order) => self.callback.on_order_filled(order),
+            OrderEvent::Cancelled(order) => self.callback.on_order_cancelled(order),
+            OrderEvent::Trade(fill) => self.callback.on_trade(fill),
+        }
     }
 }
 
 impl MessageHandler<UserMessage> for UserHandler {
     fn handle(&mut self, message: UserMessage) -> hypersockets::Result<()> {
-        self.message_count += 1;
-
         match message {
             UserMessage::Trade(trade) => self.handle_trade(&trade),
             UserMessage::Order(order) => self.handle_order(&order),
@@ -193,19 +197,18 @@ impl MessageHandler<UserMessage> for UserHandler {
 /// Build a WebSocket client for the user channel
 async fn build_ws_client(
     config: &UserConfig,
-    orders: SharedOrderManager,
+    state: SharedOrderState,
 ) -> Result<WebSocketClient<UserRouter, UserMessage>> {
     // Local shutdown flag for this WebSocket client only
     let local_shutdown_flag = Arc::new(AtomicBool::new(true));
 
     let router = UserRouter;
-    let handler = UserHandler::new(orders);
+    let handler = UserHandler::new(state);
 
     let subscription = config.subscription();
     let subscription_json = serde_json::to_string(&subscription)?;
 
     // Create PONG detector for "PONG" text messages
-    // Timeout is 15s (3x heartbeat interval of 5s)
     let pong_detector = Arc::new(TextPongDetector::new("PONG".to_string()));
 
     let client = WebSocketClientBuilder::new()
@@ -250,50 +253,74 @@ fn handle_client_event(event: ClientEvent) -> bool {
 }
 
 // =============================================================================
-// Public Entry Point
+// Public Entry Points
 // =============================================================================
 
-/// Spawn a user order tracker
+/// Spawn a user order tracker with automatic REST hydration
 ///
-/// Connects to the Polymarket user WebSocket channel and tracks order/trade
-/// updates in real-time. Returns a shared OrderManager that can be queried
-/// for current order state.
+/// 1. Hydrates existing orders from REST API
+/// 2. Hydrates recent trades from REST API
+/// 3. Connects to WebSocket for real-time updates
 ///
 /// # Arguments
 /// * `shutdown_flag` - Shared shutdown flag for graceful termination
+/// * `rest_client` - REST client for hydration
+/// * `auth` - Authentication for REST API calls
+/// * `callback` - Optional callback for order/trade events
 ///
 /// # Returns
-/// * `SharedOrderManager` - Thread-safe order state manager
-///
-/// # Example
-/// ```ignore
-/// let orders = spawn_user_order_tracker(shutdown.flag()).await?;
-///
-/// // Later, query order state
-/// let mgr = orders.read().unwrap();
-/// if let Some(order) = mgr.get_order("order-123") {
-///     println!("Order status: {:?}", order.status);
-/// }
-/// ```
+/// * `SharedOrderState` - Thread-safe order state store
 pub async fn spawn_user_order_tracker(
     shutdown_flag: Arc<AtomicBool>,
-) -> Result<SharedOrderManager> {
-    // Load configuration from environment
+    rest_client: &RestClient,
+    auth: &PolymarketAuth,
+    callback: Option<Arc<dyn OrderEventCallback>>,
+) -> Result<SharedOrderState> {
+    // Load WebSocket configuration from environment
     let config = UserConfig::from_env()?;
 
     info!("[UserWS] Starting user order tracker...");
-    info!("[UserWS] API Key: {}...", &config.api_key[..8.min(config.api_key.len())]);
+    info!(
+        "[UserWS] API Key: {}...",
+        &config.api_key[..8.min(config.api_key.len())]
+    );
 
-    // Create shared order manager
-    let orders: SharedOrderManager = Arc::new(RwLock::new(OrderManager::new()));
-    let orders_clone = Arc::clone(&orders);
+    // Create shared order state store
+    let state: SharedOrderState = Arc::new(RwLock::new(match callback {
+        Some(cb) => OrderStateStore::with_callback(cb),
+        None => OrderStateStore::new(),
+    }));
 
-    // Clone shutdown flag for the spawned task
+    // Hydrate from REST API
+    info!("[UserWS] Hydrating orders from REST API...");
+    match rest_client.get_all_orders(auth, None).await {
+        Ok(orders) => {
+            state.write().hydrate_orders(&orders);
+            info!("[UserWS] Hydrated {} orders", orders.len());
+        }
+        Err(e) => {
+            warn!("[UserWS] Failed to hydrate orders: {}", e);
+        }
+    }
+
+    info!("[UserWS] Hydrating trades from REST API...");
+    match rest_client.get_all_trades(auth, None).await {
+        Ok(trades) => {
+            state.write().hydrate_trades(&trades);
+            info!("[UserWS] Hydrated {} trades", trades.len());
+        }
+        Err(e) => {
+            warn!("[UserWS] Failed to hydrate trades: {}", e);
+        }
+    }
+
+    // Clone for the spawned task
+    let state_clone = Arc::clone(&state);
     let shutdown_clone = Arc::clone(&shutdown_flag);
 
-    // Spawn tracker task
+    // Spawn WebSocket tracker task
     tokio::spawn(async move {
-        if let Err(e) = run_user_tracker(config, orders_clone, shutdown_clone).await {
+        if let Err(e) = run_user_tracker(config, state_clone, shutdown_clone).await {
             warn!("[UserWS] User tracker error: {}", e);
         }
     });
@@ -301,17 +328,52 @@ pub async fn spawn_user_order_tracker(
     // Give the connection a moment to establish
     sleep(Duration::from_millis(100)).await;
 
-    Ok(orders)
+    Ok(state)
+}
+
+/// Spawn a user order tracker without REST hydration (WebSocket only)
+///
+/// Use this when you don't have a REST client available or want to start
+/// with an empty state.
+pub async fn spawn_user_order_tracker_ws_only(
+    shutdown_flag: Arc<AtomicBool>,
+    callback: Option<Arc<dyn OrderEventCallback>>,
+) -> Result<SharedOrderState> {
+    let config = UserConfig::from_env()?;
+
+    info!("[UserWS] Starting user order tracker (WebSocket only)...");
+    info!(
+        "[UserWS] API Key: {}...",
+        &config.api_key[..8.min(config.api_key.len())]
+    );
+
+    let state: SharedOrderState = Arc::new(RwLock::new(match callback {
+        Some(cb) => OrderStateStore::with_callback(cb),
+        None => OrderStateStore::new(),
+    }));
+
+    let state_clone = Arc::clone(&state);
+    let shutdown_clone = Arc::clone(&shutdown_flag);
+
+    tokio::spawn(async move {
+        if let Err(e) = run_user_tracker(config, state_clone, shutdown_clone).await {
+            warn!("[UserWS] User tracker error: {}", e);
+        }
+    });
+
+    sleep(Duration::from_millis(100)).await;
+
+    Ok(state)
 }
 
 /// Internal function to run the user tracker
 async fn run_user_tracker(
     config: UserConfig,
-    orders: SharedOrderManager,
+    state: SharedOrderState,
     shutdown_flag: Arc<AtomicBool>,
 ) -> Result<()> {
     // Build and connect WebSocket client
-    let client = build_ws_client(&config, orders).await?;
+    let client = build_ws_client(&config, state).await?;
     info!("[UserWS] Connected and authenticated");
 
     // Main tracking loop
