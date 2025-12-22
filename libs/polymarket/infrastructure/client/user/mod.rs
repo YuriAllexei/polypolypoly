@@ -38,7 +38,8 @@ pub use types::{
 // Re-export order manager types
 pub use order_manager::{
     AssetOrderBook, Fill, MakerOrderInfo, NoOpCallback, Order, OrderEvent, OrderEventCallback,
-    OrderStateStore, OrderStatus, OrderType, SharedOrderState, Side, TradeStatus,
+    OrderStateStore, OrderStatus, OrderType, SharedOrderState, Side, StpCheckResult,
+    TokenPairRegistry, TradeStatus,
 };
 
 // Re-export WebSocket functions
