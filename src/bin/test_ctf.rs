@@ -27,6 +27,19 @@ use std::sync::Arc;
 const POLYGON_RPC_URL: &str = "https://polygon-rpc.com";
 const POLYGON_CHAIN_ID: u64 = 137;
 
+/// Large allowance threshold (anything above 1 trillion USDC is considered "unlimited")
+const LARGE_ALLOWANCE_THRESHOLD: u64 = 1_000_000_000_000_000_000; // 1 trillion USDC in raw
+
+/// Format allowance for display, handling very large values
+fn format_allowance(allowance: U256) -> String {
+    // Check if it's a very large value (effectively unlimited)
+    if allowance > U256::from(LARGE_ALLOWANCE_THRESHOLD) {
+        "MAX (unlimited)".to_string()
+    } else {
+        format!("${:.2}", usdc_from_raw(allowance))
+    }
+}
+
 fn print_usage() {
     println!("CTF Split/Merge Test Tool");
     println!();
@@ -253,13 +266,8 @@ async fn do_check() -> Result<()> {
     let allowance_neg_risk = client.check_allowance(safe_address, true).await?;
 
     println!();
-    println!("USDC Allowance (Normal CTF): {}",
-             if allowance_normal == U256::MAX { "MAX (unlimited)".to_string() }
-             else { format!("${:.6}", usdc_from_raw(allowance_normal)) });
-
-    println!("USDC Allowance (NegRisk CTF): {}",
-             if allowance_neg_risk == U256::MAX { "MAX (unlimited)".to_string() }
-             else { format!("${:.6}", usdc_from_raw(allowance_neg_risk)) });
+    println!("USDC Allowance (Normal CTF): {}", format_allowance(allowance_normal));
+    println!("USDC Allowance (NegRisk CTF): {}", format_allowance(allowance_neg_risk));
 
     println!();
     println!("════════════════════════════════════════════════════════════════");
