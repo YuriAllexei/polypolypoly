@@ -8,7 +8,8 @@
 
 mod services;
 mod strategy;
-mod tracker;
-mod types;
+pub mod tracker;
+pub mod types;
 
 pub use strategy::UpOrDownStrategy;
+pub use types::{CryptoAsset, Timeframe};

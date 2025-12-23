@@ -25,6 +25,10 @@ pub struct StrategiesConfig {
     /// Sports Sniping strategy configuration
     #[serde(default)]
     pub sports_sniping: SportsSnipingConfig,
+
+    /// Market Merger strategy configuration
+    #[serde(default)]
+    pub market_merger: MarketMergerConfig,
 }
 
 /// Components configuration (shared infrastructure)
@@ -201,6 +205,304 @@ impl SportsSnipingConfig {
     }
 }
 
+// =============================================================================
+// Market Merger Configuration
+// =============================================================================
+
+// Market Merger defaults
+fn default_mm_assets() -> Vec<String> {
+    vec!["BTC".to_string(), "ETH".to_string()]
+}
+
+fn default_mm_timeframes() -> Vec<String> {
+    vec!["1H".to_string(), "4H".to_string()]
+}
+
+fn default_mm_poll_interval() -> f64 {
+    60.0
+}
+
+fn default_mm_num_levels() -> u8 {
+    3
+}
+
+fn default_mm_level_spreads() -> Vec<f64> {
+    vec![1.0, 3.0, 5.0]
+}
+
+fn default_mm_quote_refresh_ms() -> u64 {
+    1000
+}
+
+fn default_mm_min_profit_margin() -> f64 {
+    0.02
+}
+
+fn default_mm_bootstrap_threshold() -> f64 {
+    100.0
+}
+
+fn default_mm_confirmed_threshold() -> f64 {
+    500.0
+}
+
+fn default_mm_bootstrap_size_pct() -> f64 {
+    0.01
+}
+
+fn default_mm_confirmed_size_pct() -> f64 {
+    0.03
+}
+
+fn default_mm_scaled_size_pct() -> f64 {
+    0.05
+}
+
+fn default_mm_max_quote_size() -> f64 {
+    200.0
+}
+
+fn default_mm_min_opportunity_score() -> f64 {
+    10.0
+}
+
+fn default_mm_max_taker_size() -> f64 {
+    100.0
+}
+
+fn default_mm_profit_margin_weight() -> f64 {
+    100.0
+}
+
+fn default_mm_price_vs_bid_weight() -> f64 {
+    200.0
+}
+
+fn default_mm_delta_coverage_weight() -> f64 {
+    15.0
+}
+
+fn default_mm_avg_improvement_weight() -> f64 {
+    50.0
+}
+
+fn default_mm_spread_adjust_threshold() -> f64 {
+    0.10
+}
+
+fn default_mm_max_imbalance_halt() -> f64 {
+    0.50
+}
+
+fn default_mm_min_merge_pairs() -> u64 {
+    10
+}
+
+fn default_mm_max_merge_imbalance() -> f64 {
+    0.05
+}
+
+fn default_mm_max_cost_spread() -> f64 {
+    0.03
+}
+
+fn default_mm_merge_profit_threshold() -> f64 {
+    0.98
+}
+
+/// Configuration for the Market Merger strategy
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketMergerConfig {
+    // === Market Selection ===
+    /// Crypto assets to trade (e.g., ["BTC", "ETH", "SOL", "XRP"])
+    #[serde(default = "default_mm_assets")]
+    pub assets: Vec<String>,
+
+    /// Timeframes to trade (e.g., ["1H", "4H"])
+    #[serde(default = "default_mm_timeframes")]
+    pub timeframes: Vec<String>,
+
+    /// Poll interval for new markets (seconds)
+    #[serde(default = "default_mm_poll_interval")]
+    pub poll_interval_secs: f64,
+
+    // === Quote Ladder ===
+    /// Number of bid levels per token
+    #[serde(default = "default_mm_num_levels")]
+    pub num_levels: u8,
+
+    /// Spread from best bid for each level (in cents)
+    #[serde(default = "default_mm_level_spreads")]
+    pub level_spreads_cents: Vec<f64>,
+
+    /// Quote refresh interval (milliseconds)
+    #[serde(default = "default_mm_quote_refresh_ms")]
+    pub quote_refresh_ms: u64,
+
+    /// Minimum profit margin to maintain (buffer for fees)
+    #[serde(default = "default_mm_min_profit_margin")]
+    pub min_profit_margin: f64,
+
+    // === Dynamic Sizing (phases) ===
+    /// Position value threshold for Bootstrap -> Confirmed ($)
+    #[serde(default = "default_mm_bootstrap_threshold")]
+    pub bootstrap_threshold_usd: f64,
+
+    /// Position value threshold for Confirmed -> Scaled ($)
+    #[serde(default = "default_mm_confirmed_threshold")]
+    pub confirmed_threshold_usd: f64,
+
+    /// Size percentage in Bootstrap phase
+    #[serde(default = "default_mm_bootstrap_size_pct")]
+    pub bootstrap_size_pct: f64,
+
+    /// Size percentage in Confirmed phase
+    #[serde(default = "default_mm_confirmed_size_pct")]
+    pub confirmed_size_pct: f64,
+
+    /// Size percentage in Scaled phase
+    #[serde(default = "default_mm_scaled_size_pct")]
+    pub scaled_size_pct: f64,
+
+    /// Maximum quote size per level ($)
+    #[serde(default = "default_mm_max_quote_size")]
+    pub max_quote_size_usd: f64,
+
+    // === Opportunity-Based Taker ===
+    /// Minimum opportunity score to execute taker
+    #[serde(default = "default_mm_min_opportunity_score")]
+    pub min_opportunity_score: f64,
+
+    /// Maximum taker order size (tokens)
+    #[serde(default = "default_mm_max_taker_size")]
+    pub max_taker_size: f64,
+
+    /// Score weight for profit margin (points per 1% margin)
+    #[serde(default = "default_mm_profit_margin_weight")]
+    pub profit_margin_weight: f64,
+
+    /// Score weight for price vs our bid (points per cent below bid)
+    #[serde(default = "default_mm_price_vs_bid_weight")]
+    pub price_vs_bid_weight: f64,
+
+    /// Score weight for delta coverage (points for 100% coverage)
+    #[serde(default = "default_mm_delta_coverage_weight")]
+    pub delta_coverage_weight: f64,
+
+    /// Score weight for avg cost improvement (points per cent below avg)
+    #[serde(default = "default_mm_avg_improvement_weight")]
+    pub avg_improvement_weight: f64,
+
+    // === Spread Skew (for bid adjustment) ===
+    /// Imbalance threshold to start adjusting spreads
+    #[serde(default = "default_mm_spread_adjust_threshold")]
+    pub spread_adjust_threshold: f64,
+
+    /// Imbalance threshold to halt quoting on overweight side
+    #[serde(default = "default_mm_max_imbalance_halt")]
+    pub max_imbalance_halt: f64,
+
+    // === Merge Conditions ===
+    /// Minimum pairs to trigger merge
+    #[serde(default = "default_mm_min_merge_pairs")]
+    pub min_merge_pairs: u64,
+
+    /// Maximum imbalance to allow merge
+    #[serde(default = "default_mm_max_merge_imbalance")]
+    pub max_merge_imbalance: f64,
+
+    /// Maximum cost spread between Up and Down avg costs
+    #[serde(default = "default_mm_max_cost_spread")]
+    pub max_cost_spread: f64,
+
+    /// Combined cost threshold for merge (must be below this)
+    #[serde(default = "default_mm_merge_profit_threshold")]
+    pub merge_profit_threshold: f64,
+}
+
+impl Default for MarketMergerConfig {
+    fn default() -> Self {
+        Self {
+            assets: default_mm_assets(),
+            timeframes: default_mm_timeframes(),
+            poll_interval_secs: default_mm_poll_interval(),
+            num_levels: default_mm_num_levels(),
+            level_spreads_cents: default_mm_level_spreads(),
+            quote_refresh_ms: default_mm_quote_refresh_ms(),
+            min_profit_margin: default_mm_min_profit_margin(),
+            bootstrap_threshold_usd: default_mm_bootstrap_threshold(),
+            confirmed_threshold_usd: default_mm_confirmed_threshold(),
+            bootstrap_size_pct: default_mm_bootstrap_size_pct(),
+            confirmed_size_pct: default_mm_confirmed_size_pct(),
+            scaled_size_pct: default_mm_scaled_size_pct(),
+            max_quote_size_usd: default_mm_max_quote_size(),
+            min_opportunity_score: default_mm_min_opportunity_score(),
+            max_taker_size: default_mm_max_taker_size(),
+            profit_margin_weight: default_mm_profit_margin_weight(),
+            price_vs_bid_weight: default_mm_price_vs_bid_weight(),
+            delta_coverage_weight: default_mm_delta_coverage_weight(),
+            avg_improvement_weight: default_mm_avg_improvement_weight(),
+            spread_adjust_threshold: default_mm_spread_adjust_threshold(),
+            max_imbalance_halt: default_mm_max_imbalance_halt(),
+            min_merge_pairs: default_mm_min_merge_pairs(),
+            max_merge_imbalance: default_mm_max_merge_imbalance(),
+            max_cost_spread: default_mm_max_cost_spread(),
+            merge_profit_threshold: default_mm_merge_profit_threshold(),
+        }
+    }
+}
+
+impl MarketMergerConfig {
+    fn validate(&self) -> Result<()> {
+        if self.poll_interval_secs <= 0.0 {
+            return Err(ConfigError::ValidationError(
+                "market_merger.poll_interval_secs must be greater than 0".to_string(),
+            ));
+        }
+        if self.assets.is_empty() {
+            return Err(ConfigError::ValidationError(
+                "market_merger.assets cannot be empty".to_string(),
+            ));
+        }
+        if self.timeframes.is_empty() {
+            return Err(ConfigError::ValidationError(
+                "market_merger.timeframes cannot be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Get the spread for a given level (in cents)
+    pub fn spread_for_level(&self, level: u8) -> f64 {
+        self.level_spreads_cents
+            .get(level as usize)
+            .copied()
+            .unwrap_or(5.0)
+    }
+
+    /// Get the size multiplier for a given level
+    pub fn size_multiplier_for_level(&self, level: u8) -> f64 {
+        match level {
+            0 => 1.0,
+            1 => 1.5,
+            2 => 2.0,
+            _ => 2.0,
+        }
+    }
+
+    /// Check if a crypto asset is configured for trading
+    pub fn is_asset_enabled(&self, asset: &str) -> bool {
+        self.assets.iter().any(|a| a.eq_ignore_ascii_case(asset))
+    }
+
+    /// Check if a timeframe is configured for trading
+    pub fn is_timeframe_enabled(&self, timeframe: &str) -> bool {
+        self.timeframes
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(timeframe))
+    }
+}
+
 impl Default for UpOrDownConfig {
     fn default() -> Self {
         Self {
@@ -223,6 +525,7 @@ impl Default for StrategiesConfig {
             components: ComponentsConfig::default(),
             up_or_down: UpOrDownConfig::default(),
             sports_sniping: SportsSnipingConfig::default(),
+            market_merger: MarketMergerConfig::default(),
         }
     }
 }
@@ -252,6 +555,9 @@ impl StrategiesConfig {
 
         // Validate sports_sniping config
         self.sports_sniping.validate()?;
+
+        // Validate market_merger config
+        self.market_merger.validate()?;
 
         Ok(())
     }
@@ -297,6 +603,18 @@ impl StrategiesConfig {
             self.sports_sniping.poll_interval_secs
         );
         info!("  Enabled: {}", self.sports_sniping.enabled);
+        info!("Market Merger Strategy:");
+        info!("  Assets: {:?}", self.market_merger.assets);
+        info!("  Timeframes: {:?}", self.market_merger.timeframes);
+        info!(
+            "  Poll interval: {} seconds",
+            self.market_merger.poll_interval_secs
+        );
+        info!("  Num levels: {}", self.market_merger.num_levels);
+        info!(
+            "  Min profit margin: ${:.2}",
+            self.market_merger.min_profit_margin
+        );
     }
 }
 

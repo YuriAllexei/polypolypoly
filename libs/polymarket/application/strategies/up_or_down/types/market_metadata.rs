@@ -3,8 +3,8 @@
 //! Contains enums for oracle sources, crypto assets, and timeframes,
 //! plus strategy-wide constants.
 
-use chrono::Duration;
 use crate::infrastructure::OracleType;
+use chrono::Duration;
 
 /// Required tags for Up or Down markets
 pub const REQUIRED_TAGS: &[&str] = &["Up or Down", "Crypto Prices", "Recurring", "Crypto"];
@@ -16,7 +16,7 @@ pub const STALENESS_THRESHOLD_SECS: f64 = 60.0;
 pub const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
 /// Seconds before market end when we bypass all risk checks and threshold waits
-pub const FINAL_SECONDS_BYPASS: f64 = 5.0;
+pub const FINAL_SECONDS_BYPASS: f64 = 7.0;
 
 // =============================================================================
 // Oracle Source
@@ -163,8 +163,8 @@ impl Timeframe {
     /// 5M markets are not officially live yet and should be skipped
     pub fn is_supported(&self) -> bool {
         match self {
-            Timeframe::FiveMin => false,  // Not officially live
-            Timeframe::Unknown => false,  // Unknown timeframes should be skipped
+            Timeframe::FiveMin => false, // Not officially live
+            Timeframe::Unknown => false, // Unknown timeframes should be skipped
             _ => true,
         }
     }
