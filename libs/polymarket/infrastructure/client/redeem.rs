@@ -1,10 +1,15 @@
 //! On-chain redemption for resolved Polymarket positions via Gnosis Safe.
+//!
+//! # Gas Price
+//!
+//! Gas prices are fetched dynamically from the Polygon network with a configurable
+//! multiplier to ensure transactions don't get stuck during congestion.
 
 use ethers::prelude::*;
 use ethers::contract::abigen;
 use std::sync::Arc;
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 
 use super::data::{DataApiClient, Position};
 
@@ -14,7 +19,18 @@ pub const CTF_CONTRACT: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 pub const NEG_RISK_CTF_CONTRACT: &str = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
 pub const USDC_ADDRESS: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
-const GAS_PRICE_GWEI: u64 = 500;
+/// Gas limit for redemption operations
+/// Redeem is simpler (burn tokens, receive USDC) so lower limit is fine
+const GAS_LIMIT: u64 = 300_000;
+
+/// Multiplier for gas price (1.2 = 20% above network estimate)
+const GAS_PRICE_MULTIPLIER: f64 = 1.2;
+
+/// Minimum gas price in gwei (floor)
+const MIN_GAS_PRICE_GWEI: u64 = 30;
+
+/// Maximum gas price in gwei (ceiling for high congestion periods)
+const MAX_GAS_PRICE_GWEI: u64 = 1200;
 
 abigen!(
     ConditionalTokens,
@@ -109,6 +125,25 @@ impl<M: Middleware + 'static> RedeemClient<M> {
     }
 }
 
+/// Fetch current gas price from the network and apply multiplier
+async fn get_dynamic_gas_price<M: Middleware + 'static>(provider: &Arc<M>) -> Result<U256> {
+    let network_gas_price = provider
+        .get_gas_price()
+        .await
+        .map_err(|e| RedeemError::ProviderError(format!("Failed to fetch gas price: {}", e)))?;
+
+    let gas_price_gwei = network_gas_price.as_u64() / 1_000_000_000;
+    let adjusted_gwei = (gas_price_gwei as f64 * GAS_PRICE_MULTIPLIER) as u64;
+    let final_gwei = adjusted_gwei.max(MIN_GAS_PRICE_GWEI).min(MAX_GAS_PRICE_GWEI);
+
+    debug!(
+        "[Redeem] Gas price: network={}gwei, adjusted={}gwei, final={}gwei",
+        gas_price_gwei, adjusted_gwei, final_gwei
+    );
+
+    Ok(U256::from(final_gwei) * U256::from(1_000_000_000u64))
+}
+
 pub async fn redeem_via_safe(
     safe_address: Address,
     condition_id: &str,
@@ -123,7 +158,7 @@ pub async fn redeem_via_safe(
     let client = RedeemClient::new(provider.clone());
     let (ctf_address, call_data) = client.encode_redeem_call(condition_id, neg_risk)?;
 
-    let safe = GnosisSafe::new(safe_address, provider);
+    let safe = GnosisSafe::new(safe_address, provider.clone());
     let nonce = safe.nonce().call().await
         .map_err(|e| RedeemError::ContractError(e.to_string()))?;
 
@@ -136,16 +171,22 @@ pub async fn redeem_via_safe(
     let signature = wallet.sign_hash(H256::from(safe_tx_hash))
         .map_err(|e| RedeemError::ContractError(e.to_string()))?;
 
+    // Fetch dynamic gas price from network
+    let gas_price = get_dynamic_gas_price(&provider).await?;
+
     let call = safe.exec_transaction(
         ctf_address, U256::zero(), call_data, 0,
         U256::zero(), U256::zero(), U256::zero(),
         Address::zero(), Address::zero(), signature.to_vec().into(),
-    ).gas_price(U256::from(GAS_PRICE_GWEI * 1_000_000_000));
+    )
+    .gas(U256::from(GAS_LIMIT))
+    .gas_price(gas_price);
 
     let pending_tx = call.send().await
         .map_err(|e| RedeemError::ContractError(e.to_string()))?;
 
     let tx_hash = pending_tx.tx_hash();
+    debug!("[Redeem] Transaction sent: {:?} (gas_price: {} gwei)", tx_hash, gas_price / U256::from(1_000_000_000u64));
 
     let receipt = tokio::time::timeout(
         std::time::Duration::from_secs(60),
@@ -157,6 +198,7 @@ pub async fn redeem_via_safe(
     .ok_or_else(|| RedeemError::TransactionFailed("No receipt".to_string()))?;
 
     if receipt.status == Some(U64::from(1)) {
+        info!("[Redeem] Transaction confirmed: {:?}", tx_hash);
         Ok(tx_hash)
     } else {
         Err(RedeemError::TransactionFailed("Transaction reverted".to_string()))

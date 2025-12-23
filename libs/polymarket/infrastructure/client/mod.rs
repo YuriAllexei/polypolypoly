@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod binance;
 pub mod clob;
+pub mod ctf;
 pub mod data;
 pub mod gamma;
 pub mod oracle;
@@ -29,4 +30,11 @@ pub use redeem::{
     redeem_all_positions, redeem_single, redeem_all,
     redeem_via_safe,
     POLYGON_RPC_URL, POLYGON_CHAIN_ID,
+};
+pub use ctf::{
+    CtfClient, CtfError, CtfOperation, CtfOperationResult,
+    split_via_safe, merge_via_safe, approve_via_safe,
+    split, merge,
+    usdc_to_raw, usdc_from_raw,
+    USDC_DECIMALS, CTF_CONTRACT, NEG_RISK_CTF_CONTRACT, USDC_ADDRESS,
 };

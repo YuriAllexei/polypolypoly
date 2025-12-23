@@ -87,10 +87,17 @@ async fn main() -> Result<()> {
             if let Some(entry) = manager.get_price_by_asset(*asset) {
                 let side = if entry.is_sell { "SELL" } else { "BUY" };
                 let side_color = if entry.is_sell { "\x1B[31m" } else { "\x1B[32m" };
+                // Use appropriate decimal precision based on asset price
+                let price_str = match *asset {
+                    BinanceAsset::BTC => format!("{:>13.2}", entry.value),
+                    BinanceAsset::ETH => format!("{:>13.2}", entry.value),
+                    BinanceAsset::SOL => format!("{:>13.2}", entry.value),
+                    BinanceAsset::XRP => format!("{:>13.4}", entry.value),
+                };
                 println!(
-                    "  {:>6}  ${:>13.2}  {}  {:>12}  {}{:>10}\x1B[0m",
+                    "  {:>6}  ${}  {}  {:>12}  {}{:>10}\x1B[0m",
                     asset.symbol(),
-                    entry.value,
+                    price_str,
                     format_latency(entry.latency_ms),
                     entry.trade_id,
                     side_color,

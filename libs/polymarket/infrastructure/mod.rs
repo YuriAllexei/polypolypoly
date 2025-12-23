@@ -37,6 +37,13 @@ pub use client::{
     },
     // Note: user module types are now in order_manager module
     PolymarketAuth,
+    ctf::{
+        CtfClient, CtfError, CtfOperation, CtfOperationResult,
+        split_via_safe, merge_via_safe, approve_via_safe,
+        split, merge,
+        usdc_to_raw, usdc_from_raw,
+        USDC_DECIMALS,
+    },
 };
 
 // Re-export database types
