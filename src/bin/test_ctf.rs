@@ -3,11 +3,13 @@
 //! Test splitting USDC into YES+NO tokens and merging them back.
 //!
 //! Usage:
+//!   cargo run --bin test_ctf positions              # List your positions with condition IDs
 //!   cargo run --bin test_ctf split <condition_id> <amount_usdc> [neg_risk]
 //!   cargo run --bin test_ctf merge <condition_id> <amount_usdc> [neg_risk]
 //!   cargo run --bin test_ctf check
 //!
 //! Examples:
+//!   cargo run --bin test_ctf positions
 //!   cargo run --bin test_ctf split 0xabc123...def 10.0
 //!   cargo run --bin test_ctf merge 0xabc123...def 10.0 neg_risk
 //!   cargo run --bin test_ctf check
@@ -18,6 +20,7 @@ use polymarket::infrastructure::{
     split_via_safe, merge_via_safe, usdc_to_raw, usdc_from_raw,
     CtfClient,
 };
+use polymarket::infrastructure::client::data::DataApiClient;
 use std::env;
 use std::sync::Arc;
 
@@ -28,22 +31,24 @@ fn print_usage() {
     println!("CTF Split/Merge Test Tool");
     println!();
     println!("Usage:");
-    println!("  cargo run --bin test_ctf split <condition_id> <amount_usdc> [neg_risk]");
-    println!("  cargo run --bin test_ctf merge <condition_id> <amount_usdc> [neg_risk]");
-    println!("  cargo run --bin test_ctf check");
+    println!("  cargo run --bin test_ctf positions                              # List positions");
+    println!("  cargo run --bin test_ctf split <condition_id> <amount> [neg_risk]");
+    println!("  cargo run --bin test_ctf merge <condition_id> <amount> [neg_risk]");
+    println!("  cargo run --bin test_ctf check                                  # Check balances");
     println!();
     println!("Examples:");
+    println!("  cargo run --bin test_ctf positions");
     println!("  cargo run --bin test_ctf split 0xabc123... 10.0");
     println!("  cargo run --bin test_ctf merge 0xabc123... 10.0");
     println!("  cargo run --bin test_ctf split 0xabc123... 10.0 neg_risk");
     println!();
     println!("Arguments:");
     println!("  condition_id  - The market's condition ID (64 hex chars with 0x prefix)");
-    println!("  amount_usdc   - Amount in USDC (e.g., 10.0 for $10)");
+    println!("  amount        - Amount in USDC (e.g., 10.0 for $10)");
     println!("  neg_risk      - Optional: add 'neg_risk' for negative risk markets");
 }
 
-fn load_env() -> Result<(LocalWallet, Address)> {
+fn load_env() -> Result<(LocalWallet, Address, String)> {
     dotenv::dotenv().ok();
 
     let private_key = std::env::var("PRIVATE_KEY")
@@ -60,7 +65,92 @@ fn load_env() -> Result<(LocalWallet, Address)> {
         .parse()
         .map_err(|_| anyhow::anyhow!("Invalid proxy wallet address"))?;
 
-    Ok((wallet, safe_address))
+    Ok((wallet, safe_address, proxy_wallet))
+}
+
+async fn do_positions() -> Result<()> {
+    println!("════════════════════════════════════════════════════════════════════════════");
+    println!("  YOUR POSITIONS");
+    println!("════════════════════════════════════════════════════════════════════════════");
+    println!();
+
+    let (_, _, proxy_wallet) = load_env()?;
+    println!("Fetching positions for {}...", proxy_wallet);
+    println!();
+
+    let client = DataApiClient::new();
+    let positions = client.get_positions(&proxy_wallet, None).await
+        .map_err(|e| anyhow::anyhow!("Failed to fetch positions: {}", e))?;
+
+    if positions.is_empty() {
+        println!("No positions found.");
+        return Ok(());
+    }
+
+    // Group positions by condition_id to show mergeable pairs
+    use std::collections::HashMap;
+    let mut by_condition: HashMap<String, Vec<_>> = HashMap::new();
+    for pos in &positions {
+        by_condition.entry(pos.condition_id.clone()).or_default().push(pos);
+    }
+
+    println!("Found {} positions across {} markets:", positions.len(), by_condition.len());
+    println!();
+
+    for (condition_id, market_positions) in by_condition.iter() {
+        let first = &market_positions[0];
+        let neg_risk_str = if first.negative_risk { " [NEG_RISK]" } else { "" };
+
+        println!("────────────────────────────────────────────────────────────────────────────");
+        println!("Market: {}", first.title);
+        println!("Condition ID: {}{}", condition_id, neg_risk_str);
+
+        // Check if mergeable (both YES and NO positions)
+        let has_yes = market_positions.iter().any(|p| p.outcome_index == 0);
+        let has_no = market_positions.iter().any(|p| p.outcome_index == 1);
+        let mergeable = has_yes && has_no;
+
+        if mergeable {
+            println!("Status: \x1B[32mMERGEABLE\x1B[0m (have both YES and NO)");
+        } else if first.redeemable {
+            println!("Status: \x1B[33mREDEEMABLE\x1B[0m (market resolved)");
+        } else {
+            println!("Status: Active");
+        }
+
+        for pos in market_positions {
+            let side = if pos.outcome_index == 0 { "YES" } else { "NO" };
+            println!("  {} : {:.2} shares @ ${:.4} avg (value: ${:.2})",
+                     side, pos.size, pos.avg_price, pos.current_value);
+        }
+
+        if mergeable {
+            let yes_size = market_positions.iter()
+                .filter(|p| p.outcome_index == 0)
+                .map(|p| p.size)
+                .sum::<f64>();
+            let no_size = market_positions.iter()
+                .filter(|p| p.outcome_index == 1)
+                .map(|p| p.size)
+                .sum::<f64>();
+            let max_merge = yes_size.min(no_size);
+            println!("  -> Can merge up to: {:.2} tokens", max_merge);
+            println!("  -> Command: cargo run --bin test_ctf merge {} {:.2}{}",
+                     condition_id, max_merge,
+                     if first.negative_risk { " neg_risk" } else { "" });
+        }
+        println!();
+    }
+
+    println!("════════════════════════════════════════════════════════════════════════════");
+    println!();
+    println!("To split USDC into tokens for a market:");
+    println!("  cargo run --bin test_ctf split <condition_id> <amount>");
+    println!();
+    println!("To merge tokens back into USDC:");
+    println!("  cargo run --bin test_ctf merge <condition_id> <amount>");
+
+    Ok(())
 }
 
 async fn do_split(condition_id: &str, amount: f64, neg_risk: bool) -> Result<()> {
@@ -74,7 +164,7 @@ async fn do_split(condition_id: &str, amount: f64, neg_risk: bool) -> Result<()>
     println!("════════════════════════════════════════════════════════════════");
     println!();
 
-    let (wallet, safe_address) = load_env()?;
+    let (wallet, safe_address, _) = load_env()?;
     let raw_amount = usdc_to_raw(amount);
 
     println!("Executing split via Safe {}...", safe_address);
@@ -112,7 +202,7 @@ async fn do_merge(condition_id: &str, amount: f64, neg_risk: bool) -> Result<()>
     println!("════════════════════════════════════════════════════════════════");
     println!();
 
-    let (wallet, safe_address) = load_env()?;
+    let (wallet, safe_address, _) = load_env()?;
     let raw_amount = usdc_to_raw(amount);
 
     println!("Executing merge via Safe {}...", safe_address);
@@ -145,7 +235,7 @@ async fn do_check() -> Result<()> {
     println!("════════════════════════════════════════════════════════════════");
     println!();
 
-    let (_, safe_address) = load_env()?;
+    let (_, safe_address, _) = load_env()?;
 
     println!("Safe Address: {}", safe_address);
     println!();
@@ -191,6 +281,9 @@ async fn main() -> Result<()> {
     }
 
     match args[1].as_str() {
+        "positions" | "pos" | "p" => {
+            do_positions().await?;
+        }
         "split" => {
             if args.len() < 4 {
                 eprintln!("Error: split requires <condition_id> and <amount>");
