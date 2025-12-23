@@ -466,7 +466,7 @@ async fn run_tracking_loop(
         guardian_check(state, ctx, oracle_prices, trading).await;
 
         // Brief sleep before next iteration
-        sleep(StdDuration::from_millis(100)).await;
+        sleep(StdDuration::from_millis(10)).await;
     };
 
     (exit_reason, connection_start)
