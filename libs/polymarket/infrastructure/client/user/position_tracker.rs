@@ -33,6 +33,7 @@ use super::order_manager::{Fill, Order, OrderEventCallback, Side, TokenPairRegis
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::{debug, info};
 
 /// Epsilon for floating point comparisons
 const POSITION_EPSILON: f64 = 1e-9;
@@ -593,14 +594,34 @@ impl OrderEventCallback for PositionTrackerBridge {
         // Apply fill and get events (acquire write lock)
         let (event, merge_opportunity) = self.tracker.write().apply_fill(fill);
 
+        // Log the fill for visibility
+        if let PositionEvent::Updated { ref new_position, .. } = event {
+            info!(
+                "[PositionTracker] {} {} {:.2} @ ${:.4} | New position: {:.2} shares @ ${:.4} avg | Realized P&L: ${:.2}",
+                fill.side,
+                &fill.asset_id[..8.min(fill.asset_id.len())],
+                fill.size,
+                fill.price,
+                new_position.size,
+                new_position.avg_entry_price,
+                new_position.realized_pnl
+            );
+        }
+
         // Fire callbacks OUTSIDE the lock scope to prevent deadlocks
         // This allows callbacks to safely read the tracker
         {
             let tracker = self.tracker.read();
             tracker.fire_callback(&event);
 
-            if let Some(merge) = merge_opportunity {
-                let merge_event = PositionEvent::MergeOpportunity(merge);
+            if let Some(ref merge) = merge_opportunity {
+                info!(
+                    "[PositionTracker] MERGE OPPORTUNITY: {:.2} pairs available, profit: ${:.2} ({:.1}%)",
+                    merge.mergeable_pairs,
+                    merge.potential_profit,
+                    merge.profit_percentage()
+                );
+                let merge_event = PositionEvent::MergeOpportunity(merge.clone());
                 tracker.fire_callback(&merge_event);
             }
         }
