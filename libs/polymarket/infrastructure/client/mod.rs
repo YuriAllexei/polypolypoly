@@ -3,6 +3,7 @@
 //! Provides clients for both the Gamma API (market data) and CLOB API (trading).
 
 pub mod auth;
+pub mod binance;
 pub mod clob;
 pub mod data;
 pub mod gamma;
@@ -12,6 +13,10 @@ pub mod sports;
 pub mod user;
 
 pub use auth::PolymarketAuth;
+pub use binance::{
+    spawn_binance_tracker, BinanceAsset, BinancePriceEntry, BinancePriceManager,
+    SharedBinancePrices,
+};
 pub use clob::{RestClient, WebSocketClient, Market, Outcome, OrderBook, PriceLevel, Side, OrderType, OrderArgs, TradingClient, TradingError};
 pub use data::{DataApiClient, Position, PositionFilters, PositionSortBy, SortDirection};
 pub use gamma::{GammaClient, GammaEvent, GammaMarket, GammaTag, GammaFilters};

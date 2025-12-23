@@ -26,6 +26,10 @@ pub use client::{
     oracle::{
         spawn_oracle_trackers, OraclePriceManager, OracleType, PriceEntry, SharedOraclePrices,
     },
+    binance::{
+        spawn_binance_tracker, BinanceAsset, BinancePriceEntry, BinancePriceManager,
+        SharedBinancePrices,
+    },
     sports::{
         spawn_sports_live_data_tracker, spawn_sports_tracker_with_state, FetchedGames,
         FullTimeEvent, IgnoredGames, MarketsByGame, NewGameEvent, SharedSportsLiveData,
