@@ -90,6 +90,14 @@ impl Side {
     pub fn from_str_or_default(s: &str) -> Self {
         Self::from_str(s).unwrap_or(Side::Buy)
     }
+
+    /// Returns the opposite side (Buy <-> Sell)
+    pub fn opposite(&self) -> Self {
+        match self {
+            Side::Buy => Side::Sell,
+            Side::Sell => Side::Buy,
+        }
+    }
 }
 
 impl std::fmt::Display for Side {
@@ -888,7 +896,23 @@ impl OrderStateStore {
             return None;
         }
 
-        let size: f64 = msg.size.parse().unwrap_or(0.0);
+        // Determine the correct size based on trader_side:
+        // - TAKER: msg.size is YOUR fill size
+        // - MAKER: msg.size is the taker's TOTAL, use maker_orders matched_amount instead
+        let size: f64 = match msg.trader_side.as_deref() {
+            Some("MAKER") => {
+                // Sum matched_amount from maker_orders (our fills as maker)
+                msg.maker_orders
+                    .iter()
+                    .filter_map(|m| m.matched_amount.parse::<f64>().ok())
+                    .sum()
+            }
+            _ => {
+                // TAKER or unknown: use the trade size directly
+                msg.size.parse().unwrap_or(0.0)
+            }
+        };
+
         if size <= 0.0 {
             return None;
         }
@@ -906,11 +930,19 @@ impl OrderStateStore {
             }
         }
 
+        // Determine the correct side from YOUR perspective:
+        // - TAKER: msg.side is YOUR side
+        // - MAKER: msg.side is the taker's side (opposite of yours), so flip it
+        let side = match msg.trader_side.as_deref() {
+            Some("MAKER") => Side::from_str_or_default(&msg.side).opposite(),
+            _ => Side::from_str_or_default(&msg.side),
+        };
+
         let fill = Fill {
             trade_id: msg.id.clone(),
             asset_id: msg.asset_id.clone(),
             market: msg.market.clone(),
-            side: Side::from_str_or_default(&msg.side),
+            side,
             outcome: msg.outcome.clone(),
             price: msg.price.parse().unwrap_or(0.0),
             size,

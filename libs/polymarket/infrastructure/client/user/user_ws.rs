@@ -133,9 +133,10 @@ impl UserHandler {
     }
 
     fn handle_trade(&mut self, trade: &TradeMessage) {
+        let trader_side = trade.trader_side.as_deref().unwrap_or("UNKNOWN");
         info!(
-            "[UserWS] Trade: {} {} {} @ {} (size: {}, status: {})",
-            trade.side, trade.outcome, trade.asset_id, trade.price, trade.size, trade.status
+            "[UserWS] Trade: {} {} {} @ {} (size: {}, status: {}, you: {})",
+            trade.side, trade.outcome, trade.asset_id, trade.price, trade.size, trade.status, trader_side
         );
 
         let event = self.state.write().process_trade(trade);
