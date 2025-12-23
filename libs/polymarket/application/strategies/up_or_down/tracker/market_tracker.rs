@@ -16,6 +16,7 @@ use crate::application::strategies::up_or_down::types::{
 use crate::domain::DbMarket;
 use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::config::UpOrDownConfig;
+use crate::infrastructure::client::user::SharedPositionTracker;
 use crate::infrastructure::{
     build_ws_client, decimal_places, handle_client_event, ActiveOrderManager, BalanceManager,
     MarketTrackerConfig, SharedOraclePrices, SharedOrderbooks, SharedPrecisions, TickSizeChangeEvent,
@@ -69,6 +70,7 @@ pub async fn run_market_tracker(
     oracle_prices: Option<SharedOraclePrices>,
     balance_manager: Arc<RwLock<BalanceManager>>,
     active_orders: Arc<RwLock<ActiveOrderManager>>,
+    _position_tracker: Option<SharedPositionTracker>,
 ) -> anyhow::Result<()> {
     // Initialize context and state
     let outcomes = market.parse_outcomes()?;
