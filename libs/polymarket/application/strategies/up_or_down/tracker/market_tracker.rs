@@ -16,9 +16,9 @@ use crate::application::strategies::up_or_down::types::{
 use crate::domain::DbMarket;
 use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::config::UpOrDownConfig;
-use crate::infrastructure::client::user::SharedPositionTracker;
+use crate::infrastructure::client::user::{SharedOrderState, SharedPositionTracker};
 use crate::infrastructure::{
-    build_ws_client, decimal_places, handle_client_event, ActiveOrderManager, BalanceManager,
+    build_ws_client, decimal_places, handle_client_event, BalanceManager,
     MarketTrackerConfig, SharedOraclePrices, SharedOrderbooks, SharedPrecisions, TickSizeChangeEvent,
 };
 use chrono::Utc;
@@ -69,8 +69,8 @@ pub async fn run_market_tracker(
     trading: Arc<TradingClient>,
     oracle_prices: Option<SharedOraclePrices>,
     balance_manager: Arc<RwLock<BalanceManager>>,
-    active_orders: Arc<RwLock<ActiveOrderManager>>,
     _position_tracker: Option<SharedPositionTracker>,
+    order_state: Option<SharedOrderState>,
 ) -> anyhow::Result<()> {
     // Initialize context and state
     let outcomes = market.parse_outcomes()?;
@@ -161,7 +161,7 @@ pub async fn run_market_tracker(
             &oracle_prices,
             &trading,
             &balance_manager,
-            &active_orders,
+            &order_state,
         )
         .await;
 
@@ -321,7 +321,7 @@ async fn run_tracking_loop(
     oracle_prices: &Option<SharedOraclePrices>,
     trading: &Arc<TradingClient>,
     balance_manager: &Arc<RwLock<BalanceManager>>,
-    active_orders: &Arc<RwLock<ActiveOrderManager>>,
+    order_state: &Option<SharedOrderState>,
 ) -> (TrackingLoopExit, Instant) {
     let connection_start = Instant::now();
     let mut seen_updates_since_connect = false;
@@ -367,16 +367,17 @@ async fn run_tracking_loop(
             if let Some(current_order) = state.order_placed.get(&event.asset_id).cloned() {
                 // Only proceed if upgrade is actually needed (new precision is higher)
                 if new_precision > current_order.precision {
-                    // Skip OMS check for recently-placed orders (OMS polls every 1s, so wait 2s)
+                    // Skip order state check for recently-placed orders (WebSocket has slight delay)
                     // This prevents removing orders that were just placed but not yet indexed
                     if !current_order.is_recently_placed(2) {
-                        let order_exists_in_oms = active_orders
-                            .read()
-                            .has_order(&current_order.order_id);
+                        let order_exists = order_state
+                            .as_ref()
+                            .map(|s| s.read().get_order(&current_order.order_id).is_some())
+                            .unwrap_or(true); // Default to true if no order_state (conservative)
 
-                        if !order_exists_in_oms {
+                        if !order_exists {
                             info!(
-                                "[WS {}] Order {} not found in OMS for {}, removing from local state",
+                                "[WS {}] Order {} not found in order state for {}, removing from local state",
                                 ctx.market_id,
                                 current_order.order_id,
                                 ctx.get_outcome_name(&event.asset_id)
@@ -458,6 +459,7 @@ async fn run_tracking_loop(
             oracle_prices,
             trading,
             balance_manager,
+            order_state.as_ref(),
         )
         .await;
 
@@ -570,6 +572,7 @@ async fn process_order_candidates(
     oracle_prices: &Option<SharedOraclePrices>,
     trading: &Arc<TradingClient>,
     balance_manager: &Arc<RwLock<BalanceManager>>,
+    order_state: Option<&SharedOrderState>,
 ) {
     for (token_id, outcome_name, elapsed) in tokens_to_order {
         // Re-check orderbook and capture liquidity before placing order
@@ -644,7 +647,7 @@ async fn process_order_candidates(
 
         // Place the order
         if let Some((order_id, precision)) =
-            place_order(trading, &token_id, &outcome_name, elapsed, ctx, precisions, balance_manager).await
+            place_order(trading, &token_id, &outcome_name, elapsed, ctx, precisions, balance_manager, order_state).await
         {
             state.order_placed.insert(token_id, OrderInfo::new(order_id, precision));
         }

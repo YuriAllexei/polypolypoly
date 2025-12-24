@@ -13,6 +13,7 @@ use super::types::{MessageType, OrderMessage, TradeMessage};
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use tracing::{debug, warn};
 
 /// Maximum number of trade IDs to track for deduplication
 /// When exceeded, oldest entries are automatically pruned
@@ -898,11 +899,28 @@ impl OrderStateStore {
 
         // Determine the correct size based on trader_side:
         // - TAKER: msg.size is YOUR fill size
-        // - MAKER: msg.size is the taker's TOTAL, use maker_orders matched_amount instead
+        // - MAKER: msg.size is the taker's TOTAL, filter maker_orders by OUR order_ids
         let size: f64 = match msg.trader_side.as_deref() {
             Some("MAKER") => {
-                // Sum matched_amount from maker_orders (our fills as maker)
-                msg.maker_orders
+                // Sum matched_amount ONLY from maker_orders where we own the order
+                // Filter by checking if order_id exists in our order_to_asset map
+                let our_orders: Vec<_> = msg.maker_orders
+                    .iter()
+                    .filter(|m| self.order_to_asset.contains_key(&m.order_id))
+                    .collect();
+
+                if our_orders.is_empty() && !msg.maker_orders.is_empty() {
+                    // We're supposedly a MAKER but none of the maker_orders match our known orders
+                    // This is likely a race condition: order placed but PLACEMENT not processed yet
+                    warn!(
+                        "[OrderState] MAKER trade but no matching orders! Possible race condition. \
+                        maker_order_ids: {:?}, known_order_count: {}",
+                        msg.maker_orders.iter().map(|m| &m.order_id[..16.min(m.order_id.len())]).collect::<Vec<_>>(),
+                        self.order_to_asset.len()
+                    );
+                }
+
+                our_orders
                     .iter()
                     .filter_map(|m| m.matched_amount.parse::<f64>().ok())
                     .sum()
@@ -914,6 +932,13 @@ impl OrderStateStore {
         };
 
         if size <= 0.0 {
+            // Only warn if we're supposedly MAKER with maker_orders (likely race condition)
+            if msg.trader_side.as_deref() == Some("MAKER") && !msg.maker_orders.is_empty() {
+                warn!(
+                    "[OrderState] Skipping MAKER trade {} - no matching orders found (race condition?)",
+                    &msg.id[..16.min(msg.id.len())]
+                );
+            }
             return None;
         }
 
@@ -1322,6 +1347,24 @@ impl OrderStateStore {
             .get(asset_id)
             .map(|b| b.total_fill_volume())
             .unwrap_or(0.0)
+    }
+
+    // =========================================================================
+    // Pre-registration (for race condition prevention)
+    // =========================================================================
+
+    /// Pre-register an order_id that was just placed via REST API.
+    /// This allows trades to be matched even if they arrive before the WebSocket PLACEMENT message.
+    /// Call this immediately after receiving the order_id from REST placement response.
+    pub fn pre_register_order(&mut self, order_id: &str, asset_id: &str) {
+        if !self.order_to_asset.contains_key(order_id) {
+            self.order_to_asset.insert(order_id.to_string(), asset_id.to_string());
+            debug!(
+                "[OrderState] Pre-registered order {} for asset {}",
+                &order_id[..16.min(order_id.len())],
+                &asset_id[..16.min(asset_id.len())]
+            );
+        }
     }
 
     // =========================================================================

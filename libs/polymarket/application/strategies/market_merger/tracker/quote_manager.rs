@@ -8,14 +8,14 @@ use tracing::{debug, info, warn};
 
 use crate::application::strategies::market_merger::types::{BidInfo, MarketContext, MarketState, Quote, QuoteLadder};
 use crate::infrastructure::client::clob::TradingClient;
-use crate::infrastructure::{OrderStateStore, OrderType, Side};
-use tokio::sync::RwLock;
+use crate::infrastructure::client::user::SharedOrderState;
+use crate::infrastructure::{OrderType, Side};
 
 /// Manages quote placement and updates
 pub struct QuoteManager {
     trading: Arc<TradingClient>,
     #[allow(dead_code)] // Reserved for future STP integration
-    order_state: Arc<RwLock<OrderStateStore>>,
+    order_state: SharedOrderState,
     /// Price tolerance for considering a bid "same" (no update needed)
     price_tolerance: f64,
     /// Maximum age before a bid is considered stale (seconds)
@@ -26,7 +26,7 @@ impl QuoteManager {
     /// Create a new quote manager
     pub fn new(
         trading: Arc<TradingClient>,
-        order_state: Arc<RwLock<OrderStateStore>>,
+        order_state: SharedOrderState,
     ) -> Self {
         Self {
             trading,

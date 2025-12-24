@@ -2,8 +2,9 @@
 //!
 //! Defines the contract that all sniper strategies must implement.
 
-use crate::infrastructure::{ActiveOrderManager, BalanceManager};
+use crate::infrastructure::BalanceManager;
 use crate::infrastructure::client::clob::TradingClient;
+use crate::infrastructure::client::user::{SharedOrderState, SharedPositionTracker};
 use crate::infrastructure::database::{DatabaseError, MarketDatabase};
 use crate::infrastructure::shutdown::ShutdownManager;
 use async_trait::async_trait;
@@ -43,8 +44,10 @@ pub struct StrategyContext {
     pub trading: Arc<TradingClient>,
     /// Balance manager for monitoring and halt control
     pub balance_manager: Arc<RwLock<BalanceManager>>,
-    /// Active order manager for order state tracking
-    pub active_orders: Arc<RwLock<ActiveOrderManager>>,
+    /// Real-time order state from user WebSocket
+    pub order_state: SharedOrderState,
+    /// Real-time position tracker
+    pub position_tracker: SharedPositionTracker,
 }
 
 impl StrategyContext {
@@ -53,7 +56,8 @@ impl StrategyContext {
         shutdown: Arc<ShutdownManager>,
         trading: Arc<TradingClient>,
         balance_manager: Arc<RwLock<BalanceManager>>,
-        active_orders: Arc<RwLock<ActiveOrderManager>>,
+        order_state: SharedOrderState,
+        position_tracker: SharedPositionTracker,
     ) -> Self {
         Self {
             database,
@@ -61,7 +65,8 @@ impl StrategyContext {
             shutdown,
             trading,
             balance_manager,
-            active_orders,
+            order_state,
+            position_tracker,
         }
     }
 

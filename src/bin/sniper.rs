@@ -8,8 +8,11 @@
 
 use anyhow::{bail, Result};
 use polymarket::application::{
-    create_strategy, init_logging_with_level, ActiveOrderManager, BalanceManager, PositionManager,
+    create_strategy, init_logging_with_level, BalanceManager, PositionManager,
     Strategy, StrategyContext, StrategyType,
+};
+use polymarket::infrastructure::client::user::{
+    spawn_user_order_tracker, PositionTracker, PositionTrackerBridge,
 };
 use parking_lot::RwLock;
 use polymarket::infrastructure::client::clob::TradingClient;
@@ -91,13 +94,24 @@ async fn main() -> Result<()> {
         .await?;
     let balance_manager = Arc::new(RwLock::new(balance_manager));
 
-    // Initialize active order manager
-    info!("Initializing active order manager...");
-    let mut active_order_manager = ActiveOrderManager::new();
-    active_order_manager
-        .start(Arc::clone(&trading), shutdown.flag())
-        .await?;
-    let active_order_manager = Arc::new(RwLock::new(active_order_manager));
+    // Initialize position tracker (receives fills from user WebSocket)
+    info!("Initializing position tracker...");
+    let position_tracker = Arc::new(RwLock::new(PositionTracker::new()));
+    let bridge = Arc::new(PositionTrackerBridge::new(position_tracker.clone()));
+
+    // Initialize order state with WebSocket tracker
+    info!("Initializing order state tracker...");
+    let order_state = spawn_user_order_tracker(
+        shutdown.flag(),
+        trading.rest(),
+        trading.auth(),
+        Some(bridge),
+    )
+    .await?;
+    info!(
+        "Order state tracker started with {} orders",
+        order_state.read().order_count()
+    );
 
     // Initialize position manager
     info!("Initializing position manager...");
@@ -110,7 +124,8 @@ async fn main() -> Result<()> {
         shutdown.clone(),
         trading,
         balance_manager.clone(),
-        active_order_manager.clone(),
+        order_state,
+        position_tracker,
     );
 
     // Run strategy lifecycle
@@ -133,9 +148,6 @@ async fn main() -> Result<()> {
 
     // Stop balance manager
     balance_manager.write().stop().await;
-
-    // Stop active order manager
-    active_order_manager.write().stop().await;
 
     // Stop position manager
     position_manager.stop().await;

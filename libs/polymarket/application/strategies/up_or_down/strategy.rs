@@ -7,13 +7,8 @@ use super::tracker::run_market_tracker;
 use super::types::{CryptoAsset, OracleSource, Timeframe, REQUIRED_TAGS};
 use crate::application::strategies::traits::{Strategy, StrategyContext, StrategyResult};
 use crate::domain::DbMarket;
-use crate::infrastructure::client::user::{
-    spawn_user_order_tracker, PositionTracker, PositionTrackerBridge, SharedOrderState,
-    SharedPositionTracker,
-};
 use crate::infrastructure::config::UpOrDownConfig;
 use crate::infrastructure::{spawn_oracle_trackers, SharedOraclePrices};
-use parking_lot::RwLock;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
@@ -52,10 +47,6 @@ pub struct UpOrDownStrategy {
     tracker_tasks: HashMap<String, JoinHandle<()>>,
     /// Oracle prices (ChainLink and Binance) - strategy-owned
     oracle_prices: Option<SharedOraclePrices>,
-    /// Real-time position tracker (receives fills from user WS)
-    position_tracker: Option<SharedPositionTracker>,
-    /// Order state store (keeps user WS alive, feeds PositionTracker)
-    order_state: Option<SharedOrderState>,
 }
 
 impl UpOrDownStrategy {
@@ -67,8 +58,6 @@ impl UpOrDownStrategy {
             active_markets: Vec::new(),
             tracker_tasks: HashMap::new(),
             oracle_prices: None,
-            position_tracker: None,
-            order_state: None,
         }
     }
 
@@ -235,16 +224,14 @@ impl UpOrDownStrategy {
             let trading = Arc::clone(&ctx.trading);
             let oracle_prices = self.oracle_prices.clone();
             let balance_manager = Arc::clone(&ctx.balance_manager);
-            let active_orders = Arc::clone(&ctx.active_orders);
-            let position_tracker = self.position_tracker.clone();
+            let position_tracker = Some(ctx.position_tracker.clone());
+            let order_state = Some(ctx.order_state.clone());
 
             // Register token pair for this market (enables merge detection)
-            if let (Some(ref tracker), Some(ref condition_id)) =
-                (&self.position_tracker, &tracked.market.condition_id)
-            {
+            if let Some(ref condition_id) = tracked.market.condition_id {
                 let token_ids = tracked.market.parse_token_ids().unwrap_or_default();
                 if token_ids.len() >= 2 {
-                    tracker.write().register_token_pair(
+                    ctx.position_tracker.write().register_token_pair(
                         &token_ids[0],
                         &token_ids[1],
                         condition_id,
@@ -270,8 +257,8 @@ impl UpOrDownStrategy {
                     trading,
                     oracle_prices,
                     balance_manager,
-                    active_orders,
                     position_tracker,
+                    order_state,
                 )
                 .await
                 {
@@ -335,24 +322,11 @@ impl Strategy for UpOrDownStrategy {
         self.oracle_prices = Some(spawn_oracle_trackers(ctx.shutdown_flag.clone()).await?);
         info!("Oracle price trackers started successfully");
 
-        // Initialize position tracker for real-time fill notifications
-        info!("Starting position tracker for real-time fills");
-        let position_tracker = Arc::new(RwLock::new(PositionTracker::new()));
-        let bridge = Arc::new(PositionTrackerBridge::new(position_tracker.clone()));
-
-        // Spawn user order tracker (connects to Polymarket user WS)
-        let order_state = spawn_user_order_tracker(
-            ctx.shutdown_flag.clone(),
-            ctx.trading.rest(),
-            ctx.trading.auth(),
-            Some(bridge),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to start user order tracker: {}", e))?;
-
-        self.position_tracker = Some(position_tracker);
-        self.order_state = Some(order_state);
-        info!("Position tracker initialized successfully");
+        // Position tracker and order state are now provided by StrategyContext
+        info!(
+            "Using shared order state ({} orders) and position tracker from context",
+            ctx.order_state.read().order_count()
+        );
 
         // Initial market fetch
         let markets = self.fetch_matching_markets(ctx).await?;

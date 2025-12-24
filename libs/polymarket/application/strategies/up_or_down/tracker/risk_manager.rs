@@ -12,6 +12,7 @@ use crate::application::strategies::up_or_down::types::{
     MarketTrackerContext, OrderInfo, TrackerState, FINAL_SECONDS_BYPASS,
 };
 use crate::infrastructure::client::clob::TradingClient;
+use crate::infrastructure::client::user::SharedOrderState;
 use crate::infrastructure::{BalanceManager, SharedOraclePrices, SharedOrderbooks, SharedPrecisions};
 use chrono::Utc;
 use parking_lot::RwLock;
@@ -247,6 +248,7 @@ pub async fn place_order(
     ctx: &MarketTrackerContext,
     precisions: &SharedPrecisions,
     balance_manager: &Arc<RwLock<BalanceManager>>,
+    order_state: Option<&SharedOrderState>,
 ) -> Option<(String, u8)> {
     let dynamic_threshold = calculate_dynamic_threshold(ctx);
     log_placing_order(ctx, token_id, outcome_name, elapsed, dynamic_threshold);
@@ -274,6 +276,13 @@ pub async fn place_order(
     match trading.buy(token_id, price, order_size).await {
         Ok(response) => {
             log_order_success(ctx, token_id, outcome_name, &response);
+            if let Some(ref order_id) = response.order_id {
+                // Pre-register the order_id so trades can be matched immediately
+                // (prevents race condition where TRADE arrives before PLACEMENT)
+                if let Some(state) = order_state {
+                    state.write().pre_register_order(order_id, token_id);
+                }
+            }
             response.order_id.map(|id| (id, precision))
         }
         Err(e) => {

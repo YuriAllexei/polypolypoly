@@ -19,14 +19,15 @@ use crate::application::strategies::market_merger::types::{MarketContext, Market
 use crate::domain::orderbook::Orderbook;
 use crate::domain::DbMarket;
 use crate::infrastructure::client::clob::TradingClient;
-use crate::infrastructure::{BalanceManager, OrderStateStore, OrderType, Side};
+use crate::infrastructure::client::user::SharedOrderState;
+use crate::infrastructure::{BalanceManager, OrderType, Side};
 
 /// Context for running the accumulator
 pub struct AccumulatorContext {
     pub shutdown_flag: Arc<AtomicBool>,
     pub trading: Arc<TradingClient>,
     pub balance_manager: Arc<RwLock<BalanceManager>>,
-    pub order_state: Arc<tokio::sync::RwLock<OrderStateStore>>,
+    pub order_state: SharedOrderState,
 }
 
 /// Run the accumulator loop for a single market
@@ -173,12 +174,12 @@ async fn get_orderbooks(ctx: &MarketContext) -> anyhow::Result<(Orderbook, Order
 /// Sync positions from fill events
 async fn sync_positions_from_fills(
     state: &mut MarketState,
-    order_state: &Arc<tokio::sync::RwLock<OrderStateStore>>,
+    order_state: &SharedOrderState,
     ctx: &MarketContext,
 ) {
     // Get fills from order state store
     let fills = {
-        let store = order_state.read().await;
+        let store = order_state.read();
         let mut all_fills = store.get_fills(&ctx.up_token_id);
         all_fills.extend(store.get_fills(&ctx.down_token_id));
         all_fills

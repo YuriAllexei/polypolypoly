@@ -8,13 +8,11 @@ use super::tracker::{run_accumulator, AccumulatorContext};
 use crate::application::strategies::traits::{Strategy, StrategyContext, StrategyResult};
 use crate::application::strategies::up_or_down::{CryptoAsset, Timeframe};
 use crate::domain::DbMarket;
-use crate::infrastructure::OrderStateStore;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -53,8 +51,6 @@ pub struct MarketMergerStrategy {
     active_markets: Vec<TrackedMarket>,
     /// Spawned accumulator tasks (market_id -> JoinHandle)
     accumulator_tasks: HashMap<String, JoinHandle<()>>,
-    /// Shared order state store for STP and fill tracking
-    order_state: Arc<RwLock<OrderStateStore>>,
 }
 
 impl MarketMergerStrategy {
@@ -65,7 +61,6 @@ impl MarketMergerStrategy {
             tracked_market_ids: HashSet::new(),
             active_markets: Vec::new(),
             accumulator_tasks: HashMap::new(),
-            order_state: Arc::new(RwLock::new(OrderStateStore::new())),
         }
     }
 
@@ -239,7 +234,7 @@ impl MarketMergerStrategy {
             let config = self.config.clone();
             let trading = Arc::clone(&ctx.trading);
             let balance_manager = Arc::clone(&ctx.balance_manager);
-            let order_state = Arc::clone(&self.order_state);
+            let order_state = ctx.order_state.clone();
 
             info!(
                 "[Accumulator] Spawning for market {} ({} {})",

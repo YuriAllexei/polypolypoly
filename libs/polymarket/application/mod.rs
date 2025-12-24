@@ -24,4 +24,4 @@ pub use strategies::{
 };
 
 // Re-export infrastructure managers
-pub use crate::infrastructure::{ActiveOrderManager, BalanceManager, PositionManager};
+pub use crate::infrastructure::{BalanceManager, PositionManager};
