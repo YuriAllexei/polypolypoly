@@ -17,6 +17,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 // =============================================================================
@@ -271,8 +272,8 @@ fn run_loop(
 
         // Skip if no markets to check
         if markets_snapshot.is_empty() {
-            // Yield to prevent busy-spin when idle
-            thread::yield_now();
+            // Sleep to prevent busy-spin when idle
+            thread::sleep(Duration::from_millis(1));
             continue;
         }
 
@@ -334,8 +335,8 @@ fn run_loop(
             }
         }
 
-        // 5. Yield to prevent busy-spin burning 100% CPU
-        thread::yield_now();
+        // 5. Sleep to prevent busy-spin burning 100% CPU
+        thread::sleep(Duration::from_millis(1));
     }
 }
 
