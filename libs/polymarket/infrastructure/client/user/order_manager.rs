@@ -955,21 +955,55 @@ impl OrderStateStore {
             }
         }
 
-        // Determine the correct side from YOUR perspective:
-        // - TAKER: msg.side is YOUR side
-        // - MAKER: msg.side is the taker's side (opposite of yours), so flip it
-        let side = match msg.trader_side.as_deref() {
-            Some("MAKER") => Side::from_str_or_default(&msg.side).opposite(),
-            _ => Side::from_str_or_default(&msg.side),
+        // For MAKER trades, we need to use OUR order's asset_id, price, and side
+        // (not the taker's perspective from msg.asset_id/price/side)
+        // For TAKER trades, use the message directly
+        let (asset_id, price, side) = match msg.trader_side.as_deref() {
+            Some("MAKER") => {
+                // Get our maker order info (we already filtered to only our orders)
+                let our_order = msg.maker_orders
+                    .iter()
+                    .find(|m| self.order_to_asset.contains_key(&m.order_id));
+
+                match our_order {
+                    Some(maker) => {
+                        // Use our order's asset_id, price, and side
+                        let maker_side = maker.side.as_ref()
+                            .map(|s| Side::from_str_or_default(s))
+                            .unwrap_or(Side::Buy);
+                        (
+                            maker.asset_id.clone(),
+                            maker.price.parse().unwrap_or(0.0),
+                            maker_side,
+                        )
+                    }
+                    None => {
+                        // Fallback: use taker's perspective with side flipped
+                        (
+                            msg.asset_id.clone(),
+                            msg.price.parse().unwrap_or(0.0),
+                            Side::from_str_or_default(&msg.side).opposite(),
+                        )
+                    }
+                }
+            }
+            _ => {
+                // TAKER: use the message directly
+                (
+                    msg.asset_id.clone(),
+                    msg.price.parse().unwrap_or(0.0),
+                    Side::from_str_or_default(&msg.side),
+                )
+            }
         };
 
         let fill = Fill {
             trade_id: msg.id.clone(),
-            asset_id: msg.asset_id.clone(),
+            asset_id,
             market: msg.market.clone(),
             side,
             outcome: msg.outcome.clone(),
-            price: msg.price.parse().unwrap_or(0.0),
+            price,
             size,
             status: TradeStatus::from_str_or_default(&msg.status),
             taker_order_id: msg.taker_order_id.clone().unwrap_or_default(),
@@ -1003,7 +1037,8 @@ impl OrderStateStore {
 
         let event = OrderEvent::Trade(fill.clone());
 
-        let book = self.get_or_create_asset(&msg.asset_id);
+        // Use the correct asset_id (our token for MAKER, taker's for TAKER)
+        let book = self.get_or_create_asset(&fill.asset_id);
         book.add_fill(fill);
 
         Some(event)

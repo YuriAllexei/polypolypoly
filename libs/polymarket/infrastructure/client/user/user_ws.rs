@@ -134,14 +134,25 @@ impl UserHandler {
 
     fn handle_trade(&mut self, trade: &TradeMessage) {
         let trader_side = trade.trader_side.as_deref().unwrap_or("UNKNOWN");
-        info!(
-            "[UserWS] Trade: {} {} {} @ {} (size: {}, status: {}, you: {})",
-            trade.side, trade.outcome, trade.asset_id, trade.price, trade.size, trade.status, trader_side
-        );
 
+        // Process the trade first to get the corrected Fill (with our perspective for MAKER trades)
         let event = self.state.write().process_trade(trade);
-        if let Some(event) = event {
-            self.fire_callback(&event);
+
+        if let Some(OrderEvent::Trade(ref fill)) = event {
+            // Log with our corrected perspective (asset_id, price, side are adjusted for MAKER)
+            info!(
+                "[UserWS] Trade: {} {} {}... @ {} (size: {:.2}, status: {}, you: {})",
+                fill.side, fill.outcome, &fill.asset_id[..8.min(fill.asset_id.len())],
+                fill.price, fill.size, fill.status, trader_side
+            );
+            self.fire_callback(&event.unwrap());
+        } else if event.is_none() {
+            // Log the raw message for debugging when trade was filtered (duplicate/zero-size)
+            debug!(
+                "[UserWS] Trade filtered: {} {} {}... @ {} (raw_size: {}, you: {})",
+                trade.side, trade.outcome, &trade.asset_id[..8.min(trade.asset_id.len())],
+                trade.price, trade.size, trader_side
+            );
         }
     }
 
