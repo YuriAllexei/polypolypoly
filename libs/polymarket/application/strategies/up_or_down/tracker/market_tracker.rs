@@ -6,20 +6,19 @@ use crate::application::strategies::up_or_down::services::{
     get_market_oracle_age, get_price_to_beat, log_market_ended,
 };
 use crate::application::strategies::up_or_down::tracker::{
-    check_all_orderbooks, check_risk, guardian_check, place_order, pre_order_risk_check,
-    upgrade_order_on_tick_change,
+    check_all_orderbooks, check_risk, guardian_check, place_order, upgrade_order_on_tick_change,
 };
 use crate::application::strategies::up_or_down::types::{
-    MarketTrackerContext, OrderInfo, TrackerState, TrackingLoopExit, FINAL_SECONDS_BYPASS,
-    MAX_RECONNECT_ATTEMPTS, STALENESS_THRESHOLD_SECS,
+    MarketTrackerContext, OrderInfo, TrackerState, TrackingLoopExit, MAX_RECONNECT_ATTEMPTS,
+    STALENESS_THRESHOLD_SECS,
 };
 use crate::domain::DbMarket;
 use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::config::UpOrDownConfig;
 use crate::infrastructure::client::user::{SharedOrderState, SharedPositionTracker};
 use crate::infrastructure::{
-    build_ws_client, decimal_places, handle_client_event, BalanceManager,
-    MarketTrackerConfig, SharedOraclePrices, SharedOrderbooks, SharedPrecisions, TickSizeChangeEvent,
+    build_ws_client, decimal_places, handle_client_event, BalanceManager, MarketTrackerConfig,
+    RiskManagerHandle, SharedOraclePrices, SharedOrderbooks, SharedPrecisions, TickSizeChangeEvent,
 };
 use chrono::Utc;
 use crossbeam_channel::{unbounded, Receiver};
@@ -71,6 +70,7 @@ pub async fn run_market_tracker(
     balance_manager: Arc<RwLock<BalanceManager>>,
     _position_tracker: Option<SharedPositionTracker>,
     order_state: Option<SharedOrderState>,
+    risk_manager: Option<RiskManagerHandle>,
 ) -> anyhow::Result<()> {
     // Initialize context and state
     let outcomes = market.parse_outcomes()?;
@@ -162,6 +162,7 @@ pub async fn run_market_tracker(
             &trading,
             &balance_manager,
             &order_state,
+            &risk_manager,
         )
         .await;
 
@@ -322,6 +323,7 @@ async fn run_tracking_loop(
     trading: &Arc<TradingClient>,
     balance_manager: &Arc<RwLock<BalanceManager>>,
     order_state: &Option<SharedOrderState>,
+    risk_manager: &Option<RiskManagerHandle>,
 ) -> (TrackingLoopExit, Instant) {
     let connection_start = Instant::now();
     let mut seen_updates_since_connect = false;
@@ -332,6 +334,16 @@ async fn run_tracking_loop(
         if !shutdown_flag.load(Ordering::Acquire) {
             info!("[WS {}] Shutdown signal received", ctx.market_id);
             break TrackingLoopExit::Shutdown;
+        }
+
+        // Check if we're too late - market ended but no orders placed
+        if Utc::now() > ctx.market_end_time && state.order_placed.is_empty() {
+            info!(
+                "[WS {}] Too late - market ended ({}) with no orders placed",
+                ctx.market_id,
+                ctx.market_end_time.format("%Y-%m-%d %H:%M:%S UTC")
+            );
+            break TrackingLoopExit::TooLate;
         }
 
         // Check if market resolved: time passed AND we have high-confidence order ($0.999+)
@@ -460,6 +472,7 @@ async fn run_tracking_loop(
             trading,
             balance_manager,
             order_state.as_ref(),
+            risk_manager,
         )
         .await;
 
@@ -569,10 +582,11 @@ async fn process_order_candidates(
     precisions: &SharedPrecisions,
     state: &mut TrackerState,
     ctx: &MarketTrackerContext,
-    oracle_prices: &Option<SharedOraclePrices>,
+    _oracle_prices: &Option<SharedOraclePrices>,
     trading: &Arc<TradingClient>,
     balance_manager: &Arc<RwLock<BalanceManager>>,
     order_state: Option<&SharedOrderState>,
+    risk_manager: &Option<RiskManagerHandle>,
 ) {
     for (token_id, outcome_name, elapsed) in tokens_to_order {
         // Re-check orderbook and capture liquidity before placing order
@@ -607,31 +621,20 @@ async fn process_order_candidates(
             ctx.market_id, top_bid_str, liq_at_99
         );
 
-        // Pre-order risk check (skip if market timer ended OR in final seconds before end)
-        let now = Utc::now();
-        let time_remaining = ctx
-            .market_end_time
-            .signed_duration_since(now)
-            .num_milliseconds() as f64
-            / 1000.0;
-        let market_timer_ended = time_remaining <= 0.0;
-        let in_final_seconds = time_remaining > 0.0 && time_remaining <= FINAL_SECONDS_BYPASS;
-        let bypass_risk_check = market_timer_ended || in_final_seconds;
+        // Pre-order risk check using RiskManager - ALWAYS check, no bypass
+        let risk_check_passed = match (risk_manager, ctx.price_to_beat) {
+            (Some(rm), Some(ptb)) => rm.pre_placement_check(ptb, ctx.oracle_source, ctx.crypto_asset),
+            _ => true, // No risk manager or no price_to_beat - allow order
+        };
 
-        if !bypass_risk_check && !pre_order_risk_check(ctx, oracle_prices) {
+        if !risk_check_passed {
             info!(
-                "[WS {}] Skipping order for {} - pre-order risk check failed",
+                "[WS {}] Skipping order for {} - pre-placement risk check failed",
                 ctx.market_id, outcome_name
             );
             state.threshold_triggered.remove(&token_id);
             state.no_asks_timers.remove(&token_id);
             continue;
-        }
-        if bypass_risk_check {
-            info!(
-                "[WS {}] Bypassing pre-order risk check for {} (time remaining: {:.1}s)",
-                ctx.market_id, outcome_name, time_remaining
-            );
         }
 
         // Check if trading is halted due to balance drop
@@ -649,7 +652,25 @@ async fn process_order_candidates(
         if let Some((order_id, precision)) =
             place_order(trading, &token_id, &outcome_name, elapsed, ctx, precisions, balance_manager, order_state).await
         {
-            state.order_placed.insert(token_id, OrderInfo::new(order_id, precision));
+            state.order_placed.insert(token_id.clone(), OrderInfo::new(order_id, precision));
+
+            // Register market with risk manager for continuous monitoring now that we have an order
+            if let (Some(rm), Some(price_to_beat)) = (risk_manager, ctx.price_to_beat) {
+                if ctx.token_ids.len() >= 2 {
+                    if let Err(e) = rm.register_market(
+                        ctx.market_id.clone(),
+                        price_to_beat,
+                        ctx.oracle_source,
+                        ctx.crypto_asset,
+                        ctx.market_end_time,
+                        [ctx.token_ids[0].clone(), ctx.token_ids[1].clone()],
+                    ) {
+                        warn!("[WS {}] Failed to register with risk manager: {}", ctx.market_id, e);
+                    } else {
+                        info!("[WS {}] Registered with risk manager after order placement", ctx.market_id);
+                    }
+                }
+            }
         }
     }
 }

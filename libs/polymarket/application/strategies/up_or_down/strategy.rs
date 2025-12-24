@@ -8,7 +8,7 @@ use super::types::{CryptoAsset, OracleSource, Timeframe, REQUIRED_TAGS};
 use crate::application::strategies::traits::{Strategy, StrategyContext, StrategyResult};
 use crate::domain::DbMarket;
 use crate::infrastructure::config::UpOrDownConfig;
-use crate::infrastructure::{spawn_oracle_trackers, SharedOraclePrices};
+use crate::infrastructure::{spawn_oracle_trackers, RiskManager, RiskManagerHandle, SharedOraclePrices};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
@@ -47,6 +47,8 @@ pub struct UpOrDownStrategy {
     tracker_tasks: HashMap<String, JoinHandle<()>>,
     /// Oracle prices (ChainLink and Binance) - strategy-owned
     oracle_prices: Option<SharedOraclePrices>,
+    /// Risk manager handle for continuous monitoring and pre-placement checks
+    risk_manager_handle: Option<RiskManagerHandle>,
 }
 
 impl UpOrDownStrategy {
@@ -58,6 +60,7 @@ impl UpOrDownStrategy {
             active_markets: Vec::new(),
             tracker_tasks: HashMap::new(),
             oracle_prices: None,
+            risk_manager_handle: None,
         }
     }
 
@@ -226,6 +229,7 @@ impl UpOrDownStrategy {
             let balance_manager = Arc::clone(&ctx.balance_manager);
             let position_tracker = Some(ctx.position_tracker.clone());
             let order_state = Some(ctx.order_state.clone());
+            let risk_manager = self.risk_manager_handle.clone();
 
             // Register token pair for this market (enables merge detection)
             if let Some(ref condition_id) = tracked.market.condition_id {
@@ -259,6 +263,7 @@ impl UpOrDownStrategy {
                     balance_manager,
                     position_tracker,
                     order_state,
+                    risk_manager,
                 )
                 .await
                 {
@@ -321,6 +326,16 @@ impl Strategy for UpOrDownStrategy {
         info!("Starting oracle price trackers (ChainLink + Binance)");
         self.oracle_prices = Some(spawn_oracle_trackers(ctx.shutdown_flag.clone()).await?);
         info!("Oracle price trackers started successfully");
+
+        // Spawn risk manager for continuous monitoring
+        info!("Starting risk manager for continuous oracle monitoring");
+        let risk_manager = RiskManager::spawn(
+            Arc::clone(&ctx.trading),
+            self.oracle_prices.clone().unwrap(),
+            self.config.oracle_bps_price_threshold,
+        );
+        self.risk_manager_handle = Some(risk_manager);
+        info!("Risk manager started successfully");
 
         // Position tracker and order state are now provided by StrategyContext
         info!(
@@ -408,6 +423,12 @@ impl Strategy for UpOrDownStrategy {
             active_trackers = self.tracker_tasks.len(),
             "Stopping Up or Down strategy"
         );
+
+        // Shutdown risk manager
+        if let Some(ref handle) = self.risk_manager_handle {
+            info!("Shutting down risk manager");
+            handle.shutdown();
+        }
 
         // Wait for all tracker tasks to complete (they will stop due to shutdown flag)
         if !self.tracker_tasks.is_empty() {

@@ -219,6 +219,7 @@ pub enum TrackingLoopExit {
     AllOrderbooksEmpty,
     WebSocketDisconnected,
     StaleOrderbook,
+    TooLate,
 }
 
 impl TrackingLoopExit {
@@ -230,6 +231,7 @@ impl TrackingLoopExit {
             TrackingLoopExit::AllOrderbooksEmpty => "all_empty",
             TrackingLoopExit::WebSocketDisconnected => "ws_disconnected",
             TrackingLoopExit::StaleOrderbook => "stale_orderbook",
+            TrackingLoopExit::TooLate => "too_late",
         }
     }
 

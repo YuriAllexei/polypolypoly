@@ -6,6 +6,4 @@ mod risk_manager;
 
 pub use market_tracker::run_market_tracker;
 pub use orderbook_checker::{calculate_dynamic_threshold, check_all_orderbooks};
-pub use risk_manager::{
-    check_risk, guardian_check, place_order, pre_order_risk_check, upgrade_order_on_tick_change,
-};
+pub use risk_manager::{check_risk, guardian_check, place_order, upgrade_order_on_tick_change};

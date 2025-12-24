@@ -11,6 +11,7 @@ pub mod heartbeat;
 pub mod logging;
 pub mod order_manager;
 pub mod position_manager;
+pub mod risk_manager;
 pub mod shutdown;
 
 // Re-export commonly used types from client
@@ -60,4 +61,5 @@ pub use order_manager::{
     SharedOrderState, Side as OrderSide, TradeStatus,
 };
 pub use position_manager::PositionManager;
+pub use risk_manager::{RiskManager, RiskManagerHandle};
 pub use shutdown::ShutdownManager;
