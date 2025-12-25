@@ -2,6 +2,7 @@
 //!
 //! Pluggable strategy system for the market sniper.
 
+pub mod inventory_mm;
 pub mod market_merger;
 pub mod sports_sniping;
 pub mod traits;

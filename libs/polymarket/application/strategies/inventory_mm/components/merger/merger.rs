@@ -1,0 +1,313 @@
+//! Merger component - monitors inventory and triggers merges.
+
+use tracing::{info, debug};
+
+use crate::application::strategies::inventory_mm::types::InventorySnapshot;
+
+/// Configuration for the Merger
+#[derive(Debug, Clone)]
+pub struct MergerConfig {
+    /// Minimum pairs before considering a merge
+    pub min_merge_size: f64,
+
+    /// Maximum imbalance allowed for merge (e.g., 0.3 = 30%)
+    /// If delta is too high, wait for more balance
+    pub max_merge_imbalance: f64,
+
+    /// Minimum profit margin required (e.g., 0.01 = 1 cent per pair)
+    pub min_profit_margin: f64,
+
+    /// Maximum combined avg cost (1.0 - min_profit_margin)
+    pub max_combined_cost: f64,
+}
+
+impl Default for MergerConfig {
+    fn default() -> Self {
+        Self {
+            min_merge_size: 10.0,
+            max_merge_imbalance: 0.3,
+            min_profit_margin: 0.01,
+            max_combined_cost: 0.99,
+        }
+    }
+}
+
+impl MergerConfig {
+    pub fn new(min_merge_size: f64, min_profit_margin: f64) -> Self {
+        Self {
+            min_merge_size,
+            min_profit_margin,
+            max_combined_cost: 1.0 - min_profit_margin,
+            ..Default::default()
+        }
+    }
+}
+
+/// Result of merge decision check
+#[derive(Debug, Clone)]
+pub struct MergeDecision {
+    /// Should we merge?
+    pub should_merge: bool,
+
+    /// Number of pairs to merge
+    pub pairs_to_merge: f64,
+
+    /// Expected profit from merge
+    pub expected_profit: f64,
+
+    /// Reason for decision (for logging)
+    pub reason: String,
+}
+
+impl MergeDecision {
+    pub fn no_merge(reason: impl Into<String>) -> Self {
+        Self {
+            should_merge: false,
+            pairs_to_merge: 0.0,
+            expected_profit: 0.0,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn merge(pairs: f64, profit: f64) -> Self {
+        Self {
+            should_merge: true,
+            pairs_to_merge: pairs,
+            expected_profit: profit,
+            reason: format!("Merge {} pairs for ${:.4} profit", pairs, profit),
+        }
+    }
+}
+
+/// Merger component - checks if we should merge and executes
+pub struct Merger {
+    config: MergerConfig,
+    /// Token IDs for the Up/Down pair
+    up_token_id: String,
+    down_token_id: String,
+    condition_id: String,
+}
+
+impl Merger {
+    pub fn new(
+        config: MergerConfig,
+        up_token_id: String,
+        down_token_id: String,
+        condition_id: String,
+    ) -> Self {
+        Self {
+            config,
+            up_token_id,
+            down_token_id,
+            condition_id,
+        }
+    }
+
+    /// Check if we should merge based on current inventory.
+    pub fn check_merge(&self, inventory: &InventorySnapshot) -> MergeDecision {
+        let delta = inventory.imbalance();
+        let pairs = inventory.pairs_available();
+        let combined_cost = inventory.combined_avg_cost();
+
+        debug!(
+            "[Merger] Checking: delta={:.3}, pairs={:.1}, combined_cost={:.4}",
+            delta, pairs, combined_cost
+        );
+
+        // Check 1: Enough pairs?
+        if pairs < self.config.min_merge_size {
+            return MergeDecision::no_merge(format!(
+                "Not enough pairs: {:.1} < {:.1}",
+                pairs, self.config.min_merge_size
+            ));
+        }
+
+        // Check 2: Delta within threshold?
+        if delta.abs() > self.config.max_merge_imbalance {
+            return MergeDecision::no_merge(format!(
+                "Imbalance too high: {:.3} > {:.3}",
+                delta.abs(), self.config.max_merge_imbalance
+            ));
+        }
+
+        // Check 3: Profitable?
+        if combined_cost >= self.config.max_combined_cost {
+            return MergeDecision::no_merge(format!(
+                "Not profitable: combined {:.4} >= max {:.4}",
+                combined_cost, self.config.max_combined_cost
+            ));
+        }
+
+        // All checks pass - calculate profit and merge
+        let profit_per_pair = 1.0 - combined_cost;
+        let total_profit = pairs * profit_per_pair;
+
+        info!(
+            "[Merger] Merge opportunity: {} pairs @ ${:.4} combined = ${:.4} profit",
+            pairs, combined_cost, total_profit
+        );
+
+        MergeDecision::merge(pairs, total_profit)
+    }
+
+    /// Execute a merge (placeholder - needs CLOB client integration)
+    pub async fn execute_merge(&self, decision: &MergeDecision) -> Result<MergeResult, MergeError> {
+        if !decision.should_merge {
+            return Err(MergeError::InvalidDecision("Decision says not to merge".into()));
+        }
+
+        info!(
+            "[Merger] Executing merge: {} pairs for ${:.4} profit",
+            decision.pairs_to_merge, decision.expected_profit
+        );
+
+        // TODO: Implement actual merge execution
+        // 1. Call Polymarket merge API
+        // 2. Wait for confirmation
+        // 3. Update position tracker
+
+        Ok(MergeResult {
+            pairs_merged: decision.pairs_to_merge,
+            profit_realized: decision.expected_profit,
+            tx_hash: None, // TODO: Actual tx hash
+        })
+    }
+
+    /// Get config reference
+    pub fn config(&self) -> &MergerConfig {
+        &self.config
+    }
+
+    /// Get condition ID
+    pub fn condition_id(&self) -> &str {
+        &self.condition_id
+    }
+}
+
+/// Result of merge execution
+#[derive(Debug, Clone)]
+pub struct MergeResult {
+    pub pairs_merged: f64,
+    pub profit_realized: f64,
+    pub tx_hash: Option<String>,
+}
+
+/// Errors from merge operations
+#[derive(Debug, Clone)]
+pub enum MergeError {
+    InvalidDecision(String),
+    ExecutionFailed(String),
+    InsufficientBalance(String),
+}
+
+impl std::fmt::Display for MergeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MergeError::InvalidDecision(e) => write!(f, "Invalid merge decision: {}", e),
+            MergeError::ExecutionFailed(e) => write!(f, "Merge execution failed: {}", e),
+            MergeError::InsufficientBalance(e) => write!(f, "Insufficient balance: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for MergeError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_merger() -> Merger {
+        Merger::new(
+            MergerConfig::default(),
+            "up_token".to_string(),
+            "down_token".to_string(),
+            "condition_123".to_string(),
+        )
+    }
+
+    #[test]
+    fn test_check_merge_profitable_balanced() {
+        let merger = default_merger();
+        let inventory = InventorySnapshot {
+            up_size: 50.0,
+            up_avg_price: 0.52,
+            down_size: 50.0,
+            down_avg_price: 0.46,
+        };
+
+        let decision = merger.check_merge(&inventory);
+
+        // Combined = 0.98, pairs = 50, delta = 0
+        assert!(decision.should_merge);
+        assert!((decision.pairs_to_merge - 50.0).abs() < 0.01);
+        assert!((decision.expected_profit - 1.0).abs() < 0.01); // 50 * 0.02
+    }
+
+    #[test]
+    fn test_check_merge_not_enough_pairs() {
+        let merger = default_merger();
+        let inventory = InventorySnapshot {
+            up_size: 5.0,
+            up_avg_price: 0.52,
+            down_size: 5.0,
+            down_avg_price: 0.46,
+        };
+
+        let decision = merger.check_merge(&inventory);
+
+        // Only 5 pairs, need 10
+        assert!(!decision.should_merge);
+        assert!(decision.reason.contains("Not enough pairs"));
+    }
+
+    #[test]
+    fn test_check_merge_too_imbalanced() {
+        let merger = default_merger();
+        let inventory = InventorySnapshot {
+            up_size: 80.0,
+            up_avg_price: 0.52,
+            down_size: 20.0,
+            down_avg_price: 0.46,
+        };
+
+        let decision = merger.check_merge(&inventory);
+
+        // Delta = 0.6, max = 0.3
+        assert!(!decision.should_merge);
+        assert!(decision.reason.contains("Imbalance too high"));
+    }
+
+    #[test]
+    fn test_check_merge_not_profitable() {
+        let merger = default_merger();
+        let inventory = InventorySnapshot {
+            up_size: 50.0,
+            up_avg_price: 0.52,
+            down_size: 50.0,
+            down_avg_price: 0.48, // Combined = 1.00
+        };
+
+        let decision = merger.check_merge(&inventory);
+
+        // Combined = 1.00, not profitable
+        assert!(!decision.should_merge);
+        assert!(decision.reason.contains("Not profitable"));
+    }
+
+    #[test]
+    fn test_check_merge_barely_profitable() {
+        let merger = default_merger();
+        let inventory = InventorySnapshot {
+            up_size: 50.0,
+            up_avg_price: 0.51,
+            down_size: 50.0,
+            down_avg_price: 0.47, // Combined = 0.98
+        };
+
+        let decision = merger.check_merge(&inventory);
+
+        // Combined = 0.98 < 0.99, profitable
+        assert!(decision.should_merge);
+        assert!((decision.expected_profit - 1.0).abs() < 0.01); // 50 * 0.02
+    }
+}
