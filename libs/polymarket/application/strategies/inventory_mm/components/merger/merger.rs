@@ -32,14 +32,55 @@ impl Default for MergerConfig {
     }
 }
 
+/// Floating point epsilon for comparisons
+const EPSILON: f64 = 1e-9;
+
 impl MergerConfig {
+    /// Create new MergerConfig with validation.
+    ///
+    /// # Panics
+    /// Panics if min_merge_size <= 0 or min_profit_margin is not in (0, 1).
     pub fn new(min_merge_size: f64, min_profit_margin: f64) -> Self {
+        assert!(
+            min_merge_size > 0.0,
+            "min_merge_size must be positive, got {}",
+            min_merge_size
+        );
+        assert!(
+            min_profit_margin > 0.0 && min_profit_margin < 1.0,
+            "min_profit_margin must be in (0, 1), got {}",
+            min_profit_margin
+        );
+
         Self {
             min_merge_size,
             min_profit_margin,
             max_combined_cost: 1.0 - min_profit_margin,
             ..Default::default()
         }
+    }
+
+    /// Validate config values. Returns error message if invalid.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.min_merge_size <= 0.0 {
+            return Err(format!(
+                "min_merge_size must be positive, got {}",
+                self.min_merge_size
+            ));
+        }
+        if self.min_profit_margin <= 0.0 || self.min_profit_margin >= 1.0 {
+            return Err(format!(
+                "min_profit_margin must be in (0, 1), got {}",
+                self.min_profit_margin
+            ));
+        }
+        if self.max_merge_imbalance <= 0.0 || self.max_merge_imbalance > 1.0 {
+            return Err(format!(
+                "max_merge_imbalance must be in (0, 1], got {}",
+                self.max_merge_imbalance
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -130,8 +171,8 @@ impl Merger {
             ));
         }
 
-        // Check 3: Profitable?
-        if combined_cost >= self.config.max_combined_cost {
+        // Check 3: Profitable? (use epsilon for floating point comparison)
+        if combined_cost >= self.config.max_combined_cost - EPSILON {
             return MergeDecision::no_merge(format!(
                 "Not profitable: combined {:.4} >= max {:.4}",
                 combined_cost, self.config.max_combined_cost

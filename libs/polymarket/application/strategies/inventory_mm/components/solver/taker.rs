@@ -45,14 +45,22 @@ fn find_down_taker(
         return None;
     }
 
+    // Need existing Up position to calculate profitability
+    if inventory.up_size <= 0.0 || inventory.up_avg_price <= 0.0 {
+        return None;
+    }
+
     let (ask_price, ask_size) = down_ob.best_ask?;
+
+    // Use the actual size we'll order (capped at config.order_size)
+    let take_size = ask_size.min(config.order_size);
 
     // Check if taking maintains profitability
     let new_down_avg = if inventory.down_size > 0.0 {
         // VWAP: (old_cost + new_cost) / (old_size + new_size)
         let old_cost = inventory.down_size * inventory.down_avg_price;
-        let new_cost = ask_size * ask_price;
-        (old_cost + new_cost) / (inventory.down_size + ask_size)
+        let new_cost = take_size * ask_price;
+        (old_cost + new_cost) / (inventory.down_size + take_size)
     } else {
         ask_price
     };
@@ -71,7 +79,7 @@ fn find_down_taker(
     Some(TakerOrder::buy(
         token_id.to_string(),
         ask_price,
-        ask_size.min(config.order_size), // Cap at order size
+        take_size,
         score,
     ))
 }
@@ -88,13 +96,21 @@ fn find_up_taker(
         return None;
     }
 
+    // Need existing Down position to calculate profitability
+    if inventory.down_size <= 0.0 || inventory.down_avg_price <= 0.0 {
+        return None;
+    }
+
     let (ask_price, ask_size) = up_ob.best_ask?;
+
+    // Use the actual size we'll order (capped at config.order_size)
+    let take_size = ask_size.min(config.order_size);
 
     // Check if taking maintains profitability
     let new_up_avg = if inventory.up_size > 0.0 {
         let old_cost = inventory.up_size * inventory.up_avg_price;
-        let new_cost = ask_size * ask_price;
-        (old_cost + new_cost) / (inventory.up_size + ask_size)
+        let new_cost = take_size * ask_price;
+        (old_cost + new_cost) / (inventory.up_size + take_size)
     } else {
         ask_price
     };
@@ -112,7 +128,7 @@ fn find_up_taker(
     Some(TakerOrder::buy(
         token_id.to_string(),
         ask_price,
-        ask_size.min(config.order_size),
+        take_size,
         score,
     ))
 }

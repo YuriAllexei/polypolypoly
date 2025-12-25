@@ -20,16 +20,24 @@ pub fn calculate_quotes(
     let up_offset = config.base_offset * (1.0 + delta.max(0.0));
     let down_offset = config.base_offset * (1.0 + (-delta).max(0.0));
 
-    // Calculate max profitable bids based on other side's avg cost
+    // Calculate max profitable bids based on other side's avg cost or best ask
     let max_up_bid = if inventory.down_avg_price > 0.0 {
+        // Have Down position: max Up bid = 1.0 - down_avg - margin
         1.0 - inventory.down_avg_price - config.min_profit_margin
+    } else if let Some(down_ask) = down_ob.best_ask_price() {
+        // No Down position: use best Down ask as proxy (what we might get)
+        // Max Up bid = 1.0 - down_ask - margin
+        1.0 - down_ask - config.min_profit_margin
     } else {
-        // No Down position yet, use conservative max
+        // No data at all: use conservative 50/50 assumption
         0.50 - config.min_profit_margin
     };
 
     let max_down_bid = if inventory.up_avg_price > 0.0 {
         1.0 - inventory.up_avg_price - config.min_profit_margin
+    } else if let Some(up_ask) = up_ob.best_ask_price() {
+        // No Up position: use best Up ask as proxy
+        1.0 - up_ask - config.min_profit_margin
     } else {
         0.50 - config.min_profit_margin
     };

@@ -85,6 +85,23 @@ impl OrderbookSnapshot {
     pub fn best_ask_size(&self) -> Option<f64> {
         self.best_ask.map(|(_, s)| s)
     }
+
+    pub fn best_bid_size(&self) -> Option<f64> {
+        self.best_bid.map(|(_, s)| s)
+    }
+
+    /// Check if orderbook has valid data
+    pub fn is_valid(&self) -> bool {
+        self.best_ask.is_some() || self.best_bid.is_some()
+    }
+
+    /// Get the spread if both bid and ask exist
+    pub fn spread(&self) -> Option<f64> {
+        match (self.best_bid_price(), self.best_ask_price()) {
+            (Some(bid), Some(ask)) => Some(ask - bid),
+            _ => None,
+        }
+    }
 }
 
 /// Complete input for the solver - all raw types

@@ -9,6 +9,7 @@ use crate::application::strategies::inventory_mm::types::InventorySnapshot;
 /// * `best_down_bid` - Best (highest) Down bid we'd place (level 0)
 /// * `inventory` - Current inventory state
 /// * `min_profit_margin` - Minimum required profit per pair
+/// * `order_size` - Size per order level
 ///
 /// # Returns
 /// true if placing these quotes could lead to profitable merge
@@ -17,6 +18,7 @@ pub fn validate_profitability(
     best_down_bid: Option<f64>,
     inventory: &InventorySnapshot,
     min_profit_margin: f64,
+    order_size: f64,
 ) -> bool {
     // If we have no quotes to place, consider it valid (nothing to check)
     if best_up_bid.is_none() && best_down_bid.is_none() {
@@ -26,31 +28,44 @@ pub fn validate_profitability(
     // Calculate what combined avg would be after fills
     let projected_up_avg = match best_up_bid {
         Some(bid) => {
-            if inventory.up_size > 0.0 {
-                // Assume we fill 100 shares at bid price (simplified)
-                let fill_size = 100.0;
+            if inventory.up_size > 0.0 && inventory.up_avg_price > 0.0 {
                 let old_cost = inventory.up_size * inventory.up_avg_price;
-                let new_cost = fill_size * bid;
-                (old_cost + new_cost) / (inventory.up_size + fill_size)
+                let new_cost = order_size * bid;
+                (old_cost + new_cost) / (inventory.up_size + order_size)
             } else {
+                // No existing position, use bid price as projected avg
                 bid
             }
         }
-        None => inventory.up_avg_price,
+        // No Up bid - use existing avg if valid, otherwise can't determine
+        None => {
+            if inventory.up_avg_price > 0.0 {
+                inventory.up_avg_price
+            } else {
+                // No position and no bid - can't validate, be conservative
+                return best_down_bid.is_none(); // Only valid if also no down bid
+            }
+        }
     };
 
     let projected_down_avg = match best_down_bid {
         Some(bid) => {
-            if inventory.down_size > 0.0 {
-                let fill_size = 100.0;
+            if inventory.down_size > 0.0 && inventory.down_avg_price > 0.0 {
                 let old_cost = inventory.down_size * inventory.down_avg_price;
-                let new_cost = fill_size * bid;
-                (old_cost + new_cost) / (inventory.down_size + fill_size)
+                let new_cost = order_size * bid;
+                (old_cost + new_cost) / (inventory.down_size + order_size)
             } else {
                 bid
             }
         }
-        None => inventory.down_avg_price,
+        None => {
+            if inventory.down_avg_price > 0.0 {
+                inventory.down_avg_price
+            } else {
+                // No position and no bid - can't validate, be conservative
+                return best_up_bid.is_none();
+            }
+        }
     };
 
     // Check if projected combined cost allows for profit
@@ -145,6 +160,7 @@ mod tests {
             Some(0.46),
             &inventory,
             0.01, // need 1 cent profit
+            100.0, // order_size
         );
 
         assert!(result);
@@ -165,6 +181,7 @@ mod tests {
             Some(0.48),
             &inventory,
             0.01,
+            100.0,
         );
 
         // New avg would be worse, combined > 0.99
@@ -181,6 +198,7 @@ mod tests {
             Some(0.46),
             &inventory,
             0.01,
+            100.0,
         );
 
         // 0.52 + 0.46 = 0.98 < 0.99, profitable
@@ -196,16 +214,17 @@ mod tests {
             down_avg_price: 0.0,
         };
 
-        // Only Up bid, no Down
+        // Only Up bid, no Down - can't validate without Down position or bid
         let result = validate_profitability(
             Some(0.52),
             None,
             &inventory,
             0.01,
+            100.0,
         );
 
-        // Can't check profitability without both sides, default to true
-        assert!(result);
+        // Conservative: returns false when we can't determine profitability
+        assert!(!result);
     }
 
     #[test]

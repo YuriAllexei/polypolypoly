@@ -59,7 +59,22 @@ impl ExecutorHandle {
 
     /// Check if executor is still running
     pub fn is_running(&self) -> bool {
-        !self.command_tx.is_empty() || self.thread_handle.as_ref().map(|h| !h.is_finished()).unwrap_or(false)
+        self.thread_handle
+            .as_ref()
+            .map(|h| !h.is_finished())
+            .unwrap_or(false)
+    }
+}
+
+impl Drop for ExecutorHandle {
+    fn drop(&mut self) {
+        // Send shutdown command if channel is still open
+        let _ = self.command_tx.send(ExecutorCommand::Shutdown);
+
+        // Wait for thread to finish
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 

@@ -91,8 +91,10 @@ pub fn diff_orders_advanced(
                         quote.size,
                         quote.side,
                     ));
+                } else {
+                    // Order is good, keep it
+                    result.unchanged += 1;
                 }
-                // Else: order is good, keep it
             }
             None => {
                 // No matching desired quote - cancel
