@@ -1,15 +1,17 @@
 //! Quote ladder calculation.
 
 use crate::application::strategies::inventory_mm::types::{
-    InventorySnapshot, OrderbookSnapshot, Quote, QuoteLadder, SolverConfig,
+    OrderbookSnapshot, Quote, QuoteLadder, SolverConfig,
 };
 
 /// Calculate quote ladder for both Up and Down tokens.
+///
+/// Quotes are purely market-based: price = best_ask - offset - level_spread
+/// Risk is managed via the offset mechanism (increases when imbalanced).
 pub fn calculate_quotes(
     delta: f64,
     up_ob: &OrderbookSnapshot,
     down_ob: &OrderbookSnapshot,
-    inventory: &InventorySnapshot,
     config: &SolverConfig,
     up_token_id: &str,
     down_token_id: &str,
@@ -17,30 +19,11 @@ pub fn calculate_quotes(
     let mut ladder = QuoteLadder::new();
 
     // Calculate offsets based on imbalance
-    let up_offset = config.base_offset * (1.0 + delta.max(0.0));
-    let down_offset = config.base_offset * (1.0 + (-delta).max(0.0));
-
-    // Calculate max profitable bids based on other side's avg cost or best ask
-    let max_up_bid = if inventory.down_avg_price > 0.0 {
-        // Have Down position: max Up bid = 1.0 - down_avg - margin
-        1.0 - inventory.down_avg_price - config.min_profit_margin
-    } else if let Some(down_ask) = down_ob.best_ask_price() {
-        // No Down position: use best Down ask as proxy (what we might get)
-        // Max Up bid = 1.0 - down_ask - margin
-        1.0 - down_ask - config.min_profit_margin
-    } else {
-        // No data at all: use conservative 50/50 assumption
-        0.50 - config.min_profit_margin
-    };
-
-    let max_down_bid = if inventory.up_avg_price > 0.0 {
-        1.0 - inventory.up_avg_price - config.min_profit_margin
-    } else if let Some(up_ask) = up_ob.best_ask_price() {
-        // No Up position: use best Up ask as proxy
-        1.0 - up_ask - config.min_profit_margin
-    } else {
-        0.50 - config.min_profit_margin
-    };
+    // When heavy on UP (delta > 0), UP offset increases → less aggressive UP bids
+    // When heavy on DOWN (delta < 0), DOWN offset increases → less aggressive DOWN bids
+    // offset_scaling controls how aggressively we back off (e.g., 5.0 = 5x multiplier)
+    let up_offset = config.base_offset * (1.0 + delta.max(0.0) * config.offset_scaling);
+    let down_offset = config.base_offset * (1.0 + (-delta).max(0.0) * config.offset_scaling);
 
     // Build Up quotes (skip if too imbalanced on Up side)
     if delta < config.max_imbalance {
@@ -49,7 +32,6 @@ pub fn calculate_quotes(
                 up_token_id,
                 best_ask,
                 up_offset,
-                max_up_bid,
                 config,
             );
         }
@@ -62,7 +44,6 @@ pub fn calculate_quotes(
                 down_token_id,
                 best_ask,
                 down_offset,
-                max_down_bid,
                 config,
             );
         }
@@ -76,28 +57,31 @@ fn build_ladder(
     token_id: &str,
     best_ask: f64,
     base_offset: f64,
-    max_bid: f64,
     config: &SolverConfig,
 ) -> Vec<Quote> {
     let mut quotes = Vec::with_capacity(config.num_levels);
+    let mut last_price: Option<f64> = None;
 
     for level in 0..config.num_levels {
         // Calculate spread for this level (widens with each level)
         let level_spread = (level as f64) * (config.spread_per_level / 100.0);
 
         // Price = best_ask - base_offset - level_spread
-        let mut price = best_ask - base_offset - level_spread;
-
-        // Cap at profitability limit
-        price = price.min(max_bid);
+        let price = best_ask - base_offset - level_spread;
 
         // Round to tick size
-        price = round_to_tick(price, config.tick_size);
+        let price = round_to_tick(price, config.tick_size);
 
         // Skip if price too low (not worth quoting)
         if price < 0.01 {
             continue;
         }
+
+        // Skip if same as previous level (shouldn't happen without capping, but keep for safety)
+        if last_price.map_or(false, |lp| (lp - price).abs() < 1e-9) {
+            continue;
+        }
+        last_price = Some(price);
 
         quotes.push(Quote::new_bid(
             token_id.to_string(),
@@ -112,7 +96,9 @@ fn build_ladder(
 
 /// Round price down to tick size
 fn round_to_tick(price: f64, tick_size: f64) -> f64 {
-    (price / tick_size).floor() * tick_size
+    // Add small epsilon to handle floating point precision errors
+    // e.g., 0.47/0.01 = 46.9999... should floor to 47, not 46
+    ((price / tick_size) + 1e-9).floor() * tick_size
 }
 
 #[cfg(test)]
@@ -128,6 +114,7 @@ mod tests {
             max_imbalance: 0.8,
             order_size: 100.0,
             spread_per_level: 1.0,
+            offset_scaling: 5.0,
         }
     }
 
@@ -142,7 +129,7 @@ mod tests {
     #[test]
     fn test_build_ladder_basic() {
         let config = default_config();
-        let quotes = build_ladder("token", 0.55, 0.01, 0.54, &config);
+        let quotes = build_ladder("token", 0.55, 0.01, &config);
 
         assert_eq!(quotes.len(), 3);
         // Level 0: 0.55 - 0.01 - 0 = 0.54
@@ -168,18 +155,11 @@ mod tests {
             best_bid_is_ours: false,
             best_ask_is_ours: false,
         };
-        let inventory = InventorySnapshot {
-            up_size: 50.0,
-            up_avg_price: 0.52,
-            down_size: 50.0,
-            down_avg_price: 0.46,
-        };
 
         let ladder = calculate_quotes(
-            0.0, // balanced
+            0.0, // balanced delta
             &up_ob,
             &down_ob,
-            &inventory,
             &config,
             "up_token",
             "down_token",
@@ -205,22 +185,14 @@ mod tests {
             best_bid_is_ours: false,
             best_ask_is_ours: false,
         };
-        let inventory = InventorySnapshot {
-            up_size: 90.0,
-            up_avg_price: 0.52,
-            down_size: 10.0,
-            down_avg_price: 0.46,
-        };
 
-        // delta = (90-10)/(90+10) = 0.8, exactly at max_imbalance
-        let delta = inventory.imbalance();
-        assert!((delta - 0.8).abs() < 0.01);
+        // delta = 0.8, exactly at max_imbalance
+        let delta = 0.8;
 
         let ladder = calculate_quotes(
             delta,
             &up_ob,
             &down_ob,
-            &inventory,
             &config,
             "up_token",
             "down_token",
@@ -248,21 +220,14 @@ mod tests {
             best_bid_is_ours: false,
             best_ask_is_ours: false,
         };
-        let inventory = InventorySnapshot {
-            up_size: 95.0,
-            up_avg_price: 0.52,
-            down_size: 5.0,
-            down_avg_price: 0.46,
-        };
 
-        // delta = (95-5)/100 = 0.9, above max_imbalance of 0.7
-        let delta = inventory.imbalance();
+        // delta = 0.9, above max_imbalance of 0.7
+        let delta = 0.9;
 
         let ladder = calculate_quotes(
             delta,
             &up_ob,
             &down_ob,
-            &inventory,
             &config,
             "up_token",
             "down_token",

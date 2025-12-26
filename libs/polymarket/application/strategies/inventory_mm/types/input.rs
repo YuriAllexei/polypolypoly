@@ -150,6 +150,11 @@ pub struct SolverConfig {
     /// Spread adjustment per level (cents)
     /// Level 0 = base, Level 1 = base + spread_per_level, etc.
     pub spread_per_level: f64,
+
+    /// Multiplier for offset scaling with imbalance (e.g., 5.0)
+    /// offset = base_offset * (1 + |delta| * offset_scaling)
+    /// Higher = more aggressive backing off on overweight side
+    pub offset_scaling: f64,
 }
 
 impl Default for SolverConfig {
@@ -162,6 +167,7 @@ impl Default for SolverConfig {
             max_imbalance: 0.8,          // Stop quoting at 80% imbalance
             order_size: 100.0,
             spread_per_level: 1.0,       // 1 cent wider per level
+            offset_scaling: 5.0,         // Scale offset 5x with imbalance
         }
     }
 }

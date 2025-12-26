@@ -146,6 +146,7 @@ mod tests {
             max_imbalance: 0.8,
             order_size: 100.0,
             spread_per_level: 1.0,
+            offset_scaling: 5.0,
         }
     }
 

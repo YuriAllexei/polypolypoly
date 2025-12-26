@@ -7,9 +7,13 @@ use crate::application::strategies::inventory_mm::types::{
 use super::quotes::calculate_quotes;
 use super::diff::diff_orders;
 use super::taker::find_taker_opportunity;
-use super::profitability::validate_profitability;
 
 /// Main solver function.
+///
+/// Quotes are purely market-based. Risk is managed via:
+/// - Offset mechanism: increases when imbalanced, making bids less aggressive
+/// - Max imbalance threshold: stops quoting entirely when too imbalanced
+/// - Taker profitability check: only takes liquidity if profitable
 pub fn solve(input: &SolverInput) -> SolverOutput {
     let mut output = SolverOutput::new();
 
@@ -20,37 +24,12 @@ pub fn solve(input: &SolverInput) -> SolverOutput {
         delta,
         &input.up_orderbook,
         &input.down_orderbook,
-        &input.inventory,
         &input.config,
         &input.up_token_id,
         &input.down_token_id,
     );
 
-    // 2. Validate profitability of proposed quotes
-    // For multi-level quoting, check best level on each side
-    if !ladder.is_empty() {
-        let best_up = ladder.up_quotes.first().map(|q| q.price);
-        let best_down = ladder.down_quotes.first().map(|q| q.price);
-
-        if !validate_profitability(
-            best_up,
-            best_down,
-            &input.inventory,
-            input.config.min_profit_margin,
-            input.config.order_size,
-        ) {
-            // Market too tight - cancel all orders and wait
-            output.cancellations.extend(
-                input.up_orders.bids.iter().map(|o| o.order_id.clone())
-            );
-            output.cancellations.extend(
-                input.down_orders.bids.iter().map(|o| o.order_id.clone())
-            );
-            return output;
-        }
-    }
-
-    // 3. Check for taker opportunities
+    // 2. Check for taker opportunities (has its own profitability check)
     if let Some(taker) = find_taker_opportunity(
         delta,
         &input.up_orderbook,
@@ -63,7 +42,7 @@ pub fn solve(input: &SolverInput) -> SolverOutput {
         output.taker_orders.push(taker);
     }
 
-    // 4. Diff Up orders: current vs desired
+    // 3. Diff Up orders: current vs desired
     let (cancel_up, place_up) = diff_orders(
         &input.up_orders.bids,
         &ladder.up_quotes,
@@ -72,7 +51,7 @@ pub fn solve(input: &SolverInput) -> SolverOutput {
     output.cancellations.extend(cancel_up);
     output.limit_orders.extend(place_up);
 
-    // 5. Diff Down orders: current vs desired
+    // 4. Diff Down orders: current vs desired
     let (cancel_down, place_down) = diff_orders(
         &input.down_orders.bids,
         &ladder.down_quotes,
@@ -152,40 +131,28 @@ mod tests {
     }
 
     #[test]
-    fn test_solve_unprofitable_inventory() {
-        // Create inventory that's already unprofitable (combined avg >= 0.99)
+    fn test_solve_with_existing_inventory() {
+        // Even with "unprofitable" inventory, we still quote
+        // Risk is managed via offset mechanism, not profitability checks
         let mut input = make_input(0.55, 0.46, 50.0, 50.0);
         input.inventory.up_avg_price = 0.52;
-        input.inventory.down_avg_price = 0.49; // combined = 1.01, unprofitable
-        input.config.min_profit_margin = 0.01;
+        input.inventory.down_avg_price = 0.49;
 
         let output = solve(&input);
 
-        // With unprofitable inventory, no quotes should be generated because:
-        // max_up_bid = 1.0 - 0.49 - 0.01 = 0.50
-        // max_down_bid = 1.0 - 0.52 - 0.01 = 0.47
-        // But projected combined after fills would still exceed threshold
-        // The profitability check should reject these quotes
-
-        // Note: The current implementation may still generate capped quotes.
-        // This test verifies the solver runs without panicking.
-        // The quotes generated (if any) will be capped at profitability limits.
-        assert!(output.limit_orders.len() <= 6, "Unexpected number of orders");
+        // Should still generate quotes (no profitability cap anymore)
+        assert!(!output.limit_orders.is_empty());
     }
 
     #[test]
-    fn test_solve_extremely_tight_spread() {
-        // Market where spread is too tight to quote profitably
-        let mut input = make_input(0.51, 0.50, 50.0, 50.0); // Only 1 cent spread between asks
-        input.inventory.up_avg_price = 0.50;
-        input.inventory.down_avg_price = 0.49;
-        input.config.base_offset = 0.01;
-        input.config.min_profit_margin = 0.01;
+    fn test_solve_tight_spread() {
+        // Market with tight spread - solver still quotes at market prices
+        let input = make_input(0.51, 0.50, 50.0, 50.0);
 
         let output = solve(&input);
 
-        // With such tight spread, quotes may be capped heavily or rejected
-        // Either way, the solver should not panic
-        assert!(output.cancellations.is_empty() || output.limit_orders.len() <= 6);
+        // Should generate quotes based on market prices
+        // No special handling for tight spreads anymore
+        assert!(!output.limit_orders.is_empty());
     }
 }

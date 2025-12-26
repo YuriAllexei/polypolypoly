@@ -4,10 +4,11 @@ mod core;
 mod quotes;
 mod diff;
 mod taker;
-mod profitability;
+
+#[cfg(test)]
+mod test_solver_visual;
 
 pub use core::solve;
 pub use quotes::calculate_quotes;
 pub use diff::diff_orders;
 pub use taker::find_taker_opportunity;
-pub use profitability::validate_profitability;
