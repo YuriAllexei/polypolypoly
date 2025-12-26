@@ -9,6 +9,7 @@ use tracing::{info, warn, error, debug};
 use super::commands::{ExecutorCommand, ExecutorResult};
 use crate::application::strategies::inventory_mm::types::{SolverOutput, LimitOrder, TakerOrder, Side};
 use crate::infrastructure::client::clob::{TradingClient, Side as TradingSide, OrderType};
+use crate::infrastructure::client::ctf::{merge as ctf_merge, usdc_to_raw};
 
 /// Handle to communicate with the Executor thread
 pub struct ExecutorHandle {
@@ -45,6 +46,11 @@ impl ExecutorHandle {
     /// Emergency cancel all
     pub fn cancel_all(&self) -> Result<(), ExecutorError> {
         self.send(ExecutorCommand::CancelAll)
+    }
+
+    /// Execute a merge (convert YES+NO tokens to USDC)
+    pub fn merge(&self, condition_id: String, amount: f64) -> Result<(), ExecutorError> {
+        self.send(ExecutorCommand::Merge { condition_id, amount })
     }
 
     /// Shutdown the executor gracefully
@@ -208,6 +214,25 @@ impl Executor {
 
             ExecutorCommand::ExecuteTaker(order) => {
                 result.merge(self.execute_taker(&order));
+            }
+
+            ExecutorCommand::Merge { condition_id, amount } => {
+                if amount <= 0.0 {
+                    result.add_error("merge", format!("Invalid merge amount: {}", amount));
+                    error!("[Executor] Invalid merge amount: {}", amount);
+                } else {
+                    let raw_amount = usdc_to_raw(amount);
+                    match self.runtime.block_on(ctf_merge(&condition_id, false, raw_amount)) {
+                        Ok(tx_hash) => {
+                            result.merge_tx = Some(format!("{:x}", tx_hash));
+                            info!("[Executor] Merge tx: {:x}", tx_hash);
+                        }
+                        Err(e) => {
+                            result.add_error("merge", e.to_string());
+                            error!("[Executor] Merge failed: {}", e);
+                        }
+                    }
+                }
             }
 
             ExecutorCommand::Shutdown => {

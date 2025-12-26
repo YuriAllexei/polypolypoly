@@ -1,7 +1,8 @@
 //! Inventory MM Strategy - main orchestration.
 
 use std::sync::Arc;
-use tracing::{info, warn};
+use std::time::{Duration, Instant};
+use tracing::{info, warn, debug};
 
 use super::config::InventoryMMConfig;
 use super::components::{solve, Executor, ExecutorHandle, Merger, InFlightTracker, OpenOrderInfo};
@@ -13,22 +14,27 @@ use crate::infrastructure::{
 };
 use crate::infrastructure::client::clob::TradingClient;
 
+const MERGE_COOLDOWN_SECS: u64 = 120;
+
 /// Main strategy orchestrator
 pub struct InventoryMMStrategy {
     config: InventoryMMConfig,
     executor: Option<ExecutorHandle>,
-    merger: Option<Merger>,
+    merger: Merger,
     in_flight_tracker: InFlightTracker,
+    merge_pending_until: Option<Instant>,
 }
 
 impl InventoryMMStrategy {
     /// Create a new strategy instance
     pub fn new(config: InventoryMMConfig) -> Self {
+        let merger = Merger::new(config.merger.clone());
         Self {
             config,
             executor: None,
-            merger: None,
+            merger,
             in_flight_tracker: InFlightTracker::with_default_ttl(),
+            merge_pending_until: None,
         }
     }
 
@@ -38,14 +44,6 @@ impl InventoryMMStrategy {
 
         let executor = Executor::spawn(trading);
         self.executor = Some(executor);
-
-        let merger = Merger::new(
-            self.config.merger.clone(),
-            self.config.up_token_id.clone(),
-            self.config.down_token_id.clone(),
-            self.config.condition_id.clone(),
-        );
-        self.merger = Some(merger);
 
         info!("[InventoryMM] Strategy initialized");
     }
@@ -91,14 +89,31 @@ impl InventoryMMStrategy {
         }
 
         // Check merger
-        if let Some(ref merger) = self.merger {
-            let decision = merger.check_merge(&input.inventory);
-            if decision.should_merge {
+        let decision = self.merger.check_merge(&input.inventory);
+        if decision.should_merge {
+            let now = Instant::now();
+            let merge_allowed = self.merge_pending_until
+                .map(|deadline| now >= deadline)
+                .unwrap_or(true);
+
+            if merge_allowed {
                 info!(
                     "[InventoryMM] Merge opportunity: {} pairs for ${:.4} profit",
                     decision.pairs_to_merge, decision.expected_profit
                 );
-                // TODO: Execute merge via API
+                if let Some(ref executor) = self.executor {
+                    if executor.merge(
+                        self.config.condition_id.clone(),
+                        decision.pairs_to_merge,
+                    ).is_ok() {
+                        self.merge_pending_until = Some(now + Duration::from_secs(MERGE_COOLDOWN_SECS));
+                    }
+                }
+            } else {
+                debug!(
+                    "[InventoryMM] Merge skipped, cooldown active: {} pairs",
+                    decision.pairs_to_merge
+                );
             }
         }
 

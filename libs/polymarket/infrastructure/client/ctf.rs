@@ -542,11 +542,11 @@ fn u256_to_bytes32(value: U256) -> [u8; 32] {
     bytes
 }
 
-/// Convert USDC amount (human readable) to raw units
-///
-/// Example: `usdc_to_raw(100.0)` returns 100_000_000 (100 USDC with 6 decimals)
+/// Convert USDC amount (human readable) to raw units.
+/// Panics if amount is negative.
 pub fn usdc_to_raw(amount: f64) -> U256 {
-    let raw = (amount * 10f64.powi(USDC_DECIMALS as i32)) as u64;
+    assert!(amount >= 0.0, "usdc_to_raw: amount must be non-negative, got {}", amount);
+    let raw = (amount * 10f64.powi(USDC_DECIMALS as i32)).round() as u64;
     U256::from(raw)
 }
 

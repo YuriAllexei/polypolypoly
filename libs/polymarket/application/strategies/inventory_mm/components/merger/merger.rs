@@ -120,28 +120,15 @@ impl MergeDecision {
     }
 }
 
-/// Merger component - checks if we should merge and executes
+/// Merger component - pure decision logic for when to merge YES+NO tokens.
+/// Stateless: does not store market-specific info, only config.
 pub struct Merger {
     config: MergerConfig,
-    /// Token IDs for the Up/Down pair
-    up_token_id: String,
-    down_token_id: String,
-    condition_id: String,
 }
 
 impl Merger {
-    pub fn new(
-        config: MergerConfig,
-        up_token_id: String,
-        down_token_id: String,
-        condition_id: String,
-    ) -> Self {
-        Self {
-            config,
-            up_token_id,
-            down_token_id,
-            condition_id,
-        }
+    pub fn new(config: MergerConfig) -> Self {
+        Self { config }
     }
 
     /// Check if we should merge based on current inventory.
@@ -191,37 +178,9 @@ impl Merger {
         MergeDecision::merge(pairs, total_profit)
     }
 
-    /// Execute a merge (placeholder - needs CLOB client integration)
-    pub async fn execute_merge(&self, decision: &MergeDecision) -> Result<MergeResult, MergeError> {
-        if !decision.should_merge {
-            return Err(MergeError::InvalidDecision("Decision says not to merge".into()));
-        }
-
-        info!(
-            "[Merger] Executing merge: {} pairs for ${:.4} profit",
-            decision.pairs_to_merge, decision.expected_profit
-        );
-
-        // TODO: Implement actual merge execution
-        // 1. Call Polymarket merge API
-        // 2. Wait for confirmation
-        // 3. Update position tracker
-
-        Ok(MergeResult {
-            pairs_merged: decision.pairs_to_merge,
-            profit_realized: decision.expected_profit,
-            tx_hash: None, // TODO: Actual tx hash
-        })
-    }
-
     /// Get config reference
     pub fn config(&self) -> &MergerConfig {
         &self.config
-    }
-
-    /// Get condition ID
-    pub fn condition_id(&self) -> &str {
-        &self.condition_id
     }
 }
 
@@ -258,12 +217,7 @@ mod tests {
     use super::*;
 
     fn default_merger() -> Merger {
-        Merger::new(
-            MergerConfig::default(),
-            "up_token".to_string(),
-            "down_token".to_string(),
-            "condition_123".to_string(),
-        )
+        Merger::new(MergerConfig::default())
     }
 
     #[test]

@@ -26,6 +26,9 @@ pub enum ExecutorCommand {
     /// Execute a taker order (FOK)
     ExecuteTaker(TakerOrder),
 
+    /// Execute a merge (convert YES+NO tokens to USDC)
+    Merge { condition_id: String, amount: f64 },
+
     /// Graceful shutdown
     Shutdown,
 }
@@ -45,6 +48,7 @@ impl ExecutorCommand {
             ExecutorCommand::CancelAll => "CancelAll",
             ExecutorCommand::PlaceLimit(_) => "PlaceLimit",
             ExecutorCommand::ExecuteTaker(_) => "ExecuteTaker",
+            ExecutorCommand::Merge { .. } => "Merge",
             ExecutorCommand::Shutdown => "Shutdown",
         }
     }
@@ -67,6 +71,9 @@ pub struct ExecutorResult {
 
     /// Number of taker orders executed
     pub taker_count: usize,
+
+    /// Transaction hash from merge operation (if any)
+    pub merge_tx: Option<String>,
 
     /// Errors encountered: (context, error message)
     pub errors: Vec<(String, String)>,
@@ -104,6 +111,9 @@ impl ExecutorResult {
         self.placed_count += other.placed_count;
         self.placed_ids.extend(other.placed_ids);
         self.taker_count += other.taker_count;
+        if other.merge_tx.is_some() {
+            self.merge_tx = other.merge_tx;
+        }
         self.errors.extend(other.errors);
     }
 }
