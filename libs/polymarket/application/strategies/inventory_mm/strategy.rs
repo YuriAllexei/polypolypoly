@@ -3,7 +3,7 @@
 use tracing::{info, warn};
 
 use super::config::InventoryMMConfig;
-use super::components::{solve, Executor, ExecutorHandle, Merger};
+use super::components::{solve, Executor, ExecutorHandle, Merger, InFlightTracker, OpenOrderInfo};
 use super::types::{
     SolverInput, SolverOutput, InventorySnapshot, OrderbookSnapshot, OrderSnapshot,
 };
@@ -13,6 +13,7 @@ pub struct InventoryMMStrategy {
     config: InventoryMMConfig,
     executor: Option<ExecutorHandle>,
     merger: Option<Merger>,
+    in_flight_tracker: InFlightTracker,
 }
 
 impl InventoryMMStrategy {
@@ -22,6 +23,7 @@ impl InventoryMMStrategy {
             config,
             executor: None,
             merger: None,
+            in_flight_tracker: InFlightTracker::with_default_ttl(),
         }
     }
 
@@ -48,15 +50,39 @@ impl InventoryMMStrategy {
     /// Run one iteration of the strategy
     ///
     /// This should be called periodically (e.g., every 100ms)
-    pub fn tick(&self, input: &SolverInput) -> Option<SolverOutput> {
-        // Run the pure solver function
-        let output = solve(input);
+    pub fn tick(&mut self, input: &SolverInput) -> Option<SolverOutput> {
+        // 1. Cleanup stale in-flight entries based on current OMS state
+        let open_orders: Vec<OpenOrderInfo> = input.up_orders.bids.iter()
+            .map(|o| OpenOrderInfo::new(o.order_id.clone(), input.up_token_id.clone(), o.price))
+            .chain(input.down_orders.bids.iter()
+                .map(|o| OpenOrderInfo::new(o.order_id.clone(), input.down_token_id.clone(), o.price)))
+            .collect();
+        self.in_flight_tracker.cleanup_from_orders(&open_orders);
 
-        // Send to executor if we have actions
+        // 2. Run the pure solver function
+        let mut output = solve(input);
+
+        // 3. Filter cancellations through in-flight tracker
+        output.cancellations.retain(|oid| self.in_flight_tracker.should_cancel(oid));
+
+        // 4. Filter placements through in-flight tracker
+        output.limit_orders.retain(|o| self.in_flight_tracker.should_place(&o.token_id, o.price));
+
+        // 5. Taker orders pass through (no filtering - they're immediate)
+
+        // 6. Send filtered output to executor
         if output.has_actions() {
             if let Some(ref executor) = self.executor {
                 if let Err(e) = executor.execute(output.clone()) {
                     warn!("[InventoryMM] Failed to send to executor: {}", e);
+
+                    // Unregister failed commands so they can retry immediately
+                    for oid in &output.cancellations {
+                        self.in_flight_tracker.cancel_failed(oid);
+                    }
+                    for order in &output.limit_orders {
+                        self.in_flight_tracker.placement_failed(&order.token_id, order.price);
+                    }
                 }
             }
         }
