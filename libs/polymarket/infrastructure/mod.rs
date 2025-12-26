@@ -57,9 +57,15 @@ pub use balance_manager::BalanceManager;
 pub use heartbeat::Heartbeat;
 pub use logging::{init_tracing, init_tracing_with_level};
 pub use order_manager::{
-    AssetOrderBook, Fill, MakerOrderInfo, Order, OrderManager, OrderStateStore, OrderStatus,
-    SharedOrderState, Side as OrderSide, TradeStatus,
+    AssetOrderBook, Fill, MakerOrderInfo, Order, OrderManager, OrderStatus,
+    Side as OrderSide, TradeStatus,
 };
 pub use position_manager::PositionManager;
 pub use risk_manager::{RiskManager, RiskManagerHandle};
 pub use shutdown::ShutdownManager;
+
+// Re-export user state types for strategies (uses parking_lot::RwLock)
+pub use client::user::{
+    OrderStateStore, SharedOrderState, OrderStatus as UserOrderStatus,
+    PositionTracker, SharedPositionTracker,
+};

@@ -355,8 +355,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(debug_assertions, ignore)]
     fn test_price_to_key_clamps_invalid() {
         // In release builds, invalid prices are clamped (no panic)
+        // This test is ignored in debug mode since debug_assert fires
         // Negative price clamps to 0
         assert_eq!(price_to_key(-0.5), 0);
 

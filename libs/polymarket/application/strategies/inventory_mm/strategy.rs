@@ -5,7 +5,10 @@ use tracing::{info, warn};
 use super::config::InventoryMMConfig;
 use super::components::{solve, Executor, ExecutorHandle, Merger, InFlightTracker, OpenOrderInfo};
 use super::types::{
-    SolverInput, SolverOutput, InventorySnapshot, OrderbookSnapshot, OrderSnapshot,
+    SolverInput, SolverOutput, InventorySnapshot, OrderbookSnapshot, OrderSnapshot, OpenOrder,
+};
+use crate::infrastructure::{
+    SharedOrderbooks, SharedOrderState, SharedPositionTracker, UserOrderStatus as OrderStatus,
 };
 
 /// Main strategy orchestrator
@@ -122,18 +125,85 @@ impl InventoryMMStrategy {
 }
 
 /// Extract SolverInput from shared state.
+///
+/// Acquires read locks in order: OMS → PositionTracker → Orderbooks (prevent deadlocks).
 pub fn extract_solver_input(
     config: &InventoryMMConfig,
+    orderbooks: &SharedOrderbooks,
+    order_state: &SharedOrderState,
+    position_tracker: &SharedPositionTracker,
 ) -> SolverInput {
-    // TODO: Implement extraction from SharedPositionTracker, SharedOrderState, SharedOrderbooks
+    // 1. Extract open orders from OMS
+    let (up_orders, down_orders) = {
+        let oms = order_state.read();
+
+        let extract_orders = |token_id: &str| -> OrderSnapshot {
+            let bids: Vec<OpenOrder> = oms.get_bids(token_id)
+                .iter()
+                .filter(|o| o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+                .map(|o| OpenOrder::new(
+                    o.order_id.clone(),
+                    o.price,
+                    o.original_size,
+                    o.original_size - o.size_matched,
+                ))
+                .collect();
+
+            OrderSnapshot { bids, asks: vec![] }
+        };
+
+        (extract_orders(&config.up_token_id), extract_orders(&config.down_token_id))
+    };
+
+    // 2. Extract inventory from position tracker
+    let inventory = {
+        let tracker = position_tracker.read();
+        let up_pos = tracker.get_position(&config.up_token_id);
+        let down_pos = tracker.get_position(&config.down_token_id);
+
+        InventorySnapshot {
+            up_size: up_pos.map(|p| p.size).unwrap_or(0.0),
+            up_avg_price: up_pos.map(|p| p.avg_entry_price).unwrap_or(0.0),
+            down_size: down_pos.map(|p| p.size).unwrap_or(0.0),
+            down_avg_price: down_pos.map(|p| p.avg_entry_price).unwrap_or(0.0),
+        }
+    };
+
+    // 3. Extract orderbook snapshots
+    let (up_orderbook, down_orderbook) = {
+        let obs = orderbooks.read();
+
+        let extract_ob = |token_id: &str, our_orders: &OrderSnapshot| -> OrderbookSnapshot {
+            match obs.get(token_id) {
+                Some(ob) => {
+                    let best_bid = ob.best_bid();
+                    let best_ask = ob.best_ask();
+
+                    let best_bid_is_ours = best_bid
+                        .map(|(price, _)| our_orders.bids.iter().any(|o| (o.price - price).abs() < 1e-6))
+                        .unwrap_or(false);
+
+                    let best_ask_is_ours = best_ask
+                        .map(|(price, _)| our_orders.asks.iter().any(|o| (o.price - price).abs() < 1e-6))
+                        .unwrap_or(false);
+
+                    OrderbookSnapshot { best_bid, best_ask, best_bid_is_ours, best_ask_is_ours }
+                }
+                None => OrderbookSnapshot::default(),
+            }
+        };
+
+        (extract_ob(&config.up_token_id, &up_orders), extract_ob(&config.down_token_id, &down_orders))
+    };
+
     SolverInput {
         up_token_id: config.up_token_id.clone(),
         down_token_id: config.down_token_id.clone(),
-        up_orders: OrderSnapshot::default(),
-        down_orders: OrderSnapshot::default(),
-        inventory: InventorySnapshot::default(),
-        up_orderbook: OrderbookSnapshot::default(),
-        down_orderbook: OrderbookSnapshot::default(),
+        up_orders,
+        down_orders,
+        inventory,
+        up_orderbook,
+        down_orderbook,
         config: config.solver.clone(),
     }
 }
@@ -141,6 +211,10 @@ pub fn extract_solver_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::collections::HashMap;
+    use parking_lot::RwLock;
+    use crate::infrastructure::{OrderStateStore, PositionTracker};
 
     #[test]
     fn test_strategy_lifecycle() {
@@ -150,11 +224,16 @@ mod tests {
             "condition_123".to_string(),
         );
 
+        // Create mock shared state
+        let orderbooks = Arc::new(RwLock::new(HashMap::new()));
+        let order_state = Arc::new(RwLock::new(OrderStateStore::new()));
+        let position_tracker = Arc::new(RwLock::new(PositionTracker::new()));
+
         let mut strategy = InventoryMMStrategy::new(config.clone());
         strategy.initialize();
 
         // Run a tick with placeholder input
-        let input = extract_solver_input(&config);
+        let input = extract_solver_input(&config, &orderbooks, &order_state, &position_tracker);
         let output = strategy.tick(&input);
 
         assert!(output.is_some());
