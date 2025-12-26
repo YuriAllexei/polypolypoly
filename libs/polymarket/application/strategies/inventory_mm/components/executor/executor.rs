@@ -1,11 +1,14 @@
 //! Executor - runs on its own thread, processes commands via channel.
 
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use crossbeam_channel::{unbounded, Sender, Receiver};
+use tokio::runtime::Runtime;
 use tracing::{info, warn, error, debug};
 
 use super::commands::{ExecutorCommand, ExecutorResult};
-use crate::application::strategies::inventory_mm::types::{SolverOutput, LimitOrder, TakerOrder};
+use crate::application::strategies::inventory_mm::types::{SolverOutput, LimitOrder, TakerOrder, Side};
+use crate::infrastructure::client::clob::{TradingClient, Side as TradingSide, OrderType};
 
 /// Handle to communicate with the Executor thread
 pub struct ExecutorHandle {
@@ -82,18 +85,24 @@ impl Drop for ExecutorHandle {
 pub struct Executor {
     /// Receiver for commands
     command_rx: Receiver<ExecutorCommand>,
-    // TODO: Add TradingClient when integrating
-    // trading_client: Arc<TradingClient>,
+    /// Trading client for order execution
+    trading: Arc<TradingClient>,
+    /// Tokio runtime for async calls
+    runtime: Runtime,
 }
 
 impl Executor {
-    /// Spawn the executor on a new thread
-    ///
-    /// Returns a handle for communication
-    pub fn spawn() -> ExecutorHandle {
+    /// Spawn the executor on a new thread with a trading client
+    pub fn spawn(trading: Arc<TradingClient>) -> ExecutorHandle {
         let (command_tx, command_rx) = unbounded();
 
-        let executor = Executor { command_rx };
+        let runtime = Runtime::new().expect("Failed to create tokio runtime");
+
+        let executor = Executor {
+            command_rx,
+            trading,
+            runtime,
+        };
 
         let thread_handle = thread::Builder::new()
             .name("inventory-mm-executor".to_string())
@@ -107,14 +116,6 @@ impl Executor {
             thread_handle: Some(thread_handle),
         }
     }
-
-    /// Spawn with a trading client for actual execution
-    /// TODO: Uncomment when integrating with TradingClient
-    // pub fn spawn_with_client(trading_client: Arc<TradingClient>) -> ExecutorHandle {
-    //     let (command_tx, command_rx) = unbounded();
-    //     let executor = Executor { command_rx, trading_client };
-    //     // ... spawn thread
-    // }
 
     /// Main run loop - blocks on channel, processes commands
     fn run(self) {
@@ -161,45 +162,52 @@ impl Executor {
 
         match command {
             ExecutorCommand::ExecuteBatch(output) => {
-                // Process cancellations first (safer order per TBD discussion)
+                // 1. Cancellations first
                 if !output.cancellations.is_empty() {
-                    let cancel_result = self.execute_cancellations(&output.cancellations);
-                    result.merge(cancel_result);
+                    result.merge(self.execute_cancellations(&output.cancellations));
                 }
 
-                // Then taker orders (time-sensitive)
-                for taker in output.taker_orders {
-                    let taker_result = self.execute_taker(&taker);
-                    result.merge(taker_result);
+                // 2. Takers next (time-sensitive)
+                for taker in &output.taker_orders {
+                    result.merge(self.execute_taker(taker));
                 }
 
-                // Finally limit orders
-                for limit in output.limit_orders {
-                    let limit_result = self.execute_limit(&limit);
-                    result.merge(limit_result);
+                // 3. Limits last (batch)
+                if !output.limit_orders.is_empty() {
+                    result.merge(self.execute_limits(&output.limit_orders));
                 }
             }
 
             ExecutorCommand::CancelOrders(order_ids) => {
-                result = self.execute_cancellations(&order_ids);
+                result.merge(self.execute_cancellations(&order_ids));
             }
 
             ExecutorCommand::CancelAllForToken(token_id) => {
-                // TODO: Implement when TradingClient available
-                warn!("[Executor] CancelAllForToken not yet implemented: {}", token_id);
+                match self.runtime.block_on(self.trading.cancel_market_orders(None, Some(&token_id))) {
+                    Ok(r) => {
+                        result.cancelled_count = r.canceled.len();
+                        result.cancelled_ids = r.canceled;
+                    }
+                    Err(e) => result.add_error("cancel_token", e.to_string()),
+                }
             }
 
             ExecutorCommand::CancelAll => {
-                // TODO: Implement when TradingClient available
-                warn!("[Executor] CancelAll not yet implemented");
+                match self.runtime.block_on(self.trading.cancel_all()) {
+                    Ok(r) => {
+                        result.cancelled_count = r.canceled.len();
+                        result.cancelled_ids = r.canceled;
+                    }
+                    Err(e) => result.add_error("cancel_all", e.to_string()),
+                }
             }
 
             ExecutorCommand::PlaceLimit(order) => {
-                result = self.execute_limit(&order);
+                result.merge(self.execute_limits(&[order]));
             }
 
             ExecutorCommand::ExecuteTaker(order) => {
-                result = self.execute_taker(&order);
+                result.merge(self.execute_taker(&order));
             }
 
             ExecutorCommand::Shutdown => {
@@ -210,38 +218,72 @@ impl Executor {
         result
     }
 
-    /// Execute cancellations
+    /// Execute batch cancellations
     fn execute_cancellations(&self, order_ids: &[String]) -> ExecutorResult {
         let mut result = ExecutorResult::new();
+        if order_ids.is_empty() {
+            return result;
+        }
 
-        // TODO: Replace with actual TradingClient call
-        // let response = self.trading_client.cancel_orders(order_ids).await;
+        debug!("[Executor] Cancelling {} orders", order_ids.len());
 
-        for order_id in order_ids {
-            debug!("[Executor] Would cancel order: {}", order_id);
-            // Simulate success for now
-            result.cancelled_count += 1;
-            result.cancelled_ids.push(order_id.clone());
+        match self.runtime.block_on(self.trading.cancel_orders(order_ids)) {
+            Ok(response) => {
+                result.cancelled_count = response.canceled.len();
+                result.cancelled_ids = response.canceled;
+                if !response.not_canceled.is_empty() {
+                    for (id, reason) in response.not_canceled {
+                        result.add_error("cancel", format!("{}: {}", id, reason));
+                    }
+                }
+                info!("[Executor] Cancelled {} orders", result.cancelled_count);
+            }
+            Err(e) => {
+                result.add_error("cancel_orders", e.to_string());
+                error!("[Executor] Cancel failed: {}", e);
+            }
         }
 
         result
     }
 
-    /// Execute a limit order
-    fn execute_limit(&self, order: &LimitOrder) -> ExecutorResult {
+    /// Execute batch limit orders
+    fn execute_limits(&self, orders: &[LimitOrder]) -> ExecutorResult {
         let mut result = ExecutorResult::new();
+        if orders.is_empty() {
+            return result;
+        }
 
-        // TODO: Replace with actual TradingClient call
-        // let response = self.trading_client.buy(&order.token_id, order.price, order.size).await;
+        debug!("[Executor] Placing {} limit orders", orders.len());
 
-        debug!(
-            "[Executor] Would place limit: {} {} @ {} size {}",
-            order.side, order.token_id, order.price, order.size
-        );
+        // Convert to TradingClient format
+        let batch: Vec<_> = orders.iter()
+            .map(|o| (
+                o.token_id.clone(),
+                o.price,
+                o.size,
+                match o.side {
+                    Side::Buy => TradingSide::Buy,
+                    Side::Sell => TradingSide::Sell,
+                },
+                OrderType::GTC,
+            ))
+            .collect();
 
-        // Simulate success for now
-        result.placed_count += 1;
-        result.placed_ids.push(format!("simulated_{}", order.price));
+        match self.runtime.block_on(self.trading.place_batch_orders(batch, None)) {
+            Ok(batch_result) => {
+                result.placed_count = batch_result.success_count();
+                result.placed_ids = batch_result.order_ids();
+                for (token_id, msg) in batch_result.error_messages() {
+                    result.add_error("place_limit", format!("{}: {}", token_id, msg));
+                }
+                info!("[Executor] Placed {} limit orders", result.placed_count);
+            }
+            Err(e) => {
+                result.add_error("place_batch", e.to_string());
+                error!("[Executor] Batch placement failed: {}", e);
+            }
+        }
 
         result
     }
@@ -250,16 +292,40 @@ impl Executor {
     fn execute_taker(&self, order: &TakerOrder) -> ExecutorResult {
         let mut result = ExecutorResult::new();
 
-        // TODO: Replace with actual TradingClient call
-        // let response = self.trading_client.buy_fok(&order.token_id, order.price, order.size).await;
-
         debug!(
-            "[Executor] Would execute taker: {} {} @ {} size {} (score: {:.2})",
-            order.side, order.token_id, order.price, order.size, order.score
+            "[Executor] Executing taker: {} {} @ {} size {}",
+            order.side, order.token_id, order.price, order.size
         );
 
-        // Simulate success for now
-        result.taker_count += 1;
+        let response = match order.side {
+            Side::Buy => self.runtime.block_on(
+                self.trading.buy_fok(&order.token_id, order.price, order.size)
+            ),
+            Side::Sell => self.runtime.block_on(
+                self.trading.sell_fok(&order.token_id, order.price, order.size)
+            ),
+        };
+
+        match response {
+            Ok(r) if r.status.as_deref() == Some("matched") => {
+                // FOK was filled - status "matched" confirms actual execution
+                result.taker_count = 1;
+                if let Some(ref id) = r.order_id {
+                    info!("[Executor] Taker filled: {}", id);
+                }
+            }
+            Ok(r) => {
+                // FOK not filled - status is "unmatched" or order was rejected
+                debug!(
+                    "[Executor] Taker not filled: status={:?}, error={:?}",
+                    r.status, r.error_msg
+                );
+            }
+            Err(e) => {
+                result.add_error("execute_taker", e.to_string());
+                error!("[Executor] Taker failed: {}", e);
+            }
+        }
 
         result
     }
@@ -288,50 +354,14 @@ impl std::fmt::Display for ExecutorError {
 
 impl std::error::Error for ExecutorError {}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::application::strategies::inventory_mm::types::Side;
-
-    #[test]
-    fn test_executor_spawn_and_shutdown() {
-        let handle = Executor::spawn();
-
-        // Send a simple command
-        handle.send(ExecutorCommand::CancelOrders(vec!["test".to_string()])).unwrap();
-
-        // Shutdown
-        handle.shutdown().unwrap();
-    }
-
-    #[test]
-    fn test_executor_execute_batch() {
-        let handle = Executor::spawn();
-
-        let output = SolverOutput {
-            cancellations: vec!["order1".to_string()],
-            limit_orders: vec![
-                LimitOrder::buy("token".to_string(), 0.54, 100.0),
-            ],
-            taker_orders: vec![],
-        };
-
-        handle.execute(output).unwrap();
-
-        // Give it time to process
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        handle.shutdown().unwrap();
-    }
-
-    #[test]
-    fn test_executor_empty_output() {
-        let handle = Executor::spawn();
-
-        // Empty output should not send anything
-        let output = SolverOutput::default();
-        handle.execute(output).unwrap();
-
-        handle.shutdown().unwrap();
-    }
-}
+// Tests require TradingClient - run as integration tests
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//
+//     #[test]
+//     #[ignore] // Requires TradingClient
+//     fn test_executor_spawn_and_shutdown() {
+//         // Need to provide Arc<TradingClient> to spawn()
+//     }
+// }
