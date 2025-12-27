@@ -7,7 +7,7 @@ use crate::application::strategies::inventory_mm::types::{
 /// Calculate quote ladder for both Up and Down tokens.
 ///
 /// Quotes are purely market-based: price = best_ask - offset - level_spread
-/// Risk is managed via the offset mechanism (increases when imbalanced).
+/// Risk is managed via offset (price) and skew (size) mechanisms.
 pub fn calculate_quotes(
     delta: f64,
     up_ob: &OrderbookSnapshot,
@@ -18,12 +18,19 @@ pub fn calculate_quotes(
 ) -> QuoteLadder {
     let mut ladder = QuoteLadder::new();
 
-    // Calculate offsets based on imbalance
+    // Calculate offsets based on imbalance (price adjustment)
     // When heavy on UP (delta > 0), UP offset increases → less aggressive UP bids
     // When heavy on DOWN (delta < 0), DOWN offset increases → less aggressive DOWN bids
-    // offset_scaling controls how aggressively we back off (e.g., 5.0 = 5x multiplier)
     let up_offset = config.base_offset * (1.0 + delta.max(0.0) * config.offset_scaling);
     let down_offset = config.base_offset * (1.0 + (-delta).max(0.0) * config.offset_scaling);
+
+    // Calculate skew-adjusted sizes (size adjustment)
+    // delta > 0 = heavy UP → reduce UP size, increase DOWN size
+    // delta < 0 = heavy DOWN → increase UP size, reduce DOWN size
+    let up_size = (config.order_size * (1.0 - delta * config.skew_factor))
+        .clamp(0.0, config.order_size * 3.0);
+    let down_size = (config.order_size * (1.0 + delta * config.skew_factor))
+        .clamp(0.0, config.order_size * 3.0);
 
     // Build Up quotes (skip if too imbalanced on Up side)
     if delta < config.max_imbalance {
@@ -32,6 +39,7 @@ pub fn calculate_quotes(
                 up_token_id,
                 best_ask,
                 up_offset,
+                up_size,
                 config,
             );
         }
@@ -44,6 +52,7 @@ pub fn calculate_quotes(
                 down_token_id,
                 best_ask,
                 down_offset,
+                down_size,
                 config,
             );
         }
@@ -57,6 +66,7 @@ fn build_ladder(
     token_id: &str,
     best_ask: f64,
     base_offset: f64,
+    order_size: f64,
     config: &SolverConfig,
 ) -> Vec<Quote> {
     let mut quotes = Vec::with_capacity(config.num_levels);
@@ -86,7 +96,7 @@ fn build_ladder(
         quotes.push(Quote::new_bid(
             token_id.to_string(),
             price,
-            config.order_size,
+            order_size,
             level,
         ));
     }
@@ -115,6 +125,7 @@ mod tests {
             order_size: 100.0,
             spread_per_level: 1.0,
             offset_scaling: 5.0,
+            skew_factor: 1.0,
         }
     }
 
@@ -129,7 +140,7 @@ mod tests {
     #[test]
     fn test_build_ladder_basic() {
         let config = default_config();
-        let quotes = build_ladder("token", 0.55, 0.01, &config);
+        let quotes = build_ladder("token", 0.55, 0.01, 100.0, &config);
 
         assert_eq!(quotes.len(), 3);
         // Level 0: 0.55 - 0.01 - 0 = 0.54
@@ -138,6 +149,8 @@ mod tests {
         assert!((quotes[1].price - 0.53).abs() < 0.001);
         // Level 2: 0.55 - 0.01 - 0.02 = 0.52
         assert!((quotes[2].price - 0.52).abs() < 0.001);
+        // All quotes should have the passed size
+        assert!((quotes[0].size - 100.0).abs() < 0.001);
     }
 
     #[test]
@@ -236,5 +249,149 @@ mod tests {
         // Should have NO Up quotes (too imbalanced), only Down
         assert!(ladder.up_quotes.is_empty());
         assert!(!ladder.down_quotes.is_empty());
+    }
+
+    #[test]
+    fn test_skew_sizing_heavy_up() {
+        let mut config = default_config();
+        config.skew_factor = 2.0;
+        config.order_size = 100.0;
+
+        let up_ob = OrderbookSnapshot {
+            best_ask: Some((0.55, 100.0)),
+            best_bid: Some((0.53, 50.0)),
+            best_bid_is_ours: false,
+            best_ask_is_ours: false,
+        };
+        let down_ob = OrderbookSnapshot {
+            best_ask: Some((0.45, 100.0)),
+            best_bid: Some((0.43, 50.0)),
+            best_bid_is_ours: false,
+            best_ask_is_ours: false,
+        };
+
+        // Heavy UP (delta = 0.4)
+        // up_size = 100 * (1 - 0.4 * 2.0) = 100 * 0.2 = 20
+        // down_size = 100 * (1 + 0.4 * 2.0) = 100 * 1.8 = 180
+        let ladder = calculate_quotes(0.4, &up_ob, &down_ob, &config, "up", "down");
+
+        assert!(!ladder.up_quotes.is_empty());
+        assert!(!ladder.down_quotes.is_empty());
+        assert!((ladder.up_quotes[0].size - 20.0).abs() < 0.01);
+        assert!((ladder.down_quotes[0].size - 180.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_skew_sizing_heavy_down() {
+        let mut config = default_config();
+        config.skew_factor = 2.0;
+        config.order_size = 100.0;
+
+        let up_ob = OrderbookSnapshot {
+            best_ask: Some((0.55, 100.0)),
+            best_bid: Some((0.53, 50.0)),
+            best_bid_is_ours: false,
+            best_ask_is_ours: false,
+        };
+        let down_ob = OrderbookSnapshot {
+            best_ask: Some((0.45, 100.0)),
+            best_bid: Some((0.43, 50.0)),
+            best_bid_is_ours: false,
+            best_ask_is_ours: false,
+        };
+
+        // Heavy DOWN (delta = -0.4)
+        // up_size = 100 * (1 - (-0.4) * 2.0) = 100 * 1.8 = 180
+        // down_size = 100 * (1 + (-0.4) * 2.0) = 100 * 0.2 = 20
+        let ladder = calculate_quotes(-0.4, &up_ob, &down_ob, &config, "up", "down");
+
+        assert!(!ladder.up_quotes.is_empty());
+        assert!(!ladder.down_quotes.is_empty());
+        assert!((ladder.up_quotes[0].size - 180.0).abs() < 0.01);
+        assert!((ladder.down_quotes[0].size - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_skew_sizing_balanced() {
+        let mut config = default_config();
+        config.skew_factor = 2.0;
+        config.order_size = 100.0;
+
+        let up_ob = OrderbookSnapshot {
+            best_ask: Some((0.55, 100.0)),
+            best_bid: None,
+            best_bid_is_ours: false,
+            best_ask_is_ours: false,
+        };
+        let down_ob = OrderbookSnapshot {
+            best_ask: Some((0.45, 100.0)),
+            best_bid: None,
+            best_bid_is_ours: false,
+            best_ask_is_ours: false,
+        };
+
+        // Balanced (delta = 0)
+        // up_size = 100 * (1 - 0 * 2.0) = 100
+        // down_size = 100 * (1 + 0 * 2.0) = 100
+        let ladder = calculate_quotes(0.0, &up_ob, &down_ob, &config, "up", "down");
+
+        assert!((ladder.up_quotes[0].size - 100.0).abs() < 0.01);
+        assert!((ladder.down_quotes[0].size - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_skew_sizing_clamped() {
+        let mut config = default_config();
+        config.skew_factor = 5.0; // Very aggressive
+        config.order_size = 100.0;
+
+        let up_ob = OrderbookSnapshot {
+            best_ask: Some((0.55, 100.0)),
+            best_bid: None,
+            best_bid_is_ours: false,
+            best_ask_is_ours: false,
+        };
+        let down_ob = OrderbookSnapshot {
+            best_ask: Some((0.45, 100.0)),
+            best_bid: None,
+            best_bid_is_ours: false,
+            best_ask_is_ours: false,
+        };
+
+        // Heavy UP (delta = 0.5)
+        // up_size = 100 * (1 - 0.5 * 5.0) = 100 * (-1.5) = -150 → clamped to 0
+        // down_size = 100 * (1 + 0.5 * 5.0) = 100 * 3.5 = 350 → clamped to 300
+        let ladder = calculate_quotes(0.5, &up_ob, &down_ob, &config, "up", "down");
+
+        assert!(!ladder.up_quotes.is_empty());
+        assert!(!ladder.down_quotes.is_empty());
+        assert!((ladder.up_quotes[0].size - 0.0).abs() < 0.01);
+        assert!((ladder.down_quotes[0].size - 300.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_skew_sizing_no_skew() {
+        let mut config = default_config();
+        config.skew_factor = 0.0; // No skew
+        config.order_size = 100.0;
+
+        let up_ob = OrderbookSnapshot {
+            best_ask: Some((0.55, 100.0)),
+            best_bid: None,
+            best_bid_is_ours: false,
+            best_ask_is_ours: false,
+        };
+        let down_ob = OrderbookSnapshot {
+            best_ask: Some((0.45, 100.0)),
+            best_bid: None,
+            best_bid_is_ours: false,
+            best_ask_is_ours: false,
+        };
+
+        // Even with imbalance, sizes should be equal when skew_factor = 0
+        let ladder = calculate_quotes(0.6, &up_ob, &down_ob, &config, "up", "down");
+
+        assert!((ladder.up_quotes[0].size - 100.0).abs() < 0.01);
+        assert!((ladder.down_quotes[0].size - 100.0).abs() < 0.01);
     }
 }

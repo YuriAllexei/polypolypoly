@@ -127,6 +127,7 @@ mod tests {
             order_size: 100.0,
             spread_per_level: 1.0,
             offset_scaling: 5.0,
+            skew_factor: 1.0,
         }
     }
 

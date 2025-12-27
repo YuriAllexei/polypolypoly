@@ -156,6 +156,12 @@ pub struct SolverConfig {
     /// offset = base_offset * (1 + |delta| * offset_scaling)
     /// Higher = more aggressive backing off on overweight side
     pub offset_scaling: f64,
+
+    /// Skew factor for size adjustment based on imbalance
+    /// up_size = order_size * (1 - delta * skew_factor)
+    /// down_size = order_size * (1 + delta * skew_factor)
+    /// 0.0 = no skew, 1.0 = moderate, 2.0 = aggressive
+    pub skew_factor: f64,
 }
 
 impl Default for SolverConfig {
@@ -169,6 +175,7 @@ impl Default for SolverConfig {
             order_size: 100.0,
             spread_per_level: 1.0,       // 1 cent wider per level
             offset_scaling: 5.0,         // Scale offset 5x with imbalance
+            skew_factor: 1.0,            // Moderate size skew based on delta
         }
     }
 }

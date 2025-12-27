@@ -105,6 +105,11 @@ impl InventoryMMConfig {
         self
     }
 
+    pub fn with_skew_factor(mut self, skew_factor: f64) -> Self {
+        self.solver.skew_factor = skew_factor;
+        self
+    }
+
     pub fn is_symbol_enabled(&self, symbol: &str) -> bool {
         self.markets.iter().any(|m| m.symbol.eq_ignore_ascii_case(symbol))
     }

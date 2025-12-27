@@ -92,6 +92,8 @@ inventory_mm:
     spread_per_level: 1.0
     # Multiplier for offset scaling with imbalance
     offset_scaling: 5.0
+    # Skew factor for size adjustment (0.0 = none, 1.0 = moderate, 2.0 = aggressive)
+    skew_factor: 1.0
 
   # === Merger (Merge Conditions) ===
   merger:
