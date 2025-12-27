@@ -9,6 +9,7 @@ pub mod traits;
 pub mod up_or_down;
 
 // Re-exports
+pub use inventory_mm::InventoryMMStrategy;
 pub use market_merger::MarketMergerStrategy;
 pub use sports_sniping::SportsSnipingStrategy;
 pub use traits::{Strategy, StrategyContext, StrategyError, StrategyResult};
@@ -22,6 +23,7 @@ pub enum StrategyType {
     UpOrDown,
     SportsSniping,
     MarketMerger,
+    InventoryMM,
 }
 
 impl StrategyType {
@@ -31,6 +33,7 @@ impl StrategyType {
             "upordown" => Some(Self::UpOrDown),
             "sportssniping" => Some(Self::SportsSniping),
             "marketmerger" => Some(Self::MarketMerger),
+            "inventorymm" => Some(Self::InventoryMM),
             _ => None,
         }
     }
@@ -41,12 +44,13 @@ impl StrategyType {
             Self::UpOrDown => "up_or_down",
             Self::SportsSniping => "sports_sniping",
             Self::MarketMerger => "market_merger",
+            Self::InventoryMM => "inventory_mm",
         }
     }
 
     /// List all available strategy names
     pub fn available() -> Vec<&'static str> {
-        vec!["up_or_down", "sports_sniping", "market_merger"]
+        vec!["up_or_down", "sports_sniping", "market_merger", "inventory_mm"]
     }
 }
 
@@ -62,6 +66,9 @@ pub fn create_strategy(
         }
         StrategyType::MarketMerger => {
             Box::new(MarketMergerStrategy::new(config.market_merger.clone()))
+        }
+        StrategyType::InventoryMM => {
+            Box::new(InventoryMMStrategy::new(config.inventory_mm.clone()))
         }
     }
 }

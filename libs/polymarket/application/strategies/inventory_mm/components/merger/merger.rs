@@ -5,7 +5,8 @@ use tracing::{info, debug};
 use crate::application::strategies::inventory_mm::types::InventorySnapshot;
 
 /// Configuration for the Merger
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct MergerConfig {
     /// Minimum pairs before considering a merge
     pub min_merge_size: f64,

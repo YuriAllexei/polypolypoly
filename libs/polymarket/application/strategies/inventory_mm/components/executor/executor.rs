@@ -11,7 +11,57 @@ use crate::application::strategies::inventory_mm::types::{SolverOutput, LimitOrd
 use crate::infrastructure::client::clob::{TradingClient, Side as TradingSide, OrderType};
 use crate::infrastructure::client::ctf::{merge as ctf_merge, usdc_to_raw};
 
-/// Handle to communicate with the Executor thread
+/// Lightweight executor handle for quoters (Clone-able).
+/// Does NOT have shutdown capability - only main strategy can shutdown.
+#[derive(Clone)]
+pub struct QuoterExecutorHandle {
+    command_tx: Sender<ExecutorCommand>,
+}
+
+impl QuoterExecutorHandle {
+    /// Create from a raw sender (for testing).
+    #[cfg(test)]
+    pub fn from_sender(command_tx: Sender<ExecutorCommand>) -> Self {
+        Self { command_tx }
+    }
+
+    /// Execute a solver output (non-blocking send to executor).
+    pub fn execute(&self, output: SolverOutput) -> Result<(), ExecutorError> {
+        if !output.has_actions() {
+            return Ok(());
+        }
+        self.command_tx
+            .send(ExecutorCommand::ExecuteBatch(output))
+            .map_err(|_| ExecutorError::ChannelClosed)
+    }
+
+    /// Cancel specific orders.
+    pub fn cancel_orders(&self, order_ids: Vec<String>) -> Result<(), ExecutorError> {
+        if order_ids.is_empty() {
+            return Ok(());
+        }
+        self.command_tx
+            .send(ExecutorCommand::CancelOrders(order_ids))
+            .map_err(|_| ExecutorError::ChannelClosed)
+    }
+
+    /// Cancel all orders for a specific token.
+    pub fn cancel_token_orders(&self, token_id: String) -> Result<(), ExecutorError> {
+        self.command_tx
+            .send(ExecutorCommand::CancelAllForToken(token_id))
+            .map_err(|_| ExecutorError::ChannelClosed)
+    }
+
+    /// Execute a merge (convert YES+NO tokens to USDC).
+    pub fn merge(&self, condition_id: String, amount: f64) -> Result<(), ExecutorError> {
+        self.command_tx
+            .send(ExecutorCommand::Merge { condition_id, amount })
+            .map_err(|_| ExecutorError::ChannelClosed)
+    }
+}
+
+/// Handle to communicate with the Executor thread.
+/// Owned by the main strategy - has shutdown capability.
 pub struct ExecutorHandle {
     /// Channel to send commands to executor
     command_tx: Sender<ExecutorCommand>,
@@ -20,6 +70,14 @@ pub struct ExecutorHandle {
 }
 
 impl ExecutorHandle {
+    /// Get a lightweight clone-able handle for quoters.
+    /// Quoters use this to send commands without shutdown capability.
+    pub fn quoter_handle(&self) -> QuoterExecutorHandle {
+        QuoterExecutorHandle {
+            command_tx: self.command_tx.clone(),
+        }
+    }
+
     /// Send a command to the executor (non-blocking)
     pub fn send(&self, command: ExecutorCommand) -> Result<(), ExecutorError> {
         self.command_tx

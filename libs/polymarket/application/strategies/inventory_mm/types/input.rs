@@ -127,7 +127,8 @@ pub struct SolverInput {
 }
 
 /// Solver configuration parameters
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SolverConfig {
     /// Number of bid levels per side (e.g., 3)
     pub num_levels: usize,

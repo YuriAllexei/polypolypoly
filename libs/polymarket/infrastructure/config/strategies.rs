@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tracing::info;
 
+use crate::application::strategies::inventory_mm::InventoryMMConfig;
+
 /// Main strategies configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategiesConfig {
@@ -29,6 +31,10 @@ pub struct StrategiesConfig {
     /// Market Merger strategy configuration
     #[serde(default)]
     pub market_merger: MarketMergerConfig,
+
+    /// Inventory MM strategy configuration
+    #[serde(default)]
+    pub inventory_mm: InventoryMMConfig,
 }
 
 /// Components configuration (shared infrastructure)
@@ -526,6 +532,7 @@ impl Default for StrategiesConfig {
             up_or_down: UpOrDownConfig::default(),
             sports_sniping: SportsSnipingConfig::default(),
             market_merger: MarketMergerConfig::default(),
+            inventory_mm: InventoryMMConfig::default(),
         }
     }
 }

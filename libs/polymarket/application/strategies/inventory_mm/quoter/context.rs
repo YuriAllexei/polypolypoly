@@ -1,0 +1,140 @@
+//! Quoter context and market information.
+
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use chrono::{DateTime, Utc};
+
+use crate::application::strategies::inventory_mm::components::QuoterExecutorHandle;
+use crate::infrastructure::{SharedOrderState, SharedPositionTracker};
+
+/// Information about a specific market that a Quoter is managing.
+#[derive(Debug, Clone)]
+pub struct MarketInfo {
+    /// Unique market identifier
+    pub market_id: String,
+    /// Condition ID for merging tokens
+    pub condition_id: String,
+    /// Token ID for UP outcome
+    pub up_token_id: String,
+    /// Token ID for DOWN outcome
+    pub down_token_id: String,
+    /// Market end time
+    pub end_time: DateTime<Utc>,
+    /// Symbol (e.g., "BTC", "ETH")
+    pub symbol: String,
+    /// Timeframe (e.g., "15m", "1hr")
+    pub timeframe: String,
+}
+
+impl MarketInfo {
+    pub fn new(
+        market_id: String,
+        condition_id: String,
+        up_token_id: String,
+        down_token_id: String,
+        end_time: DateTime<Utc>,
+        symbol: String,
+        timeframe: String,
+    ) -> Self {
+        Self {
+            market_id,
+            condition_id,
+            up_token_id,
+            down_token_id,
+            end_time,
+            symbol,
+            timeframe,
+        }
+    }
+
+    /// Check if the market has expired.
+    pub fn is_expired(&self) -> bool {
+        Utc::now() >= self.end_time
+    }
+
+    /// Get a short description for logging.
+    pub fn short_desc(&self) -> String {
+        format!("{} {} ({})", self.symbol, self.timeframe, &self.market_id[..8.min(self.market_id.len())])
+    }
+}
+
+/// Shared state passed to each quoter (all Clone-able).
+/// This bundles all the shared infrastructure that quoters need.
+#[derive(Clone)]
+pub struct QuoterContext {
+    /// Executor handle for sending order commands
+    pub executor: QuoterExecutorHandle,
+    /// Shared order state from user WebSocket
+    pub order_state: SharedOrderState,
+    /// Shared position tracker
+    pub position_tracker: SharedPositionTracker,
+    /// Shutdown flag for graceful termination
+    pub shutdown_flag: Arc<AtomicBool>,
+}
+
+impl QuoterContext {
+    pub fn new(
+        executor: QuoterExecutorHandle,
+        order_state: SharedOrderState,
+        position_tracker: SharedPositionTracker,
+        shutdown_flag: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            executor,
+            order_state,
+            position_tracker,
+            shutdown_flag,
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        !self.shutdown_flag.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_market_info_is_expired() {
+        let past = Utc::now() - chrono::Duration::hours(1);
+        let future = Utc::now() + chrono::Duration::hours(1);
+
+        let expired_market = MarketInfo::new(
+            "market-1".to_string(),
+            "cond-1".to_string(),
+            "up-1".to_string(),
+            "down-1".to_string(),
+            past,
+            "BTC".to_string(),
+            "15m".to_string(),
+        );
+        assert!(expired_market.is_expired());
+
+        let active_market = MarketInfo::new(
+            "market-2".to_string(),
+            "cond-2".to_string(),
+            "up-2".to_string(),
+            "down-2".to_string(),
+            future,
+            "ETH".to_string(),
+            "1hr".to_string(),
+        );
+        assert!(!active_market.is_expired());
+    }
+
+    #[test]
+    fn test_market_info_short_desc() {
+        let market = MarketInfo::new(
+            "0x1234567890abcdef".to_string(),
+            "cond-1".to_string(),
+            "up-1".to_string(),
+            "down-1".to_string(),
+            Utc::now(),
+            "BTC".to_string(),
+            "15m".to_string(),
+        );
+        assert_eq!(market.short_desc(), "BTC 15m (0x123456)");
+    }
+}

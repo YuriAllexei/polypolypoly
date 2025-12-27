@@ -3,5 +3,5 @@
 mod executor;
 mod commands;
 
-pub use executor::{Executor, ExecutorHandle};
+pub use executor::{Executor, ExecutorHandle, QuoterExecutorHandle, ExecutorError};
 pub use commands::ExecutorCommand;
