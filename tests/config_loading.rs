@@ -6,14 +6,14 @@ use polymarket_arb_bot::bin_common::{load_config_from_env, ConfigType};
 use std::env;
 
 #[test]
-fn test_sniper_config_default() {
+fn test_strategies_config_default() {
     // Clear env var to test default
-    env::remove_var("SNIPER_CONFIG_PATH");
+    env::remove_var("STRATEGIES_CONFIG_PATH");
 
-    let config_path = load_config_from_env(ConfigType::Sniper);
+    let config_path = load_config_from_env(ConfigType::Strategies);
     assert_eq!(
         config_path.to_str().unwrap(),
-        "config/sniper_config.yaml"
+        "config/strategies_config.yaml"
     );
 }
 
@@ -36,15 +36,15 @@ fn test_custom_config() {
 
 #[test]
 fn test_config_type_env_var_names() {
-    assert_eq!(ConfigType::Sniper.env_var_name(), "SNIPER_CONFIG_PATH");
+    assert_eq!(ConfigType::Strategies.env_var_name(), "STRATEGIES_CONFIG_PATH");
     assert_eq!(ConfigType::Bot.env_var_name(), "CONFIG_PATH");
 }
 
 #[test]
 fn test_config_type_default_paths() {
     assert_eq!(
-        ConfigType::Sniper.default_path(),
-        "config/sniper_config.yaml"
+        ConfigType::Strategies.default_path(),
+        "config/strategies_config.yaml"
     );
     assert_eq!(ConfigType::Bot.default_path(), "config.yaml");
 

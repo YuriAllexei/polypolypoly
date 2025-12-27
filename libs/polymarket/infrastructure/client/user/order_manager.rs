@@ -25,7 +25,7 @@ const MAX_SEEN_TRADE_IDS: usize = 10_000;
 /// - Unix seconds: "1705315800"
 /// - Unix milliseconds: "1705315800000"
 /// Returns i64::MIN for unparseable timestamps (sorts to beginning)
-fn parse_timestamp_to_i64(ts: &str) -> i64 {
+pub fn parse_timestamp_to_i64(ts: &str) -> i64 {
     if ts.is_empty() {
         return i64::MIN;
     }

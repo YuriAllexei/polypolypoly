@@ -14,7 +14,7 @@ use crate::application::strategies::inventory_mm::components::{
 use crate::application::strategies::inventory_mm::types::{
     SolverInput, SolverOutput, SolverConfig, InventorySnapshot, OrderbookSnapshot, OrderSnapshot, OpenOrder,
 };
-use crate::infrastructure::{SharedOrderbooks, UserOrderStatus as OrderStatus};
+use crate::infrastructure::{parse_timestamp_to_i64, SharedOrderbooks, UserOrderStatus as OrderStatus};
 
 enum TickResult {
     Continue,
@@ -152,11 +152,12 @@ impl Quoter {
                 let bids: Vec<OpenOrder> = oms.get_bids(token_id)
                     .iter()
                     .filter(|o| o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
-                    .map(|o| OpenOrder::new(
+                    .map(|o| OpenOrder::with_created_at(
                         o.order_id.clone(),
                         o.price,
                         o.original_size,
                         o.original_size - o.size_matched,
+                        parse_timestamp_to_i64(&o.created_at),
                     ))
                     .collect();
 

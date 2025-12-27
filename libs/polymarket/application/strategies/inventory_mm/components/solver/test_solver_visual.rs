@@ -83,6 +83,7 @@ mod visual_tests {
         println!("  max_imbalance: {:.0}%", input.config.max_imbalance * 100.0);
         println!("  order_size: {}", input.config.order_size);
         println!("  offset_scaling: {:.1}", input.config.offset_scaling);
+        println!("  skew_factor: {:.1}", input.config.skew_factor);
     }
 
     fn print_output(input: &SolverInput, output: &crate::application::strategies::inventory_mm::types::SolverOutput) {
@@ -95,6 +96,12 @@ mod visual_tests {
         let down_offset = input.config.base_offset * (1.0 + (-delta).max(0.0) * input.config.offset_scaling);
         println!("  UP offset:   ${:.4} (base ${:.2} * {:.2})", up_offset, input.config.base_offset, 1.0 + delta.max(0.0) * input.config.offset_scaling);
         println!("  DOWN offset: ${:.4} (base ${:.2} * {:.2})", down_offset, input.config.base_offset, 1.0 + (-delta).max(0.0) * input.config.offset_scaling);
+
+        println!("\nSize Calculation (based on delta={:.4}, skew_factor={:.1}):", delta, input.config.skew_factor);
+        let up_size = (input.config.order_size * (1.0 - delta * input.config.skew_factor)).clamp(0.0, input.config.order_size * 3.0);
+        let down_size = (input.config.order_size * (1.0 + delta * input.config.skew_factor)).clamp(0.0, input.config.order_size * 3.0);
+        println!("  UP size:   {:.1} (base {} * {:.2})", up_size, input.config.order_size, 1.0 - delta * input.config.skew_factor);
+        println!("  DOWN size: {:.1} (base {} * {:.2})", down_size, input.config.order_size, 1.0 + delta * input.config.skew_factor);
 
         // Expected quote prices
         if delta < input.config.max_imbalance {
@@ -196,7 +203,7 @@ mod visual_tests {
             order_size: 100.0,
             spread_per_level: 1.0,
             offset_scaling: 5.0,
-            skew_factor: 1.0,
+            skew_factor: 2.0,
         }
     }
 

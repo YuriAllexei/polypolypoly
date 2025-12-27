@@ -16,6 +16,8 @@ pub struct OpenOrder {
     pub price: f64,
     pub original_size: f64,
     pub remaining_size: f64,
+    /// Timestamp for queue priority (older = better position)
+    pub created_at: i64,
 }
 
 impl OpenOrder {
@@ -25,6 +27,23 @@ impl OpenOrder {
             price,
             original_size,
             remaining_size,
+            created_at: 0,
+        }
+    }
+
+    pub fn with_created_at(
+        order_id: String,
+        price: f64,
+        original_size: f64,
+        remaining_size: f64,
+        created_at: i64,
+    ) -> Self {
+        Self {
+            order_id,
+            price,
+            original_size,
+            remaining_size,
+            created_at,
         }
     }
 }
