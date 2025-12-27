@@ -34,6 +34,8 @@ pub fn solve(input: &SolverInput) -> SolverOutput {
         delta,
         &input.up_orderbook,
         &input.down_orderbook,
+        &input.up_orders,
+        &input.down_orders,
         &input.inventory,
         &input.config,
         &input.up_token_id,
