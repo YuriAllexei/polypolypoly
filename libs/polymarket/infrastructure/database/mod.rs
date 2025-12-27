@@ -779,6 +779,51 @@ impl MarketDatabase {
         Ok(markets)
     }
 
+    /// Get sliding window of upcoming markets for BTC/ETH 15M and 1H timeframes
+    /// Returns up to n markets per category (BTC_15M, BTC_1H, ETH_15M, ETH_1H)
+    /// Total returned: up to 4 * n markets
+    pub async fn get_sliding_window_markets(&self, n: i64) -> Result<Vec<DbMarket>> {
+        let markets = sqlx::query_as::<_, DbMarket>(
+            r#"
+            SELECT id, condition_id, question, description, slug, start_date, end_date,
+                   resolution_time, active, closed, archived, market_type, category,
+                   liquidity, volume, outcomes, token_ids, tags, last_updated, created_at, game_id
+            FROM (
+                SELECT sub.*,
+                       ROW_NUMBER() OVER (PARTITION BY sub.market_category ORDER BY sub.end_date::timestamptz ASC) as rn
+                FROM (
+                    SELECT m.*,
+                           CASE
+                               WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(m.tags::jsonb) t WHERE t->>'label' = 'Bitcoin')
+                                    AND EXISTS (SELECT 1 FROM jsonb_array_elements(m.tags::jsonb) t WHERE t->>'label' = '15M')
+                               THEN 'BTC_15M'
+                               WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(m.tags::jsonb) t WHERE t->>'label' = 'Bitcoin')
+                                    AND EXISTS (SELECT 1 FROM jsonb_array_elements(m.tags::jsonb) t WHERE t->>'label' = '1H')
+                               THEN 'BTC_1H'
+                               WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(m.tags::jsonb) t WHERE t->>'label' = 'Ethereum')
+                                    AND EXISTS (SELECT 1 FROM jsonb_array_elements(m.tags::jsonb) t WHERE t->>'label' = '15M')
+                               THEN 'ETH_15M'
+                               WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(m.tags::jsonb) t WHERE t->>'label' = 'Ethereum')
+                                    AND EXISTS (SELECT 1 FROM jsonb_array_elements(m.tags::jsonb) t WHERE t->>'label' = '1H')
+                               THEN 'ETH_1H'
+                           END as market_category
+                    FROM markets m
+                    WHERE m.closed = false
+                      AND m.end_date::timestamptz > NOW()
+                ) sub
+                WHERE sub.market_category IS NOT NULL
+            ) ranked
+            WHERE rn <= $1
+            ORDER BY end_date::timestamptz
+            "#,
+        )
+        .bind(n)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(markets)
+    }
+
     // ==================== UTILITY ====================
 
     /// Get database pool reference
