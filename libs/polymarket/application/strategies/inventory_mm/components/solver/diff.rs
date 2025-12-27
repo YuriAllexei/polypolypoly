@@ -60,96 +60,6 @@ fn orders_match(order: &OpenOrder, quote: &Quote) -> bool {
     price_match && size_match
 }
 
-/// More sophisticated diff that considers partial fills
-/// Returns actions needed to reconcile current state with desired
-pub fn diff_orders_advanced(
-    current: &[OpenOrder],
-    desired: &[Quote],
-    token_id: &str,
-) -> DiffResult {
-    let mut result = DiffResult::new();
-
-    // Build map of desired prices for quick lookup
-    let desired_by_price: std::collections::HashMap<i64, &Quote> = desired
-        .iter()
-        .map(|q| (price_to_key(q.price), q))
-        .collect();
-
-    // Check each current order
-    for order in current {
-        let key = price_to_key(order.price);
-        match desired_by_price.get(&key) {
-            Some(quote) => {
-                // Price matches - check size
-                let size_diff = quote.size - order.remaining_size;
-                if size_diff.abs() > 0.1 {
-                    // Size mismatch - need to cancel and re-place
-                    result.to_cancel.push(order.order_id.clone());
-                    result.to_place.push(LimitOrder::new(
-                        token_id.to_string(),
-                        quote.price,
-                        quote.size,
-                        quote.side,
-                    ));
-                } else {
-                    // Order is good, keep it
-                    result.unchanged += 1;
-                }
-            }
-            None => {
-                // No matching desired quote - cancel
-                result.to_cancel.push(order.order_id.clone());
-            }
-        }
-    }
-
-    // Build map of current prices
-    let current_by_price: std::collections::HashMap<i64, &OpenOrder> = current
-        .iter()
-        .map(|o| (price_to_key(o.price), o))
-        .collect();
-
-    // Check each desired quote for ones that need placement
-    for quote in desired {
-        let key = price_to_key(quote.price);
-        if !current_by_price.contains_key(&key) {
-            // No current order at this price - place new
-            result.to_place.push(LimitOrder::new(
-                token_id.to_string(),
-                quote.price,
-                quote.size,
-                quote.side,
-            ));
-        }
-    }
-
-    result
-}
-
-/// Result of diff operation
-#[derive(Debug, Default)]
-pub struct DiffResult {
-    pub to_cancel: Vec<String>,
-    pub to_place: Vec<LimitOrder>,
-    /// Orders that are already correct (for logging/metrics)
-    pub unchanged: usize,
-}
-
-impl DiffResult {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn has_changes(&self) -> bool {
-        !self.to_cancel.is_empty() || !self.to_place.is_empty()
-    }
-}
-
-/// Convert price to integer key for HashMap (avoid float comparison issues)
-fn price_to_key(price: f64) -> i64 {
-    (price * 10000.0).round() as i64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,10 +134,4 @@ mod tests {
         assert_eq!(to_place.len(), 2);
     }
 
-    #[test]
-    fn test_price_to_key() {
-        assert_eq!(price_to_key(0.54), 5400);
-        assert_eq!(price_to_key(0.5401), 5401);
-        assert_eq!(price_to_key(0.99), 9900);
-    }
 }

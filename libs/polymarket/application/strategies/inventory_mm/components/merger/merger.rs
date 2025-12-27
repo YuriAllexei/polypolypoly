@@ -185,34 +185,6 @@ impl Merger {
     }
 }
 
-/// Result of merge execution
-#[derive(Debug, Clone)]
-pub struct MergeResult {
-    pub pairs_merged: f64,
-    pub profit_realized: f64,
-    pub tx_hash: Option<String>,
-}
-
-/// Errors from merge operations
-#[derive(Debug, Clone)]
-pub enum MergeError {
-    InvalidDecision(String),
-    ExecutionFailed(String),
-    InsufficientBalance(String),
-}
-
-impl std::fmt::Display for MergeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MergeError::InvalidDecision(e) => write!(f, "Invalid merge decision: {}", e),
-            MergeError::ExecutionFailed(e) => write!(f, "Merge execution failed: {}", e),
-            MergeError::InsufficientBalance(e) => write!(f, "Insufficient balance: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for MergeError {}
-
 #[cfg(test)]
 mod tests {
     use super::*;

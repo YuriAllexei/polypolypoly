@@ -84,19 +84,9 @@ impl ExecutorResult {
         Self::default()
     }
 
-    /// Check if all operations succeeded
-    pub fn success(&self) -> bool {
-        self.errors.is_empty()
-    }
-
     /// Check if any operations failed
     pub fn has_errors(&self) -> bool {
         !self.errors.is_empty()
-    }
-
-    /// Total operations performed
-    pub fn total_operations(&self) -> usize {
-        self.cancelled_count + self.placed_count + self.taker_count
     }
 
     /// Add an error

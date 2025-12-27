@@ -1,7 +1,6 @@
 //! Inventory MM Strategy - multi-market orchestration.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -390,6 +389,7 @@ pub fn extract_solver_input(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Arc;
     use parking_lot::RwLock;
     use crate::infrastructure::{OrderStateStore, PositionTracker};
 

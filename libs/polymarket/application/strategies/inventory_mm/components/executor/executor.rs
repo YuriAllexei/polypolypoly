@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use crossbeam_channel::{unbounded, Sender, Receiver};
 use tokio::runtime::Runtime;
-use tracing::{info, warn, error, debug};
+use tracing::{info, error, debug};
 
 use super::commands::{ExecutorCommand, ExecutorResult};
 use crate::application::strategies::inventory_mm::types::{SolverOutput, LimitOrder, TakerOrder, Side};
