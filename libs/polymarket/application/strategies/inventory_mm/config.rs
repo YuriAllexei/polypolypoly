@@ -2,80 +2,55 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::types::SolverConfig;
 use super::components::merger::MergerConfig;
+use super::types::SolverConfig;
 
-/// Specifies which markets to track for a given symbol/timeframe combination.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketSpec {
-    /// Crypto symbol (e.g., "BTC", "ETH")
     pub symbol: String,
-    /// Timeframe (e.g., "15M", "1H", "4H")
     pub timeframe: String,
-    /// Number of upcoming markets to track for this spec
     #[serde(default = "default_market_count")]
     pub count: usize,
 }
 
-fn default_market_count() -> usize {
-    3
-}
+fn default_market_count() -> usize { 3 }
 
 impl MarketSpec {
     pub fn new(symbol: impl Into<String>, timeframe: impl Into<String>, count: usize) -> Self {
-        Self {
-            symbol: symbol.into(),
-            timeframe: timeframe.into(),
-            count,
-        }
+        Self { symbol: symbol.into(), timeframe: timeframe.into(), count }
     }
 }
 
-/// Complete configuration for Inventory MM strategy (multi-market).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct InventoryMMConfig {
-    /// Markets to track - each spec defines (symbol, timeframe, count)
-    #[serde(default = "default_markets")]
+    // === Market Selection ===
     pub markets: Vec<MarketSpec>,
 
-    /// How often to poll DB for new markets (seconds)
-    #[serde(default = "default_poll_interval")]
+    // === Timing ===
     pub poll_interval_secs: u64,
-
-    /// Tick interval for quoter loop (milliseconds)
-    #[serde(default = "default_tick_interval")]
     pub tick_interval_ms: u64,
+    pub snapshot_timeout_secs: u64,
+    pub merge_cooldown_secs: u64,
 
-    /// Solver configuration (shared across all quoters)
-    #[serde(default)]
+    // === Solver ===
     pub solver: SolverConfig,
 
-    /// Merger configuration (shared across all quoters)
-    #[serde(default)]
+    // === Merger ===
     pub merger: MergerConfig,
-}
-
-fn default_markets() -> Vec<MarketSpec> {
-    vec![
-        MarketSpec::new("BTC", "15M", 3),
-        MarketSpec::new("ETH", "15M", 3),
-    ]
-}
-
-fn default_poll_interval() -> u64 {
-    30 // 30 seconds
-}
-
-fn default_tick_interval() -> u64 {
-    100 // 100ms
 }
 
 impl Default for InventoryMMConfig {
     fn default() -> Self {
         Self {
-            markets: default_markets(),
-            poll_interval_secs: default_poll_interval(),
-            tick_interval_ms: default_tick_interval(),
+            markets: vec![
+                MarketSpec::new("BTC", "15M", 3),
+                MarketSpec::new("ETH", "15M", 3),
+            ],
+            poll_interval_secs: 30,
+            tick_interval_ms: 100,
+            snapshot_timeout_secs: 30,
+            merge_cooldown_secs: 120,
             solver: SolverConfig::default(),
             merger: MergerConfig::default(),
         }
@@ -83,7 +58,6 @@ impl Default for InventoryMMConfig {
 }
 
 impl InventoryMMConfig {
-    /// Builder-style setters
     pub fn with_markets(mut self, markets: Vec<MarketSpec>) -> Self {
         self.markets = markets;
         self
@@ -104,8 +78,8 @@ impl InventoryMMConfig {
         self
     }
 
-    pub fn with_tick_size(mut self, tick_size: f64) -> Self {
-        self.solver.tick_size = tick_size;
+    pub fn with_order_size(mut self, order_size: f64) -> Self {
+        self.solver.order_size = order_size;
         self
     }
 
@@ -126,29 +100,22 @@ impl InventoryMMConfig {
         self
     }
 
-    pub fn with_order_size(mut self, order_size: f64) -> Self {
-        self.solver.order_size = order_size;
-        self
-    }
-
     pub fn with_min_merge_size(mut self, min_merge_size: f64) -> Self {
         self.merger.min_merge_size = min_merge_size;
         self
     }
 
-    /// Check if a symbol is configured for trading
     pub fn is_symbol_enabled(&self, symbol: &str) -> bool {
         self.markets.iter().any(|m| m.symbol.eq_ignore_ascii_case(symbol))
     }
 
-    /// Check if a timeframe is configured for trading
     pub fn is_timeframe_enabled(&self, timeframe: &str) -> bool {
         self.markets.iter().any(|m| m.timeframe.eq_ignore_ascii_case(timeframe))
     }
 
-    /// Get the count for a specific (symbol, timeframe) combination
     pub fn get_count(&self, symbol: &str, timeframe: &str) -> Option<usize> {
-        self.markets.iter()
+        self.markets
+            .iter()
             .find(|m| m.symbol.eq_ignore_ascii_case(symbol) && m.timeframe.eq_ignore_ascii_case(timeframe))
             .map(|m| m.count)
     }
@@ -164,6 +131,8 @@ mod tests {
         assert_eq!(config.markets.len(), 2);
         assert_eq!(config.poll_interval_secs, 30);
         assert_eq!(config.tick_interval_ms, 100);
+        assert_eq!(config.snapshot_timeout_secs, 30);
+        assert_eq!(config.merge_cooldown_secs, 120);
     }
 
     #[test]

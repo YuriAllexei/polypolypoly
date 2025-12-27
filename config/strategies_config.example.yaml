@@ -44,3 +44,62 @@ sports_sniping:
   order_pct_of_collateral: 0.10
   # Minimum best bid price to execute (e.g., 0.80 = only sell if bid > $0.80)
   bid_threshold: 0.80
+
+# Inventory MM strategy settings
+inventory_mm:
+  # === Market Selection ===
+  # Which markets to track (symbol, timeframe, count of upcoming markets)
+  # Supported: BTC/ETH with 15M/1H timeframes (hardcoded in DB query)
+  markets:
+    - symbol: "BTC"
+      timeframe: "15M"
+      count: 3
+    - symbol: "ETH"
+      timeframe: "15M"
+      count: 3
+    - symbol: "BTC"
+      timeframe: "1H"
+      count: 2
+    - symbol: "ETH"
+      timeframe: "1H"
+      count: 2
+
+  # === Timing ===
+  # How often to poll DB for new markets (seconds)
+  poll_interval_secs: 30
+  # Quoter tick interval (milliseconds)
+  tick_interval_ms: 100
+  # WebSocket snapshot timeout (seconds)
+  snapshot_timeout_secs: 30
+  # Cooldown between merges (seconds)
+  merge_cooldown_secs: 120
+
+  # === Solver (Quoting Parameters) ===
+  solver:
+    # Number of bid levels per side
+    num_levels: 3
+    # Tick size for price rounding
+    tick_size: 0.01
+    # Base offset from best ask when delta=0 (aggressive)
+    base_offset: 0.01
+    # Minimum profit margin required (1 cent per pair)
+    min_profit_margin: 0.01
+    # Maximum imbalance before stopping quotes on overweight side (80%)
+    max_imbalance: 0.8
+    # Order size per level (tokens)
+    order_size: 100.0
+    # Spread adjustment per level (cents)
+    spread_per_level: 1.0
+    # Multiplier for offset scaling with imbalance
+    offset_scaling: 5.0
+
+  # === Merger (Merge Conditions) ===
+  merger:
+    # Minimum pairs before considering a merge
+    min_merge_size: 10.0
+    # Maximum imbalance allowed for merge (30%)
+    max_merge_imbalance: 0.3
+    # Minimum profit margin required
+    min_profit_margin: 0.01
+    # Maximum combined avg cost (1.0 - min_profit_margin)
+    max_combined_cost: 0.99

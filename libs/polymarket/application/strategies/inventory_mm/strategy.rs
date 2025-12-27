@@ -19,8 +19,8 @@ use crate::infrastructure::{
     SharedOrderbooks, SharedOrderState, SharedPositionTracker, UserOrderStatus as OrderStatus,
 };
 
-/// Required tags for "Up or Down" markets
-const REQUIRED_TAGS: &[&str] = &["Up or Down", "Crypto Prices", "Recurring", "Crypto"];
+/// Maximum markets to fetch per category from DB
+const MAX_MARKETS_PER_CATEGORY: i64 = 5;
 
 /// Main strategy - implements Strategy trait.
 /// Manages multiple quoters, one per market.
@@ -56,6 +56,8 @@ impl InventoryMMStrategy {
         let solver_config = self.config.solver.clone();
         let merger_config = self.config.merger.clone();
         let tick_interval_ms = self.config.tick_interval_ms;
+        let snapshot_timeout_secs = self.config.snapshot_timeout_secs;
+        let merge_cooldown_secs = self.config.merge_cooldown_secs;
 
         let handle = tokio::spawn(async move {
             let quoter = Quoter::new(
@@ -63,6 +65,8 @@ impl InventoryMMStrategy {
                 solver_config,
                 merger_config,
                 tick_interval_ms,
+                snapshot_timeout_secs,
+                merge_cooldown_secs,
                 ctx,
             );
             quoter.run().await;
@@ -90,23 +94,24 @@ impl InventoryMMStrategy {
         }
     }
 
-    /// Fetch markets from DB matching our config.
+    /// Fetch markets from DB using optimized sliding window query.
     async fn fetch_markets(&self, ctx: &StrategyContext) -> StrategyResult<Vec<MarketInfo>> {
-        // Get all "Up or Down" markets from DB
-        let markets = ctx.database.get_markets_by_tags(REQUIRED_TAGS).await?;
+        let markets = ctx.database.get_sliding_window_markets(MAX_MARKETS_PER_CATEGORY).await?;
 
-        let now = Utc::now();
         let mut result = Vec::new();
+        let mut counts: HashMap<(String, String), usize> = HashMap::new();
 
         for market in markets {
-            // Skip markets that have ended
+            // Skip if already tracked
+            if self.tracked_markets.contains(&market.id) {
+                continue;
+            }
+
+            // Parse end_date
             let end_date = match DateTime::parse_from_rfc3339(&market.end_date) {
                 Ok(dt) => dt.with_timezone(&Utc),
                 Err(_) => continue,
             };
-            if end_date <= now {
-                continue;
-            }
 
             // Parse token_ids
             let token_ids: Vec<String> = match serde_json::from_str(&market.token_ids) {
@@ -143,38 +148,25 @@ impl InventoryMMStrategy {
                 continue;
             }
 
-            // Skip if already tracked
-            if self.tracked_markets.contains(&market.id) {
+            // Apply per-category count limit from config
+            let key = (symbol.to_uppercase(), timeframe.to_uppercase());
+            let count = counts.entry(key.clone()).or_insert(0);
+            let max_count = self.config.get_count(&symbol, &timeframe).unwrap_or(3);
+            if *count >= max_count {
                 continue;
             }
+            *count += 1;
 
             result.push(MarketInfo::new(
                 market.id.clone(),
                 condition_id,
-                token_ids[0].clone(),  // UP token
-                token_ids[1].clone(),  // DOWN token
+                token_ids[0].clone(),
+                token_ids[1].clone(),
                 end_date,
                 symbol,
                 timeframe,
             ));
         }
-
-        // Sort by end_date (nearest first) and limit by count per (symbol, timeframe)
-        result.sort_by_key(|m| m.end_time);
-
-        // Group by (symbol, timeframe) and limit each group
-        let mut counts: HashMap<(String, String), usize> = HashMap::new();
-        result.retain(|m| {
-            let key = (m.symbol.to_uppercase(), m.timeframe.to_uppercase());
-            let count = counts.entry(key.clone()).or_insert(0);
-            let max_count = self.config.get_count(&m.symbol, &m.timeframe).unwrap_or(3);
-            if *count < max_count {
-                *count += 1;
-                true
-            } else {
-                false
-            }
-        });
 
         Ok(result)
     }

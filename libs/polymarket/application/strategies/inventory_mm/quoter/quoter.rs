@@ -21,47 +21,35 @@ enum TickResult {
     ExecutorDead,
 }
 
-const MERGE_COOLDOWN_SECS: u64 = 120;
-const SNAPSHOT_TIMEOUT_SECS: u64 = 30;
-
-/// Per-market quoter that runs its own tick loop.
-/// Each quoter is responsible for one market's quoting.
 pub struct Quoter {
-    /// Market information
     market: MarketInfo,
-    /// Solver configuration
     config: SolverConfig,
-    /// Tick interval in milliseconds
     tick_interval_ms: u64,
-
-    // Per-quoter owned state
-    /// Orderbooks for this market (per-quoter)
+    snapshot_timeout_secs: u64,
+    merge_cooldown_secs: u64,
     orderbooks: SharedOrderbooks,
-    /// In-flight tracker (per-quoter)
     in_flight_tracker: InFlightTracker,
-    /// Merger instance (per-quoter)
     merger: Merger,
-    /// Merge cooldown tracking
     merge_pending_until: Option<Instant>,
-
-    // Shared context
-    /// Shared state (cloned from strategy)
     ctx: QuoterContext,
 }
 
 impl Quoter {
-    /// Create a new Quoter for a specific market.
     pub fn new(
         market: MarketInfo,
         config: SolverConfig,
         merger_config: MergerConfig,
         tick_interval_ms: u64,
+        snapshot_timeout_secs: u64,
+        merge_cooldown_secs: u64,
         ctx: QuoterContext,
     ) -> Self {
         Self {
             market,
             config,
             tick_interval_ms,
+            snapshot_timeout_secs,
+            merge_cooldown_secs,
             orderbooks: Arc::new(RwLock::new(HashMap::new())),
             in_flight_tracker: InFlightTracker::with_default_ttl(),
             merger: Merger::new(merger_config),
@@ -104,7 +92,7 @@ impl Quoter {
         info!("[Quoter:{}] WebSocket connected", market_desc);
 
         // 2. Wait for initial orderbook snapshot
-        let snapshot_timeout = Duration::from_secs(SNAPSHOT_TIMEOUT_SECS);
+        let snapshot_timeout = Duration::from_secs(self.snapshot_timeout_secs);
         if !wait_for_snapshot(&ws_client, &self.ctx.shutdown_flag, &self.market.market_id, snapshot_timeout).await {
             error!("[Quoter:{}] Failed to receive orderbook snapshot", market_desc);
             self.cleanup(Some(ws_client)).await;
@@ -281,7 +269,7 @@ impl Quoter {
                     decision.pairs_to_merge,
                 ) {
                     Ok(()) => {
-                        self.merge_pending_until = Some(now + Duration::from_secs(MERGE_COOLDOWN_SECS));
+                        self.merge_pending_until = Some(now + Duration::from_secs(self.merge_cooldown_secs));
                     }
                     Err(ExecutorError::ChannelClosed) => {
                         return (Some(output), TickResult::ExecutorDead);
@@ -376,6 +364,8 @@ mod tests {
             SolverConfig::default(),
             MergerConfig::default(),
             100,
+            30,
+            120,
             ctx,
         );
 
