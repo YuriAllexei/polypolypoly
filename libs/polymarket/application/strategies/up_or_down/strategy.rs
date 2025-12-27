@@ -8,7 +8,9 @@ use super::types::{CryptoAsset, OracleSource, Timeframe, REQUIRED_TAGS};
 use crate::application::strategies::traits::{Strategy, StrategyContext, StrategyResult};
 use crate::domain::DbMarket;
 use crate::infrastructure::config::UpOrDownConfig;
-use crate::infrastructure::{spawn_oracle_trackers, RiskManager, RiskManagerHandle, SharedOraclePrices};
+use crate::infrastructure::{
+    spawn_oracle_trackers, RiskManager, RiskManagerHandle, SharedOraclePrices,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
