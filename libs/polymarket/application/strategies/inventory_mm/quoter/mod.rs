@@ -3,7 +3,7 @@
 //! Each quoter manages quoting for a single market, running its own
 //! tick loop and maintaining per-market state (orderbooks, in-flight tracker, merger).
 
-mod context;
+pub mod context;
 mod orderbook_ws;
 mod quoter;
 

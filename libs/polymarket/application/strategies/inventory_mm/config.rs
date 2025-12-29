@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::components::merger::MergerConfig;
+use super::components::taker::TakerConfig;
 use super::types::SolverConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +39,10 @@ pub struct InventoryMMConfig {
 
     // === Merger ===
     pub merger: MergerConfig,
+
+    // === Taker ===
+    #[serde(default)]
+    pub taker: TakerConfig,
 }
 
 impl Default for InventoryMMConfig {
@@ -53,6 +58,7 @@ impl Default for InventoryMMConfig {
             merge_cooldown_secs: 120,
             solver: SolverConfig::default(),
             merger: MergerConfig::default(),
+            taker: TakerConfig::default(),
         }
     }
 }

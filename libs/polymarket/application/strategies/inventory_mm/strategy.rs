@@ -54,6 +54,7 @@ impl InventoryMMStrategy {
 
         let solver_config = self.config.solver.clone();
         let merger_config = self.config.merger.clone();
+        let taker_config = self.config.taker.clone();
         let tick_interval_ms = self.config.tick_interval_ms;
         let snapshot_timeout_secs = self.config.snapshot_timeout_secs;
         let merge_cooldown_secs = self.config.merge_cooldown_secs;
@@ -63,6 +64,7 @@ impl InventoryMMStrategy {
                 market,
                 solver_config,
                 merger_config,
+                taker_config,
                 tick_interval_ms,
                 snapshot_timeout_secs,
                 merge_cooldown_secs,
@@ -201,6 +203,7 @@ impl Strategy for InventoryMMStrategy {
 
         let quoter_ctx = QuoterContext::new(
             executor_handle.quoter_handle(),
+            ctx.trading.clone(),
             ctx.order_state.clone(),
             ctx.position_tracker.clone(),
             ctx.shutdown_flag.clone(),

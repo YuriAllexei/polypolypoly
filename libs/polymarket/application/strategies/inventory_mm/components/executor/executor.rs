@@ -7,7 +7,7 @@ use tokio::runtime::Runtime;
 use tracing::{info, error, debug};
 
 use super::commands::{ExecutorCommand, ExecutorResult};
-use crate::application::strategies::inventory_mm::types::{SolverOutput, LimitOrder, TakerOrder, Side};
+use crate::application::strategies::inventory_mm::types::{SolverOutput, LimitOrder, Side};
 use crate::infrastructure::client::clob::{TradingClient, Side as TradingSide, OrderType};
 use crate::infrastructure::client::ctf::{merge as ctf_merge, usdc_to_raw};
 
@@ -204,8 +204,8 @@ impl Executor {
                         }
                     } else {
                         debug!(
-                            "[Executor] Completed: cancelled={}, placed={}, takers={}",
-                            result.cancelled_count, result.placed_count, result.taker_count
+                            "[Executor] Completed: cancelled={}, placed={}",
+                            result.cancelled_count, result.placed_count
                         );
                     }
                 }
@@ -231,12 +231,7 @@ impl Executor {
                     result.merge(self.execute_cancellations(&output.cancellations));
                 }
 
-                // 2. Takers next (time-sensitive)
-                for taker in &output.taker_orders {
-                    result.merge(self.execute_taker(taker));
-                }
-
-                // 3. Limits last (batch)
+                // 2. Limits (batch)
                 if !output.limit_orders.is_empty() {
                     result.merge(self.execute_limits(&output.limit_orders));
                 }
@@ -268,10 +263,6 @@ impl Executor {
 
             ExecutorCommand::PlaceLimit(order) => {
                 result.merge(self.execute_limits(&[order]));
-            }
-
-            ExecutorCommand::ExecuteTaker(order) => {
-                result.merge(self.execute_taker(&order));
             }
 
             ExecutorCommand::Merge { condition_id, amount } => {
@@ -365,48 +356,6 @@ impl Executor {
             Err(e) => {
                 result.add_error("place_batch", e.to_string());
                 error!("[Executor] Batch placement failed: {}", e);
-            }
-        }
-
-        result
-    }
-
-    /// Execute a taker order (FOK)
-    fn execute_taker(&self, order: &TakerOrder) -> ExecutorResult {
-        let mut result = ExecutorResult::new();
-
-        debug!(
-            "[Executor] Executing taker: {} {} @ {} size {}",
-            order.side, order.token_id, order.price, order.size
-        );
-
-        let response = match order.side {
-            Side::Buy => self.runtime.block_on(
-                self.trading.buy_fok(&order.token_id, order.price, order.size)
-            ),
-            Side::Sell => self.runtime.block_on(
-                self.trading.sell_fok(&order.token_id, order.price, order.size)
-            ),
-        };
-
-        match response {
-            Ok(r) if r.status.as_deref() == Some("matched") => {
-                // FOK was filled - status "matched" confirms actual execution
-                result.taker_count = 1;
-                if let Some(ref id) = r.order_id {
-                    info!("[Executor] Taker filled: {}", id);
-                }
-            }
-            Ok(r) => {
-                // FOK not filled - status is "unmatched" or order was rejected
-                debug!(
-                    "[Executor] Taker not filled: status={:?}, error={:?}",
-                    r.status, r.error_msg
-                );
-            }
-            Err(e) => {
-                result.add_error("execute_taker", e.to_string());
-                error!("[Executor] Taker failed: {}", e);
             }
         }
 

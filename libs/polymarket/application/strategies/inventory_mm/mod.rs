@@ -15,6 +15,6 @@ pub use components::{solve, Executor, ExecutorHandle, QuoterExecutorHandle, Merg
 pub use types::{
     SolverInput, SolverOutput, SolverConfig,
     InventorySnapshot, OrderbookSnapshot, OrderSnapshot, OpenOrder,
-    Quote, LimitOrder, TakerOrder, QuoteLadder, Side,
+    Quote, LimitOrder, QuoteLadder, Side,
 };
 pub use quoter::{Quoter, QuoterContext, MarketInfo, QuoterWsConfig, QuoterWsClient, build_quoter_ws_client};

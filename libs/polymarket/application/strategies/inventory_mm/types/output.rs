@@ -3,7 +3,7 @@
 //! SolverOutput contains the actions that need to be executed.
 //! ExecutorCommand is the message format sent to the Executor thread.
 
-use super::order::{LimitOrder, TakerOrder};
+use super::order::LimitOrder;
 
 /// Output from the solve() function
 /// Contains all actions that need to be executed
@@ -14,9 +14,6 @@ pub struct SolverOutput {
 
     /// Limit orders to place
     pub limit_orders: Vec<LimitOrder>,
-
-    /// Taker orders to execute (time-sensitive, execute first)
-    pub taker_orders: Vec<TakerOrder>,
 }
 
 impl SolverOutput {
@@ -26,21 +23,17 @@ impl SolverOutput {
 
     /// Check if there are any actions to execute
     pub fn has_actions(&self) -> bool {
-        !self.cancellations.is_empty()
-            || !self.limit_orders.is_empty()
-            || !self.taker_orders.is_empty()
+        !self.cancellations.is_empty() || !self.limit_orders.is_empty()
     }
 
     /// Total number of actions
     pub fn action_count(&self) -> usize {
-        self.cancellations.len() + self.limit_orders.len() + self.taker_orders.len()
+        self.cancellations.len() + self.limit_orders.len()
     }
 
     /// Check if output is cancel-only (no new orders)
     pub fn is_cancel_only(&self) -> bool {
-        !self.cancellations.is_empty()
-            && self.limit_orders.is_empty()
-            && self.taker_orders.is_empty()
+        !self.cancellations.is_empty() && self.limit_orders.is_empty()
     }
 }
 

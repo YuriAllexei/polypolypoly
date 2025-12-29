@@ -6,14 +6,12 @@ use crate::application::strategies::inventory_mm::types::{
 
 use super::quotes::calculate_quotes;
 use super::diff::diff_orders;
-use super::taker::find_taker_opportunity;
 
 /// Main solver function.
 ///
 /// Quotes are purely market-based. Risk is managed via:
 /// - Offset mechanism: increases when imbalanced, making bids less aggressive
 /// - Max imbalance threshold: stops quoting entirely when too imbalanced
-/// - Taker profitability check: only takes liquidity if profitable
 pub fn solve(input: &SolverInput) -> SolverOutput {
     let mut output = SolverOutput::new();
 
@@ -29,22 +27,7 @@ pub fn solve(input: &SolverInput) -> SolverOutput {
         &input.down_token_id,
     );
 
-    // 2. Check for taker opportunities (has its own profitability check)
-    if let Some(taker) = find_taker_opportunity(
-        delta,
-        &input.up_orderbook,
-        &input.down_orderbook,
-        &input.up_orders,
-        &input.down_orders,
-        &input.inventory,
-        &input.config,
-        &input.up_token_id,
-        &input.down_token_id,
-    ) {
-        output.taker_orders.push(taker);
-    }
-
-    // 3. Diff Up orders: current vs desired
+    // 2. Diff Up orders: current vs desired
     let (cancel_up, place_up) = diff_orders(
         &input.up_orders.bids,
         &ladder.up_quotes,
@@ -53,7 +36,7 @@ pub fn solve(input: &SolverInput) -> SolverOutput {
     output.cancellations.extend(cancel_up);
     output.limit_orders.extend(place_up);
 
-    // 4. Diff Down orders: current vs desired
+    // 3. Diff Down orders: current vs desired
     let (cancel_down, place_down) = diff_orders(
         &input.down_orders.bids,
         &ladder.down_quotes,

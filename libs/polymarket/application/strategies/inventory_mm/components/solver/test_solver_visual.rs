@@ -171,18 +171,10 @@ mod visual_tests {
             println!("\nLimit Orders to PLACE: (none - all orders already exist at target prices)");
         }
 
-        if !output.taker_orders.is_empty() {
-            println!("\nTaker Orders (immediate execution):");
-            for t in &output.taker_orders {
-                println!("  {:?} {} @ ${:.2} x {} (score: {:.2})", t.side, t.token_id, t.price, t.size, t.score);
-            }
-        }
-
         println!("\n--- SUMMARY ---");
-        println!("  {} cancellations, {} new limit orders, {} takers",
+        println!("  {} cancellations, {} new limit orders",
             output.cancellations.len(),
-            output.limit_orders.len(),
-            output.taker_orders.len()
+            output.limit_orders.len()
         );
 
         // Calculate unchanged orders
@@ -1118,192 +1110,11 @@ mod visual_tests {
         print_output(&input, &output);
 
         println!("\n{}", "#".repeat(80));
-        println!("# SECTION 4: TAKER OPPORTUNITIES");
+        println!("# SECTION 4: EDGE CASES");
         println!("{}\n", "#".repeat(80));
 
         // =====================================================================
-        // SCENARIO 4.1: Heavy DOWN with cheap UP ask - should take
-        // =====================================================================
-        print_separator("4.1: Heavy DOWN + Cheap UP Ask (Should TAKE UP)");
-
-        let input = SolverInput {
-            up_token_id: "up_token".to_string(),
-            down_token_id: "down_token".to_string(),
-            up_orders: OrderSnapshot::default(),
-            down_orders: OrderSnapshot::default(),
-            inventory: InventorySnapshot {
-                up_size: 20.0,
-                up_avg_price: 0.52,
-                down_size: 80.0,
-                down_avg_price: 0.46,
-            },
-            up_orderbook: OrderbookSnapshot {
-                best_ask: Some((0.50, 150.0)),  // Cheap UP!
-                best_bid: Some((0.48, 200.0)),
-                best_bid_is_ours: false,
-                best_ask_is_ours: false,
-            },
-            down_orderbook: OrderbookSnapshot {
-                best_ask: Some((0.50, 500.0)),
-                best_bid: Some((0.48, 200.0)),
-                best_bid_is_ours: false,
-                best_ask_is_ours: false,
-            },
-            config: make_config(),
-        };
-
-        print_input(&input);
-        let output = solve(&input);
-        print_output(&input, &output);
-
-        // Explain the taker math
-        println!("\n--- TAKER CALCULATION ---");
-        let delta = input.inventory.imbalance();
-        println!("Need UP (delta={:.2}), checking UP ask at $0.50", delta);
-        let old_cost = 20.0 * 0.52;
-        let new_cost = 100.0 * 0.50;
-        let new_up_avg = (old_cost + new_cost) / 120.0;
-        let combined = new_up_avg + 0.46;
-        println!("  old_up_cost = 20 * $0.52 = ${:.2}", old_cost);
-        println!("  new_up_cost = 100 * $0.50 = ${:.2}", new_cost);
-        println!("  new_up_avg = ${:.2} / 120 = ${:.4}", old_cost + new_cost, new_up_avg);
-        println!("  combined = ${:.4} + $0.46 = ${:.4}", new_up_avg, combined);
-        println!("  threshold = $0.99 (1 - min_profit_margin)");
-        println!("  {} < $0.99? {} -> {}",
-            combined,
-            combined < 0.99,
-            if combined < 0.99 { "TAKE!" } else { "NO TAKE" }
-        );
-
-        // =====================================================================
-        // SCENARIO 4.2: Heavy UP with cheap DOWN ask - should take
-        // =====================================================================
-        print_separator("4.2: Heavy UP + Cheap DOWN Ask (Should TAKE DOWN)");
-
-        let input = SolverInput {
-            up_token_id: "up_token".to_string(),
-            down_token_id: "down_token".to_string(),
-            up_orders: OrderSnapshot::default(),
-            down_orders: OrderSnapshot::default(),
-            inventory: InventorySnapshot {
-                up_size: 80.0,
-                up_avg_price: 0.52,
-                down_size: 20.0,
-                down_avg_price: 0.45,
-            },
-            up_orderbook: OrderbookSnapshot {
-                best_ask: Some((0.55, 500.0)),
-                best_bid: Some((0.53, 200.0)),
-                best_bid_is_ours: false,
-                best_ask_is_ours: false,
-            },
-            down_orderbook: OrderbookSnapshot {
-                best_ask: Some((0.44, 150.0)),  // Cheap DOWN!
-                best_bid: Some((0.42, 200.0)),
-                best_bid_is_ours: false,
-                best_ask_is_ours: false,
-            },
-            config: make_config(),
-        };
-
-        print_input(&input);
-        let output = solve(&input);
-        print_output(&input, &output);
-
-        // =====================================================================
-        // SCENARIO 4.3: Best ask is ours - should NOT take
-        // =====================================================================
-        print_separator("4.3: Best Ask is OURS - Should NOT Take (Would Self-Trade)");
-
-        let input = SolverInput {
-            up_token_id: "up_token".to_string(),
-            down_token_id: "down_token".to_string(),
-            up_orders: OrderSnapshot::default(),
-            down_orders: OrderSnapshot::default(),
-            inventory: InventorySnapshot {
-                up_size: 20.0,
-                up_avg_price: 0.52,
-                down_size: 80.0,
-                down_avg_price: 0.46,
-            },
-            up_orderbook: OrderbookSnapshot {
-                best_ask: Some((0.50, 150.0)),  // Would be good to take...
-                best_bid: Some((0.48, 200.0)),
-                best_bid_is_ours: false,
-                best_ask_is_ours: true,  // ...but it's OURS!
-            },
-            down_orderbook: OrderbookSnapshot {
-                best_ask: Some((0.50, 500.0)),
-                best_bid: Some((0.48, 200.0)),
-                best_bid_is_ours: false,
-                best_ask_is_ours: false,
-            },
-            config: make_config(),
-        };
-
-        print_input(&input);
-        let output = solve(&input);
-        print_output(&input, &output);
-
-        // =====================================================================
-        // SCENARIO 4.4: Would be unprofitable - should NOT take
-        // =====================================================================
-        print_separator("4.4: Unprofitable Take - Combined Cost > $0.99 (No Take)");
-
-        let input = SolverInput {
-            up_token_id: "up_token".to_string(),
-            down_token_id: "down_token".to_string(),
-            up_orders: OrderSnapshot::default(),
-            down_orders: OrderSnapshot::default(),
-            inventory: InventorySnapshot {
-                up_size: 80.0,
-                up_avg_price: 0.55,  // High UP avg
-                down_size: 20.0,
-                down_avg_price: 0.44,
-            },
-            up_orderbook: OrderbookSnapshot {
-                best_ask: Some((0.55, 500.0)),
-                best_bid: Some((0.53, 200.0)),
-                best_bid_is_ours: false,
-                best_ask_is_ours: false,
-            },
-            down_orderbook: OrderbookSnapshot {
-                best_ask: Some((0.46, 150.0)),  // Combined would be 0.55 + ~0.45 = 1.00+
-                best_bid: Some((0.44, 200.0)),
-                best_bid_is_ours: false,
-                best_ask_is_ours: false,
-            },
-            config: make_config(),
-        };
-
-        print_input(&input);
-        let output = solve(&input);
-        print_output(&input, &output);
-
-        // Explain why no take
-        println!("\n--- TAKER CALCULATION ---");
-        println!("Need DOWN (delta=0.60), checking DOWN ask at $0.46");
-        let old_down_cost = 20.0 * 0.44;
-        let new_down_cost = 100.0 * 0.46;
-        let new_down_avg = (old_down_cost + new_down_cost) / 120.0;
-        let combined = 0.55 + new_down_avg;
-        println!("  old_down_cost = 20 * $0.44 = ${:.2}", old_down_cost);
-        println!("  new_down_cost = 100 * $0.46 = ${:.2}", new_down_cost);
-        println!("  new_down_avg = ${:.2} / 120 = ${:.4}", old_down_cost + new_down_cost, new_down_avg);
-        println!("  combined = $0.55 + ${:.4} = ${:.4}", new_down_avg, combined);
-        println!("  threshold = $0.99");
-        println!("  {} < $0.99? {} -> {}",
-            combined,
-            combined < 0.99,
-            if combined < 0.99 { "TAKE!" } else { "NO TAKE" }
-        );
-
-        println!("\n{}", "#".repeat(80));
-        println!("# SECTION 5: EDGE CASES");
-        println!("{}\n", "#".repeat(80));
-
-        // =====================================================================
-        // SCENARIO 5.1: Empty inventory
+        // SCENARIO 4.1: Empty inventory
         // =====================================================================
         print_separator("5.1: Empty Inventory (Fresh Start)");
 
@@ -1338,7 +1149,7 @@ mod visual_tests {
         print_output(&input, &output);
 
         // =====================================================================
-        // SCENARIO 5.2: No orderbook (missing best_ask)
+        // SCENARIO 4.2: No orderbook (missing best_ask)
         // =====================================================================
         print_separator("5.2: Missing Best Ask (No Quotes Possible)");
 
@@ -1373,7 +1184,7 @@ mod visual_tests {
         print_output(&input, &output);
 
         // =====================================================================
-        // SCENARIO 5.3: Very low prices (near $0.01 tick minimum)
+        // SCENARIO 4.3: Very low prices (near $0.01 tick minimum)
         // =====================================================================
         print_separator("5.3: Very Low Prices (Near Minimum Tick)");
 
@@ -1408,7 +1219,7 @@ mod visual_tests {
         print_output(&input, &output);
 
         // =====================================================================
-        // SCENARIO 5.4: Different config - 5 levels, wider spread
+        // SCENARIO 4.4: Different config - 5 levels, wider spread
         // =====================================================================
         print_separator("5.4: Different Config (5 Levels, 2c Spread Per Level)");
 
@@ -1445,6 +1256,839 @@ mod visual_tests {
         print_input(&input);
         let output = solve(&input);
         print_output(&input, &output);
+
+        println!("\n{}", "#".repeat(80));
+        println!("# SECTION 5: FIFO QUEUE PRIORITY PRESERVATION");
+        println!("{}\n", "#".repeat(80));
+
+        // =====================================================================
+        // SCENARIO 5.1: Decrease size - keep oldest, cancel newer, place remainder
+        // =====================================================================
+        print_separator("6.1: FIFO Decrease - Keep Oldest 100, Cancel Newer Two, Place 40");
+
+        // Current: 3 orders @ 0.54 totaling 300 (timestamps 1000, 1001, 1002)
+        // Desired: 140 @ 0.54
+        // Expected: Keep oldest (100), cancel middle and newest, place 40 for remainder
+        let input = SolverInput {
+            up_token_id: "up_token".to_string(),
+            down_token_id: "down_token".to_string(),
+            up_orders: OrderSnapshot {
+                bids: vec![
+                    OpenOrder::with_created_at("up-oldest".to_string(), 0.54, 100.0, 100.0, 1000), // OLDEST - keep!
+                    OpenOrder::with_created_at("up-middle".to_string(), 0.54, 100.0, 100.0, 1001), // cancel
+                    OpenOrder::with_created_at("up-newest".to_string(), 0.54, 100.0, 100.0, 1002), // NEWEST - cancel!
+                ],
+                asks: vec![],
+            },
+            down_orders: OrderSnapshot::default(),
+            inventory: InventorySnapshot {
+                up_size: 50.0,
+                up_avg_price: 0.52,
+                down_size: 50.0,
+                down_avg_price: 0.46,
+            },
+            up_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.55, 500.0)),
+                best_bid: Some((0.53, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            down_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.45, 500.0)),
+                best_bid: Some((0.43, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            config: SolverConfig {
+                order_size: 140.0, // Desired 140 at level 0
+                ..make_config()
+            },
+        };
+
+        print_input(&input);
+        let output = solve(&input);
+        print_output(&input, &output);
+
+        println!("\n--- FIFO ANALYSIS ---");
+        println!("Orders at $0.54 (sorted by created_at):");
+        println!("  1. up-oldest  @ 1000 (100 size) -> KEEP (best queue position)");
+        println!("  2. up-middle  @ 1001 (100 size) -> CANCEL (100+100=200 > 140)");
+        println!("  3. up-newest  @ 1002 (100 size) -> CANCEL");
+        println!("Kept sum: 100, Desired: 140, Remainder to place: 40");
+        println!("Result: Cancel 2 orders, place 1 new order for 40");
+
+        // Verify behavior
+        assert!(output.cancellations.contains(&"up-middle".to_string()), "Should cancel middle order");
+        assert!(output.cancellations.contains(&"up-newest".to_string()), "Should cancel newest order");
+        assert!(!output.cancellations.contains(&"up-oldest".to_string()), "Should KEEP oldest order");
+        // Verify the 40-size remainder order is placed
+        let placed_at_054: Vec<_> = output.limit_orders.iter()
+            .filter(|o| (o.price - 0.54).abs() < 0.001)
+            .collect();
+        assert_eq!(placed_at_054.len(), 1, "Should place 1 order at $0.54");
+        assert!((placed_at_054[0].size - 40.0).abs() < 0.1, "Remainder should be ~40");
+        println!("\n✓ VERIFIED: Oldest order preserved, newer orders cancelled, 40 remainder placed");
+
+        // =====================================================================
+        // SCENARIO 5.2: Increase size - keep all, add new
+        // =====================================================================
+        print_separator("6.2: FIFO Increase - Keep All Existing, Add 150 New");
+
+        // Current: 1 order @ 0.54 for 100
+        // Desired: 250 @ 0.54
+        // Expected: Keep existing 100, place new order for 150
+        let input = SolverInput {
+            up_token_id: "up_token".to_string(),
+            down_token_id: "down_token".to_string(),
+            up_orders: OrderSnapshot {
+                bids: vec![
+                    OpenOrder::with_created_at("up-existing".to_string(), 0.54, 100.0, 100.0, 1000),
+                ],
+                asks: vec![],
+            },
+            down_orders: OrderSnapshot::default(),
+            inventory: InventorySnapshot {
+                up_size: 50.0,
+                up_avg_price: 0.52,
+                down_size: 50.0,
+                down_avg_price: 0.46,
+            },
+            up_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.55, 500.0)),
+                best_bid: Some((0.53, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            down_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.45, 500.0)),
+                best_bid: Some((0.43, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            config: SolverConfig {
+                order_size: 250.0, // Desired 250 at level 0
+                ..make_config()
+            },
+        };
+
+        print_input(&input);
+        let output = solve(&input);
+        print_output(&input, &output);
+
+        println!("\n--- FIFO ANALYSIS ---");
+        println!("Orders at $0.54:");
+        println!("  1. up-existing @ 1000 (100 size) -> KEEP (preserve queue position)");
+        println!("Current sum: 100, Desired: 250, Additional to place: 150");
+        println!("Result: No cancellations, place 1 new order for 150");
+
+        // Verify behavior
+        assert!(output.cancellations.is_empty(), "Should not cancel any orders when increasing size");
+        let placed_at_054: Vec<_> = output.limit_orders.iter()
+            .filter(|o| (o.price - 0.54).abs() < 0.001)
+            .collect();
+        assert!(!placed_at_054.is_empty(), "Should place additional order at $0.54");
+        println!("\n✓ VERIFIED: Existing order preserved, additional order placed");
+
+        // =====================================================================
+        // SCENARIO 5.3: First order exceeds desired - cancel all, place new
+        // =====================================================================
+        print_separator("6.3: FIFO Overflow - First Order Too Large, Cancel All");
+
+        // Current: 1 order @ 0.54 for 200 (exceeds desired 100)
+        // Desired: 100 @ 0.54
+        // Expected: Cannot fit first order, cancel it and place new 100
+        let input = SolverInput {
+            up_token_id: "up_token".to_string(),
+            down_token_id: "down_token".to_string(),
+            up_orders: OrderSnapshot {
+                bids: vec![
+                    OpenOrder::with_created_at("up-too-large".to_string(), 0.54, 200.0, 200.0, 1000),
+                ],
+                asks: vec![],
+            },
+            down_orders: OrderSnapshot::default(),
+            inventory: InventorySnapshot {
+                up_size: 50.0,
+                up_avg_price: 0.52,
+                down_size: 50.0,
+                down_avg_price: 0.46,
+            },
+            up_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.55, 500.0)),
+                best_bid: Some((0.53, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            down_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.45, 500.0)),
+                best_bid: Some((0.43, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            config: make_config(),
+        };
+
+        print_input(&input);
+        let output = solve(&input);
+        print_output(&input, &output);
+
+        println!("\n--- FIFO ANALYSIS ---");
+        println!("Orders at $0.54:");
+        println!("  1. up-too-large @ 1000 (200 size) -> CANCEL (exceeds desired 100)");
+        println!("Greedy check: 0 + 200 = 200 > 100 + 0.1 tolerance -> Cannot fit");
+        println!("Result: Cancel the order, place new order for 100");
+
+        // Verify behavior
+        assert!(output.cancellations.contains(&"up-too-large".to_string()), "Should cancel oversized order");
+        println!("\n✓ VERIFIED: Oversized order cancelled, new correctly-sized order placed");
+
+        // =====================================================================
+        // SCENARIO 5.4: Keep two oldest out of four
+        // =====================================================================
+        print_separator("6.4: FIFO Keep Two - 4 Orders, Keep 2 Oldest, Cancel 2 Newest");
+
+        // Current: 4 orders @ 0.54 totaling 400 (timestamps 1000, 1001, 1002, 1003)
+        // Desired: 200 @ 0.54
+        // Expected: Keep oldest two (200), cancel newest two
+        let input = SolverInput {
+            up_token_id: "up_token".to_string(),
+            down_token_id: "down_token".to_string(),
+            up_orders: OrderSnapshot {
+                bids: vec![
+                    OpenOrder::with_created_at("up-A".to_string(), 0.54, 100.0, 100.0, 1000), // OLDEST - keep
+                    OpenOrder::with_created_at("up-B".to_string(), 0.54, 100.0, 100.0, 1001), // keep
+                    OpenOrder::with_created_at("up-C".to_string(), 0.54, 100.0, 100.0, 1002), // cancel
+                    OpenOrder::with_created_at("up-D".to_string(), 0.54, 100.0, 100.0, 1003), // NEWEST - cancel
+                ],
+                asks: vec![],
+            },
+            down_orders: OrderSnapshot::default(),
+            inventory: InventorySnapshot {
+                up_size: 50.0,
+                up_avg_price: 0.52,
+                down_size: 50.0,
+                down_avg_price: 0.46,
+            },
+            up_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.55, 500.0)),
+                best_bid: Some((0.53, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            down_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.45, 500.0)),
+                best_bid: Some((0.43, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            config: SolverConfig {
+                order_size: 200.0, // Desired 200 at level 0
+                ..make_config()
+            },
+        };
+
+        print_input(&input);
+        let output = solve(&input);
+        print_output(&input, &output);
+
+        println!("\n--- FIFO ANALYSIS ---");
+        println!("Orders at $0.54 (sorted by created_at):");
+        println!("  1. up-A @ 1000 (100 size) -> KEEP (sum=100 <= 200)");
+        println!("  2. up-B @ 1001 (100 size) -> KEEP (sum=200 <= 200)");
+        println!("  3. up-C @ 1002 (100 size) -> CANCEL (sum=300 > 200)");
+        println!("  4. up-D @ 1003 (100 size) -> CANCEL");
+        println!("Kept sum: 200, Desired: 200, No remainder needed");
+
+        // Verify behavior
+        assert!(!output.cancellations.contains(&"up-A".to_string()), "Should KEEP oldest (A)");
+        assert!(!output.cancellations.contains(&"up-B".to_string()), "Should KEEP second oldest (B)");
+        assert!(output.cancellations.contains(&"up-C".to_string()), "Should cancel third oldest (C)");
+        assert!(output.cancellations.contains(&"up-D".to_string()), "Should cancel newest (D)");
+        println!("\n✓ VERIFIED: Two oldest orders preserved, two newest cancelled");
+
+        // =====================================================================
+        // SCENARIO 5.5: Multiple price levels with different FIFO adjustments
+        // =====================================================================
+        print_separator("6.5: FIFO Multi-Level - Different Adjustments Per Price");
+
+        // UP @ 0.54: decrease from 200 to 100 (keep oldest)
+        // UP @ 0.53: increase from 50 to 100 (keep all, add 50)
+        // DOWN @ 0.44: exact match, no change
+        let input = SolverInput {
+            up_token_id: "up_token".to_string(),
+            down_token_id: "down_token".to_string(),
+            up_orders: OrderSnapshot {
+                bids: vec![
+                    // Level 0.54: 2 orders, need to reduce to 100
+                    OpenOrder::with_created_at("up-54-old".to_string(), 0.54, 100.0, 100.0, 1000), // keep
+                    OpenOrder::with_created_at("up-54-new".to_string(), 0.54, 100.0, 100.0, 1001), // cancel
+                    // Level 0.53: 1 order, need to increase to 100
+                    OpenOrder::with_created_at("up-53-exist".to_string(), 0.53, 50.0, 50.0, 1002), // keep
+                ],
+                asks: vec![],
+            },
+            down_orders: OrderSnapshot {
+                bids: vec![
+                    // Level 0.44: exact match
+                    OpenOrder::with_created_at("down-44".to_string(), 0.44, 100.0, 100.0, 1003),
+                ],
+                asks: vec![],
+            },
+            inventory: InventorySnapshot {
+                up_size: 50.0,
+                up_avg_price: 0.52,
+                down_size: 50.0,
+                down_avg_price: 0.46,
+            },
+            up_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.55, 500.0)),
+                best_bid: Some((0.53, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            down_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.45, 500.0)),
+                best_bid: Some((0.43, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            config: make_config(),
+        };
+
+        print_input(&input);
+        let output = solve(&input);
+        print_output(&input, &output);
+
+        println!("\n--- FIFO ANALYSIS ---");
+        println!("UP @ $0.54 (decrease 200 -> 100):");
+        println!("  up-54-old @ 1000 -> KEEP (100 fits in desired 100)");
+        println!("  up-54-new @ 1001 -> CANCEL (would exceed desired)");
+        println!("UP @ $0.53 (increase 50 -> 100):");
+        println!("  up-53-exist @ 1002 -> KEEP (preserve queue position)");
+        println!("  Need to place additional 50");
+        println!("DOWN @ $0.44 (exact match 100 = 100):");
+        println!("  down-44 @ 1003 -> KEEP (no change needed)");
+
+        // Verify behavior
+        assert!(!output.cancellations.contains(&"up-54-old".to_string()), "Should KEEP older @ 0.54");
+        assert!(output.cancellations.contains(&"up-54-new".to_string()), "Should cancel newer @ 0.54");
+        assert!(!output.cancellations.contains(&"up-53-exist".to_string()), "Should KEEP @ 0.53");
+        assert!(!output.cancellations.contains(&"down-44".to_string()), "Should KEEP @ 0.44");
+        println!("\n✓ VERIFIED: FIFO preservation works across multiple price levels");
+
+        println!("\n{}", "#".repeat(80));
+        println!("# SECTION 6: DELTA IMBALANCE + FIFO PRESERVATION + SKEW-BASED SIZING");
+        println!("{}\n", "#".repeat(80));
+
+        // =====================================================================
+        // SCENARIO 6.1: High UP delta with skew reduces UP size, preserves FIFO
+        // =====================================================================
+        print_separator("7.1: High UP Delta - Skew Reduces UP Size, FIFO Preserves Oldest");
+
+        // Delta = 0.4 (70/30 UP heavy)
+        // Skew factor = 2.0
+        // UP size = 100 * (1 - 0.4 * 2.0) = 100 * 0.2 = 20
+        // DOWN size = 100 * (1 + 0.4 * 2.0) = 100 * 1.8 = 180
+        // Current: 3 UP orders @ 0.52 totaling 300, need to reduce to 20
+        // Expected: FIFO keeps oldest until it fits, cancel the rest
+        let input = SolverInput {
+            up_token_id: "up_token".to_string(),
+            down_token_id: "down_token".to_string(),
+            up_orders: OrderSnapshot {
+                bids: vec![
+                    OpenOrder::with_created_at("up-oldest".to_string(), 0.52, 100.0, 100.0, 1000), // cancel (100 > 20)
+                    OpenOrder::with_created_at("up-middle".to_string(), 0.52, 100.0, 100.0, 1001), // cancel
+                    OpenOrder::with_created_at("up-newest".to_string(), 0.52, 100.0, 100.0, 1002), // cancel
+                ],
+                asks: vec![],
+            },
+            down_orders: OrderSnapshot::default(),
+            inventory: InventorySnapshot {
+                up_size: 70.0,
+                up_avg_price: 0.52,
+                down_size: 30.0,
+                down_avg_price: 0.46,
+            },
+            up_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.55, 500.0)),
+                best_bid: Some((0.53, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            down_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.45, 500.0)),
+                best_bid: Some((0.43, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            config: make_config(),
+        };
+
+        print_input(&input);
+        let output = solve(&input);
+        print_output(&input, &output);
+
+        println!("\n--- SKEW + FIFO ANALYSIS ---");
+        let delta = 0.4;
+        let skew_factor = 2.0;
+        let up_size = 100.0 * (1.0 - delta * skew_factor);
+        let down_size = 100.0 * (1.0 + delta * skew_factor);
+        println!("Delta: {:.2}, Skew factor: {:.1}", delta, skew_factor);
+        println!("Calculated UP size:   {:.1} = 100 * (1 - {:.1} * {:.1})", up_size, delta, skew_factor);
+        println!("Calculated DOWN size: {:.1} = 100 * (1 + {:.1} * {:.1})", down_size, delta, skew_factor);
+        println!("\nFIFO analysis for UP @ target price:");
+        println!("  Desired size: {:.1}", up_size);
+        println!("  Existing orders: 3 x 100 = 300");
+        println!("  First order (100) already exceeds desired ({:.1}) -> cancel all, place new", up_size);
+
+        // =====================================================================
+        // SCENARIO 6.2: High DOWN delta with skew reduces DOWN size, FIFO keeps oldest
+        // =====================================================================
+        print_separator("7.2: High DOWN Delta - Skew Reduces DOWN Size, FIFO Preserves Oldest");
+
+        // Delta = -0.4 (30/70 DOWN heavy)
+        // DOWN size = 100 * (1 + (-0.4) * 2.0) = 100 * 0.2 = 20
+        // UP size = 100 * (1 - (-0.4) * 2.0) = 100 * 1.8 = 180
+        // Current: 3 DOWN orders @ 0.44 totaling 300, need to reduce to 20
+        let input = SolverInput {
+            up_token_id: "up_token".to_string(),
+            down_token_id: "down_token".to_string(),
+            up_orders: OrderSnapshot::default(),
+            down_orders: OrderSnapshot {
+                bids: vec![
+                    OpenOrder::with_created_at("down-oldest".to_string(), 0.44, 100.0, 100.0, 1000),
+                    OpenOrder::with_created_at("down-middle".to_string(), 0.44, 100.0, 100.0, 1001),
+                    OpenOrder::with_created_at("down-newest".to_string(), 0.44, 100.0, 100.0, 1002),
+                ],
+                asks: vec![],
+            },
+            inventory: InventorySnapshot {
+                up_size: 30.0,
+                up_avg_price: 0.52,
+                down_size: 70.0,
+                down_avg_price: 0.46,
+            },
+            up_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.55, 500.0)),
+                best_bid: Some((0.53, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            down_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.45, 500.0)),
+                best_bid: Some((0.43, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            config: make_config(),
+        };
+
+        print_input(&input);
+        let output = solve(&input);
+        print_output(&input, &output);
+
+        println!("\n--- SKEW + FIFO ANALYSIS ---");
+        let delta = -0.4;
+        let down_size = 100.0 * (1.0 + delta * skew_factor);
+        let up_size = 100.0 * (1.0 - delta * skew_factor);
+        println!("Delta: {:.2}, Skew factor: {:.1}", delta, skew_factor);
+        println!("Calculated DOWN size: {:.1} = 100 * (1 + ({:.1}) * {:.1})", down_size, delta, skew_factor);
+        println!("Calculated UP size:   {:.1} = 100 * (1 - ({:.1}) * {:.1})", up_size, delta, skew_factor);
+
+        // =====================================================================
+        // SCENARIO 6.3: Moderate imbalance - skew partially reduces, FIFO keeps some
+        // =====================================================================
+        print_separator("7.3: Moderate UP Delta - Skew Reduces to 60, FIFO Keeps Oldest Order");
+
+        // Delta = 0.2 (60/40 UP)
+        // UP offset = 0.01 * (1 + 0.2 * 5) = 0.02, target = 0.55 - 0.02 = 0.53
+        // UP size = 100 * (1 - 0.2 * 2.0) = 100 * 0.6 = 60
+        // DOWN size = 100 * (1 + 0.2 * 2.0) = 100 * 1.4 = 140
+        // Current: 2 UP orders @ 0.53 (correct price) totaling 100 (50 each), need 60
+        // Expected: Keep oldest (50), cancel newer, place 10 for remainder
+        let input = SolverInput {
+            up_token_id: "up_token".to_string(),
+            down_token_id: "down_token".to_string(),
+            up_orders: OrderSnapshot {
+                bids: vec![
+                    OpenOrder::with_created_at("up-old-50".to_string(), 0.53, 50.0, 50.0, 1000), // keep (50 <= 60)
+                    OpenOrder::with_created_at("up-new-50".to_string(), 0.53, 50.0, 50.0, 1001), // cancel (50+50=100 > 60)
+                ],
+                asks: vec![],
+            },
+            down_orders: OrderSnapshot::default(),
+            inventory: InventorySnapshot {
+                up_size: 60.0,
+                up_avg_price: 0.52,
+                down_size: 40.0,
+                down_avg_price: 0.46,
+            },
+            up_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.55, 500.0)),
+                best_bid: Some((0.53, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            down_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.45, 500.0)),
+                best_bid: Some((0.43, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            config: make_config(),
+        };
+
+        print_input(&input);
+        let output = solve(&input);
+        print_output(&input, &output);
+
+        println!("\n--- SKEW + FIFO ANALYSIS ---");
+        let delta = 0.2;
+        let up_size = 100.0 * (1.0 - delta * skew_factor);
+        println!("Delta: {:.2}, Skew factor: {:.1}", delta, skew_factor);
+        println!("Calculated UP size: {:.1} = 100 * (1 - {:.1} * {:.1})", up_size, delta, skew_factor);
+        println!("\nFIFO analysis for UP @ $0.53:");
+        println!("  Desired size: {:.1}", up_size);
+        println!("  up-old-50 @ 1000: 50 <= {:.1} -> KEEP", up_size);
+        println!("  up-new-50 @ 1001: 50 + 50 = 100 > {:.1} -> CANCEL", up_size);
+        println!("  Kept sum: 50, Desired: {:.1}, Remainder: 10", up_size);
+
+        // Verify
+        assert!(!output.cancellations.contains(&"up-old-50".to_string()), "Should KEEP oldest");
+        assert!(output.cancellations.contains(&"up-new-50".to_string()), "Should cancel newer");
+        println!("\n✓ VERIFIED: FIFO preserved with skew-based size reduction");
+
+        // =====================================================================
+        // SCENARIO 6.4: Skew increases size - FIFO keeps all, adds more
+        // =====================================================================
+        print_separator("7.4: DOWN Delta Increases UP Size - FIFO Keeps All, Adds More");
+
+        // Delta = -0.3 (35/65 DOWN heavy)
+        // UP size = 100 * (1 - (-0.3) * 2.0) = 100 * 1.6 = 160
+        // Current: 2 UP orders @ 0.54 totaling 100, need 160
+        // Expected: Keep all, add 60
+        let input = SolverInput {
+            up_token_id: "up_token".to_string(),
+            down_token_id: "down_token".to_string(),
+            up_orders: OrderSnapshot {
+                bids: vec![
+                    OpenOrder::with_created_at("up-A".to_string(), 0.54, 50.0, 50.0, 1000),
+                    OpenOrder::with_created_at("up-B".to_string(), 0.54, 50.0, 50.0, 1001),
+                ],
+                asks: vec![],
+            },
+            down_orders: OrderSnapshot::default(),
+            inventory: InventorySnapshot {
+                up_size: 35.0,
+                up_avg_price: 0.52,
+                down_size: 65.0,
+                down_avg_price: 0.46,
+            },
+            up_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.55, 500.0)),
+                best_bid: Some((0.53, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            down_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.45, 500.0)),
+                best_bid: Some((0.43, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            config: make_config(),
+        };
+
+        print_input(&input);
+        let output = solve(&input);
+        print_output(&input, &output);
+
+        println!("\n--- SKEW + FIFO ANALYSIS ---");
+        let delta = -0.3;
+        let up_size = 100.0 * (1.0 - delta * skew_factor);
+        println!("Delta: {:.2}, Skew factor: {:.1}", delta, skew_factor);
+        println!("Calculated UP size: {:.1} = 100 * (1 - ({:.1}) * {:.1})", up_size, delta, skew_factor);
+        println!("\nFIFO analysis for UP @ $0.54:");
+        println!("  Desired size: {:.1}", up_size);
+        println!("  Current sum: 100");
+        println!("  Additional needed: {:.1}", up_size - 100.0);
+        println!("  All existing orders preserved (FIFO), new order placed for remainder");
+
+        // Verify no cancellations
+        assert!(!output.cancellations.contains(&"up-A".to_string()), "Should KEEP up-A");
+        assert!(!output.cancellations.contains(&"up-B".to_string()), "Should KEEP up-B");
+        println!("\n✓ VERIFIED: FIFO preserved when skew increases size");
+
+        // =====================================================================
+        // SCENARIO 6.5: Asymmetric skew with multi-level FIFO
+        // =====================================================================
+        print_separator("7.5: Asymmetric Skew - UP Reduced, DOWN Increased, Multi-Level FIFO");
+
+        // Delta = 0.25 (62.5/37.5 UP heavy)
+        // UP size = 100 * (1 - 0.25 * 2.0) = 100 * 0.5 = 50
+        // DOWN size = 100 * (1 + 0.25 * 2.0) = 100 * 1.5 = 150
+        // UP level 0: 3 orders totaling 150, reduce to 50 -> keep oldest, cancel 2
+        // DOWN level 0: 1 order of 80, increase to 150 -> keep, add 70
+        let input = SolverInput {
+            up_token_id: "up_token".to_string(),
+            down_token_id: "down_token".to_string(),
+            up_orders: OrderSnapshot {
+                bids: vec![
+                    OpenOrder::with_created_at("up-L0-old".to_string(), 0.54, 50.0, 50.0, 1000), // keep
+                    OpenOrder::with_created_at("up-L0-mid".to_string(), 0.54, 50.0, 50.0, 1001), // cancel (100 > 50)
+                    OpenOrder::with_created_at("up-L0-new".to_string(), 0.54, 50.0, 50.0, 1002), // cancel
+                    // Level 1 - will also have reduced target
+                    OpenOrder::with_created_at("up-L1-old".to_string(), 0.53, 50.0, 50.0, 1003), // keep
+                    OpenOrder::with_created_at("up-L1-new".to_string(), 0.53, 50.0, 50.0, 1004), // cancel
+                ],
+                asks: vec![],
+            },
+            down_orders: OrderSnapshot {
+                bids: vec![
+                    OpenOrder::with_created_at("down-L0".to_string(), 0.44, 80.0, 80.0, 1005), // keep, add 70
+                ],
+                asks: vec![],
+            },
+            inventory: InventorySnapshot {
+                up_size: 62.5,
+                up_avg_price: 0.52,
+                down_size: 37.5,
+                down_avg_price: 0.46,
+            },
+            up_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.55, 500.0)),
+                best_bid: Some((0.53, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            down_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.45, 500.0)),
+                best_bid: Some((0.43, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            config: make_config(),
+        };
+
+        print_input(&input);
+        let output = solve(&input);
+        print_output(&input, &output);
+
+        println!("\n--- SKEW + FIFO ANALYSIS ---");
+        let delta = 0.25;
+        let up_size = 100.0 * (1.0 - delta * skew_factor);
+        let down_size = 100.0 * (1.0 + delta * skew_factor);
+        println!("Delta: {:.2}, Skew factor: {:.1}", delta, skew_factor);
+        println!("Calculated UP size:   {:.1} (reduced from 100)", up_size);
+        println!("Calculated DOWN size: {:.1} (increased from 100)", down_size);
+        println!("\nUP Level 0 @ $0.54 (reduce 150 -> 50):");
+        println!("  up-L0-old: 50 <= 50 -> KEEP");
+        println!("  up-L0-mid: 50 + 50 = 100 > 50 -> CANCEL");
+        println!("  up-L0-new: CANCEL");
+        println!("\nUP Level 1 @ $0.53 (reduce 100 -> 50):");
+        println!("  up-L1-old: 50 <= 50 -> KEEP");
+        println!("  up-L1-new: 50 + 50 = 100 > 50 -> CANCEL");
+        println!("\nDOWN Level 0 @ $0.44 (increase 80 -> 150):");
+        println!("  down-L0: 80 <= 150 -> KEEP");
+        println!("  Place new order for: {:.1}", down_size - 80.0);
+
+        // =====================================================================
+        // SCENARIO 6.6: Extreme skew with clamping
+        // =====================================================================
+        print_separator("7.6: Extreme Delta - Skew Clamped, Tests Size Limits");
+
+        // Delta = 0.6 (80/20 UP heavy)
+        // UP size = 100 * (1 - 0.6 * 2.0) = 100 * -0.2 = -20 -> clamped to 0
+        // DOWN size = 100 * (1 + 0.6 * 2.0) = 100 * 2.2 = 220 -> clamped to 300 (3x)
+        // This tests the clamping behavior
+        let input = SolverInput {
+            up_token_id: "up_token".to_string(),
+            down_token_id: "down_token".to_string(),
+            up_orders: OrderSnapshot {
+                bids: vec![
+                    OpenOrder::with_created_at("up-cancel-all".to_string(), 0.52, 100.0, 100.0, 1000),
+                ],
+                asks: vec![],
+            },
+            down_orders: OrderSnapshot {
+                bids: vec![
+                    OpenOrder::with_created_at("down-keep".to_string(), 0.44, 100.0, 100.0, 1001),
+                ],
+                asks: vec![],
+            },
+            inventory: InventorySnapshot {
+                up_size: 80.0,
+                up_avg_price: 0.52,
+                down_size: 20.0,
+                down_avg_price: 0.46,
+            },
+            up_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.55, 500.0)),
+                best_bid: Some((0.53, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            down_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.45, 500.0)),
+                best_bid: Some((0.43, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            config: make_config(),
+        };
+
+        print_input(&input);
+        let output = solve(&input);
+        print_output(&input, &output);
+
+        println!("\n--- SKEW CLAMPING ANALYSIS ---");
+        let delta: f64 = 0.6;
+        let raw_up_size: f64 = 100.0 * (1.0 - delta * skew_factor);
+        let raw_down_size: f64 = 100.0 * (1.0 + delta * skew_factor);
+        let clamped_up = raw_up_size.clamp(0.0, 300.0);
+        let clamped_down = raw_down_size.clamp(0.0, 300.0);
+        println!("Delta: {:.2}, Skew factor: {:.1}", delta, skew_factor);
+        println!("Raw UP size:     {:.1} (before clamp)", raw_up_size);
+        println!("Clamped UP size: {:.1} (after clamp to [0, 300])", clamped_up);
+        println!("Raw DOWN size:     {:.1} (before clamp)", raw_down_size);
+        println!("Clamped DOWN size: {:.1} (after clamp to [0, 300])", clamped_down);
+        println!("\nNote: At delta >= max_imbalance (0.8), UP quoting stops entirely");
+
+        // =====================================================================
+        // SCENARIO 6.7: Delta flips direction - orders need repositioning + size change
+        // =====================================================================
+        print_separator("7.7: Delta Flip - Was DOWN Heavy, Now UP Heavy, Combined Offset+Skew");
+
+        // Previously was DOWN heavy (delta=-0.3), had UP orders with larger size
+        // Now UP heavy (delta=0.3), UP offset increases AND UP size decreases
+        // This tests that both offset and size adjustments work together with FIFO
+        let input = SolverInput {
+            up_token_id: "up_token".to_string(),
+            down_token_id: "down_token".to_string(),
+            up_orders: OrderSnapshot {
+                bids: vec![
+                    // These were placed when delta=-0.3, UP offset was lower (0.01)
+                    // Now delta=0.3, UP offset is 0.01 * (1 + 0.3 * 5) = 0.025
+                    // Old target was 0.54, new target is 0.55 - 0.025 = 0.525
+                    // Also, old size was 160 (1.6x), new size is 40 (0.4x)
+                    OpenOrder::with_created_at("up-old-price".to_string(), 0.54, 80.0, 80.0, 1000), // wrong price
+                    OpenOrder::with_created_at("up-old-price2".to_string(), 0.54, 80.0, 80.0, 1001), // wrong price
+                ],
+                asks: vec![],
+            },
+            down_orders: OrderSnapshot {
+                bids: vec![
+                    // DOWN was at reduced size (40), now at increased size (160)
+                    OpenOrder::with_created_at("down-small".to_string(), 0.44, 40.0, 40.0, 1002),
+                ],
+                asks: vec![],
+            },
+            inventory: InventorySnapshot {
+                up_size: 65.0,
+                up_avg_price: 0.52,
+                down_size: 35.0,
+                down_avg_price: 0.46,
+            },
+            up_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.55, 500.0)),
+                best_bid: Some((0.53, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            down_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.45, 500.0)),
+                best_bid: Some((0.43, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            config: make_config(),
+        };
+
+        print_input(&input);
+        let output = solve(&input);
+        print_output(&input, &output);
+
+        println!("\n--- DELTA FLIP ANALYSIS ---");
+        let delta = 0.3;
+        let offset_scaling = 5.0;
+        let up_offset = 0.01 * (1.0 + delta * offset_scaling);
+        let up_size = 100.0 * (1.0 - delta * skew_factor);
+        let down_size = 100.0 * (1.0 + delta * skew_factor);
+        println!("Current delta: {:.2}", delta);
+        println!("UP offset:  ${:.4} (base $0.01 * {:.2})", up_offset, 1.0 + delta * offset_scaling);
+        println!("UP size:    {:.1} (base 100 * {:.2})", up_size, 1.0 - delta * skew_factor);
+        println!("DOWN size:  {:.1} (base 100 * {:.2})", down_size, 1.0 + delta * skew_factor);
+        println!("\nExisting UP orders at $0.54 are at WRONG PRICE (new target: ${:.2})", 0.55 - up_offset);
+        println!("  -> Cancel all, place new orders at correct price with reduced size");
+        println!("Existing DOWN order (40) is SMALLER than new target ({:.1})", down_size);
+        println!("  -> Keep (FIFO), add {:.1} more", down_size - 40.0);
+
+        // =====================================================================
+        // SCENARIO 6.8: Small orders fitting under skewed target
+        // =====================================================================
+        print_separator("7.8: Small FIFO Orders - Multiple Fit Under Skewed Target");
+
+        // Delta = 0.15 (57.5/42.5 UP)
+        // UP offset = 0.01 * (1 + 0.15 * 5) = 0.0175, target = 0.55 - 0.0175 = 0.53 (floored)
+        // UP size = 100 * (1 - 0.15 * 2.0) = 100 * 0.7 = 70
+        // Current: 4 small UP orders @ 0.53 (20 each = 80), need 70
+        // Expected: Keep first 3 (60), cancel 4th, place 10 for remainder
+        let input = SolverInput {
+            up_token_id: "up_token".to_string(),
+            down_token_id: "down_token".to_string(),
+            up_orders: OrderSnapshot {
+                bids: vec![
+                    OpenOrder::with_created_at("up-20-A".to_string(), 0.53, 20.0, 20.0, 1000), // keep (20 <= 70)
+                    OpenOrder::with_created_at("up-20-B".to_string(), 0.53, 20.0, 20.0, 1001), // keep (40 <= 70)
+                    OpenOrder::with_created_at("up-20-C".to_string(), 0.53, 20.0, 20.0, 1002), // keep (60 <= 70)
+                    OpenOrder::with_created_at("up-20-D".to_string(), 0.53, 20.0, 20.0, 1003), // cancel (80 > 70)
+                ],
+                asks: vec![],
+            },
+            down_orders: OrderSnapshot::default(),
+            inventory: InventorySnapshot {
+                up_size: 57.5,
+                up_avg_price: 0.52,
+                down_size: 42.5,
+                down_avg_price: 0.46,
+            },
+            up_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.55, 500.0)),
+                best_bid: Some((0.53, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            down_orderbook: OrderbookSnapshot {
+                best_ask: Some((0.45, 500.0)),
+                best_bid: Some((0.43, 200.0)),
+                best_bid_is_ours: false,
+                best_ask_is_ours: false,
+            },
+            config: make_config(),
+        };
+
+        print_input(&input);
+        let output = solve(&input);
+        print_output(&input, &output);
+
+        println!("\n--- SKEW + FIFO ANALYSIS ---");
+        let delta = 0.15;
+        let up_size = 100.0 * (1.0 - delta * skew_factor);
+        println!("Delta: {:.2}, Skew factor: {:.1}", delta, skew_factor);
+        println!("Calculated UP size: {:.1} = 100 * (1 - {:.2} * {:.1})", up_size, delta, skew_factor);
+        println!("\nFIFO greedy accumulation:");
+        println!("  up-20-A @ 1000: sum = 20 <= {:.1} -> KEEP", up_size);
+        println!("  up-20-B @ 1001: sum = 40 <= {:.1} -> KEEP", up_size);
+        println!("  up-20-C @ 1002: sum = 60 <= {:.1} -> KEEP", up_size);
+        println!("  up-20-D @ 1003: sum = 80 > {:.1} -> CANCEL", up_size);
+        println!("Kept: 60, Desired: {:.1}, Remainder: 10", up_size);
+
+        // Verify
+        assert!(!output.cancellations.contains(&"up-20-A".to_string()), "Keep A");
+        assert!(!output.cancellations.contains(&"up-20-B".to_string()), "Keep B");
+        assert!(!output.cancellations.contains(&"up-20-C".to_string()), "Keep C");
+        assert!(output.cancellations.contains(&"up-20-D".to_string()), "Cancel D");
+        println!("\n✓ VERIFIED: 3 oldest orders preserved, newest cancelled, remainder placed");
 
         println!("\n{}", "=".repeat(80));
         println!("  END OF VISUAL TESTS");

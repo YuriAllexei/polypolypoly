@@ -1,14 +1,14 @@
 //! Command types for the Executor.
 
 use crate::application::strategies::inventory_mm::types::{
-    SolverOutput, LimitOrder, TakerOrder,
+    SolverOutput, LimitOrder,
 };
 
 /// Commands sent to the Executor thread via channel
 #[derive(Debug, Clone)]
 pub enum ExecutorCommand {
     /// Execute a full solver output (batch of actions)
-    /// This is the primary command - contains cancellations, limit orders, taker orders
+    /// This is the primary command - contains cancellations and limit orders
     ExecuteBatch(SolverOutput),
 
     /// Cancel specific orders by ID
@@ -22,9 +22,6 @@ pub enum ExecutorCommand {
 
     /// Place a single limit order
     PlaceLimit(LimitOrder),
-
-    /// Execute a taker order (FOK)
-    ExecuteTaker(TakerOrder),
 
     /// Execute a merge (convert YES+NO tokens to USDC)
     Merge { condition_id: String, amount: f64 },
@@ -47,7 +44,6 @@ impl ExecutorCommand {
             ExecutorCommand::CancelAllForToken(_) => "CancelAllForToken",
             ExecutorCommand::CancelAll => "CancelAll",
             ExecutorCommand::PlaceLimit(_) => "PlaceLimit",
-            ExecutorCommand::ExecuteTaker(_) => "ExecuteTaker",
             ExecutorCommand::Merge { .. } => "Merge",
             ExecutorCommand::Shutdown => "Shutdown",
         }

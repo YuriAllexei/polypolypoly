@@ -105,3 +105,16 @@ inventory_mm:
     min_profit_margin: 0.01
     # Maximum combined avg cost (1.0 - min_profit_margin)
     max_combined_cost: 0.99
+
+  # === Taker (Immediate FOK Execution) ===
+  taker:
+    # Enable/disable taker functionality
+    enabled: true
+    # Tick interval for checking opportunities (milliseconds)
+    tick_interval_ms: 100
+    # Minimum delta threshold to trigger (0.1 = 10% imbalance)
+    min_delta_threshold: 0.1
+    # Maximum size per taker order
+    max_take_size: 100.0
+    # Minimum size per taker order
+    min_take_size: 1.0

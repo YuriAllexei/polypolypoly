@@ -76,36 +76,6 @@ impl LimitOrder {
     }
 }
 
-/// A taker order (FOK - Fill Or Kill)
-/// Used for rebalancing when there's liquidity to take
-#[derive(Debug, Clone)]
-pub struct TakerOrder {
-    pub token_id: String,
-    /// Price we're willing to pay (should be at or above best ask)
-    pub price: f64,
-    pub size: f64,
-    pub side: Side,
-    /// Score for prioritization (higher = better opportunity)
-    pub score: f64,
-}
-
-impl TakerOrder {
-    pub fn new(token_id: String, price: f64, size: f64, side: Side, score: f64) -> Self {
-        Self {
-            token_id,
-            price,
-            size,
-            side,
-            score,
-        }
-    }
-
-    /// Create a taker BUY order (taking from asks)
-    pub fn buy(token_id: String, price: f64, size: f64, score: f64) -> Self {
-        Self::new(token_id, price, size, Side::Buy, score)
-    }
-}
-
 /// Quote ladder for both sides
 #[derive(Debug, Clone, Default)]
 pub struct QuoteLadder {

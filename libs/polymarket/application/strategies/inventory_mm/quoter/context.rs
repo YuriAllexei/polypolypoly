@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 
 use crate::application::strategies::inventory_mm::components::QuoterExecutorHandle;
 use crate::infrastructure::{SharedOrderState, SharedPositionTracker};
+use crate::infrastructure::client::clob::TradingClient;
 
 /// Information about a specific market that a Quoter is managing.
 #[derive(Debug, Clone)]
@@ -64,6 +65,8 @@ impl MarketInfo {
 pub struct QuoterContext {
     /// Executor handle for sending order commands
     pub executor: QuoterExecutorHandle,
+    /// Trading client for direct FOK execution (used by TakerTask)
+    pub trading: Arc<TradingClient>,
     /// Shared order state from user WebSocket
     pub order_state: SharedOrderState,
     /// Shared position tracker
@@ -75,12 +78,14 @@ pub struct QuoterContext {
 impl QuoterContext {
     pub fn new(
         executor: QuoterExecutorHandle,
+        trading: Arc<TradingClient>,
         order_state: SharedOrderState,
         position_tracker: SharedPositionTracker,
         shutdown_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
             executor,
+            trading,
             order_state,
             position_tracker,
             shutdown_flag,
