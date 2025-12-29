@@ -2,9 +2,10 @@
 
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 use crossbeam_channel::{unbounded, Sender, Receiver};
 use tokio::runtime::Runtime;
-use tracing::{info, error, debug};
+use tracing::{info, warn, error, debug};
 
 use super::commands::{ExecutorCommand, ExecutorResult};
 use crate::application::strategies::inventory_mm::types::{SolverOutput, LimitOrder, Side};
@@ -111,13 +112,23 @@ impl ExecutorHandle {
         self.send(ExecutorCommand::Merge { condition_id, amount })
     }
 
-    /// Shutdown the executor gracefully
+    /// Shutdown the executor gracefully with timeout
     pub fn shutdown(mut self) -> Result<(), ExecutorError> {
-        // Send shutdown command
         let _ = self.send(ExecutorCommand::Shutdown);
 
-        // Wait for thread to finish
         if let Some(handle) = self.thread_handle.take() {
+            let timeout = Duration::from_secs(10);
+            let start = Instant::now();
+
+            // Poll for thread completion with timeout
+            while !handle.is_finished() {
+                if start.elapsed() > timeout {
+                    warn!("[Executor] Shutdown timeout after 10s, thread still running");
+                    return Err(ExecutorError::ShutdownTimeout);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+
             handle.join().map_err(|_| ExecutorError::ThreadPanic)?;
         }
 
@@ -370,6 +381,8 @@ pub enum ExecutorError {
     ChannelClosed,
     /// Executor thread panicked
     ThreadPanic,
+    /// Shutdown timed out
+    ShutdownTimeout,
     /// Trading client error
     TradingError(String),
 }
@@ -379,6 +392,7 @@ impl std::fmt::Display for ExecutorError {
         match self {
             ExecutorError::ChannelClosed => write!(f, "Executor channel closed"),
             ExecutorError::ThreadPanic => write!(f, "Executor thread panicked"),
+            ExecutorError::ShutdownTimeout => write!(f, "Executor shutdown timed out"),
             ExecutorError::TradingError(e) => write!(f, "Trading error: {}", e),
         }
     }

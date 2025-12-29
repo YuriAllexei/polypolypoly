@@ -1,6 +1,6 @@
 services:
   polymarket-events:
-    profiles: ["events", "strategies", "sports-sniping", "up-or-down"]
+    profiles: ["events", "strategies", "sports-sniping", "up-or-down", "inventory-mm"]
     build: .
     container_name: polymarket-events
     restart: unless-stopped
@@ -54,6 +54,27 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - STRATEGY_NAME=sports_sniping
+      - STRATEGIES_CONFIG_PATH=${STRATEGIES_CONFIG_PATH:-/etc/polymarket/strategies_config.yaml}
+    volumes:
+      - ./config/strategies_config.yaml:/etc/polymarket/strategies_config.yaml
+
+  # Strategy runner - Inventory MM
+  sniper-inventory-mm:
+    profiles: ["strategies", "inventory-mm"]
+    build: .
+    container_name: sniper-inventory-mm
+    restart: unless-stopped
+    command: [ "./sniper" ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      polymarket-events:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - STRATEGY_NAME=inventory_mm
       - STRATEGIES_CONFIG_PATH=${STRATEGIES_CONFIG_PATH:-/etc/polymarket/strategies_config.yaml}
     volumes:
       - ./config/strategies_config.yaml:/etc/polymarket/strategies_config.yaml

@@ -129,6 +129,13 @@ impl Quoter {
 
         // Main tick loop
         while self.ctx.is_running() && !self.market.is_expired() {
+            // Skip tick if WebSocket disconnected (stale orderbook data)
+            if !ws_client.is_connected() {
+                warn!("[Quoter:{}] WebSocket disconnected, pausing ticks", market_desc);
+                tokio::time::sleep(tick_duration).await;
+                continue;
+            }
+
             let tick_start = Instant::now();
 
             // Build input from shared state
