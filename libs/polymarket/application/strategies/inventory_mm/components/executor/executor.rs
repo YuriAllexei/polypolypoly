@@ -316,12 +316,46 @@ impl Executor {
             Ok(response) => {
                 result.cancelled_count = response.canceled.len();
                 result.cancelled_ids = response.canceled;
+
+                // Process not_canceled: distinguish between "order gone" (success) vs real errors
+                // "Order gone" means the order is already off the book - that's what we wanted!
                 if !response.not_canceled.is_empty() {
+                    let mut real_errors = 0;
                     for (id, reason) in response.not_canceled {
-                        result.add_error("cancel", format!("{}: {}", id, reason));
+                        let reason_lower = reason.to_lowercase();
+
+                        // These are SUCCESS conditions - order is gone from the book
+                        if reason_lower.contains("matched")
+                            || reason_lower.contains("already canceled")
+                            || reason_lower.contains("can't be found")
+                            || reason_lower.contains("not found")
+                        {
+                            // Order is effectively cancelled (no longer on book)
+                            debug!(
+                                "[Executor] Order {} already gone: {}",
+                                &id[..16.min(id.len())], reason
+                            );
+                            // Count as effectively cancelled
+                            result.cancelled_count += 1;
+                            result.cancelled_ids.push(id);
+                        } else {
+                            // Real error - log and track
+                            real_errors += 1;
+                            result.add_error("cancel", format!("{}: {}", id, reason));
+                            warn!(
+                                "[Executor] Cancel error for {}: {}",
+                                &id[..16.min(id.len())], reason
+                            );
+                        }
+                    }
+                    if real_errors > 0 {
+                        warn!("[Executor] {} cancel requests had real errors", real_errors);
                     }
                 }
-                info!("[Executor] Cancelled {} orders", result.cancelled_count);
+
+                if result.cancelled_count > 0 {
+                    info!("[Executor] Cancelled {} orders", result.cancelled_count);
+                }
             }
             Err(e) => {
                 result.add_error("cancel_orders", e.to_string());
@@ -332,44 +366,64 @@ impl Executor {
         result
     }
 
-    /// Execute batch limit orders
+    /// Execute limit orders individually (more reliable than batch)
     fn execute_limits(&self, orders: &[LimitOrder]) -> ExecutorResult {
         let mut result = ExecutorResult::new();
         if orders.is_empty() {
             return result;
         }
 
-        debug!("[Executor] Placing {} limit orders", orders.len());
+        debug!("[Executor] Placing {} limit orders individually", orders.len());
 
-        // Convert to TradingClient format
-        let batch: Vec<_> = orders.iter()
-            .map(|o| (
-                o.token_id.clone(),
-                o.price,
-                o.size,
-                match o.side {
-                    Side::Buy => TradingSide::Buy,
-                    Side::Sell => TradingSide::Sell,
-                },
-                OrderType::GTC,
-            ))
-            .collect();
+        // Place each order individually for reliability
+        for order in orders {
+            let token_short = &order.token_id[..8.min(order.token_id.len())];
 
-        match self.runtime.block_on(self.trading.place_batch_orders(batch, None)) {
-            Ok(batch_result) => {
-                result.placed_count = batch_result.success_count();
-                result.placed_ids = batch_result.order_ids();
-                for (token_id, msg) in batch_result.error_messages() {
-                    result.add_error("place_limit", format!("{}: {}", token_id, msg));
+            info!(
+                "[Executor] Placing: {} @ ${:.2} for {:.1} shares",
+                token_short, order.price, order.size
+            );
+
+            let place_result = match order.side {
+                Side::Buy => self.runtime.block_on(
+                    self.trading.buy(&order.token_id, order.price, order.size)
+                ),
+                Side::Sell => self.runtime.block_on(
+                    self.trading.sell(&order.token_id, order.price, order.size)
+                ),
+            };
+
+            match place_result {
+                Ok(response) => {
+                    if response.success {
+                        result.placed_count += 1;
+                        if let Some(ref order_id) = response.order_id {
+                            result.placed_ids.push(order_id.clone());
+                        }
+                        info!(
+                            "[Executor] ✓ Placed {} @ ${:.2} → {:?}",
+                            token_short, order.price, response.status
+                        );
+                    } else {
+                        let err_msg = response.error_msg.unwrap_or_else(|| "Unknown error".to_string());
+                        result.add_error("place_limit", format!("{}: {}", token_short, err_msg));
+                        warn!(
+                            "[Executor] ✗ Failed {} @ ${:.2}: {}",
+                            token_short, order.price, err_msg
+                        );
+                    }
                 }
-                info!("[Executor] Placed {} limit orders", result.placed_count);
-            }
-            Err(e) => {
-                result.add_error("place_batch", e.to_string());
-                error!("[Executor] Batch placement failed: {}", e);
+                Err(e) => {
+                    result.add_error("place_limit", format!("{}: {}", token_short, e));
+                    error!(
+                        "[Executor] ✗ Error placing {} @ ${:.2}: {}",
+                        token_short, order.price, e
+                    );
+                }
             }
         }
 
+        info!("[Executor] Placed {}/{} orders", result.placed_count, orders.len());
         result
     }
 }

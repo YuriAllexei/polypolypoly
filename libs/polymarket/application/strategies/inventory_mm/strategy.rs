@@ -100,11 +100,28 @@ impl InventoryMMStrategy {
         let markets = ctx.database.get_sliding_window_markets(MAX_MARKETS_PER_CATEGORY).await?;
 
         let mut result = Vec::new();
+        // Pre-populate counts with already-tracked markets
         let mut counts: HashMap<(String, String), usize> = HashMap::new();
 
         for market in markets {
-            // Skip if already tracked
+            // Parse tags to get symbol/timeframe for counting
+            let tags_str = match &market.tags {
+                Some(t) => t.as_str(),
+                None => continue,
+            };
+            let tags: Vec<serde_json::Value> = match serde_json::from_str(tags_str) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let (symbol, timeframe) = match extract_symbol_timeframe(&tags) {
+                Some(st) => st,
+                None => continue,
+            };
+
+            // Skip if already tracked, but COUNT it toward the category limit
             if self.tracked_markets.contains(&market.id) {
+                let key = (symbol.to_uppercase(), timeframe.to_uppercase());
+                *counts.entry(key).or_insert(0) += 1;
                 continue;
             }
 
@@ -123,25 +140,55 @@ impl InventoryMMStrategy {
                 continue;
             }
 
+            // Parse outcomes to correctly map UP/DOWN tokens
+            // CRITICAL: Polymarket does NOT guarantee token order - must check outcomes!
+            let outcomes: Vec<String> = match market.parse_outcomes() {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            if outcomes.len() < 2 {
+                continue;
+            }
+
+            // Find which index corresponds to "Up" outcome (case insensitive)
+            let up_idx = match outcomes.iter().position(|o| o.eq_ignore_ascii_case("up")) {
+                Some(idx) => idx,
+                None => {
+                    warn!(
+                        "[InventoryMM] Market {} has no 'Up' outcome, skipping. outcomes: {:?}",
+                        market.id, outcomes
+                    );
+                    continue;
+                }
+            };
+
+            // Verify "Down" exists at the other index
+            let down_idx = if up_idx == 0 { 1 } else { 0 };
+            if !outcomes[down_idx].eq_ignore_ascii_case("down") {
+                warn!(
+                    "[InventoryMM] Market {} unexpected outcome at idx {}: '{}', expected 'Down'. Skipping.",
+                    market.id, down_idx, outcomes[down_idx]
+                );
+                continue;
+            }
+
+            let up_token_id = token_ids[up_idx].clone();
+            let down_token_id = token_ids[down_idx].clone();
+
+            info!(
+                "[InventoryMM] Token mapping for {}: outcomes={:?}, UP={} (idx {}), DOWN={} (idx {})",
+                market.id,
+                outcomes,
+                &up_token_id[..8.min(up_token_id.len())],
+                up_idx,
+                &down_token_id[..8.min(down_token_id.len())],
+                down_idx
+            );
+
             // Get condition_id (required for merging)
             let condition_id = match &market.condition_id {
                 Some(cid) if !cid.is_empty() => cid.clone(),
                 _ => continue,
-            };
-
-            // Extract symbol and timeframe from tags
-            let tags_str = match &market.tags {
-                Some(t) => t.as_str(),
-                None => continue,
-            };
-            let tags: Vec<serde_json::Value> = match serde_json::from_str(tags_str) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-
-            let (symbol, timeframe) = match extract_symbol_timeframe(&tags) {
-                Some(st) => st,
-                None => continue,
             };
 
             // Check if this (symbol, timeframe) is in our config
@@ -154,6 +201,10 @@ impl InventoryMMStrategy {
             let count = counts.entry(key.clone()).or_insert(0);
             let max_count = self.config.get_count(&symbol, &timeframe).unwrap_or(3);
             if *count >= max_count {
+                debug!(
+                    "[InventoryMM] Skipping {} {} ({}): already have {}/{} quoters",
+                    symbol, timeframe, market.id, *count, max_count
+                );
                 continue;
             }
             *count += 1;
@@ -161,8 +212,8 @@ impl InventoryMMStrategy {
             result.push(MarketInfo::new(
                 market.id.clone(),
                 condition_id,
-                token_ids[0].clone(),
-                token_ids[1].clone(),
+                up_token_id,
+                down_token_id,
                 end_date,
                 symbol,
                 timeframe,

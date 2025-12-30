@@ -19,7 +19,7 @@ impl RestClient {
         let url = format!("{}/order", self.base_url);
         let timestamp = PolymarketAuth::current_timestamp();
 
-        info!("🗑️ Canceling order {}", order_id);
+        debug!("🗑️ Canceling order {}", order_id);
 
         let body_json = json!({ "orderID": order_id });
         let body = serde_json::to_string(&body_json)
@@ -46,7 +46,7 @@ impl RestClient {
         let url = format!("{}/orders", self.base_url);
         let timestamp = PolymarketAuth::current_timestamp();
 
-        info!("🗑️ Canceling {} orders", order_ids.len());
+        debug!("🗑️ Canceling {} orders", order_ids.len());
 
         let body = serde_json::to_string(order_ids)
             .map_err(|e| RestError::ApiError(e.to_string()))?;
@@ -61,7 +61,7 @@ impl RestClient {
         let url = format!("{}/cancel-all", self.base_url);
         let timestamp = PolymarketAuth::current_timestamp();
 
-        info!("🗑️ Canceling all orders");
+        debug!("🗑️ Canceling all orders");
 
         let headers = auth.l2_headers(timestamp, "DELETE", "/cancel-all", "")?;
 
@@ -104,7 +104,7 @@ impl RestClient {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         std::thread::spawn(move || {
-            info!("⏳ [Cancel thread] Starting DELETE request to {}", url);
+            debug!("⏳ [Cancel thread] Starting DELETE request to {}", url);
             let thread_start = Instant::now();
 
             let result = (|| -> std::result::Result<CancelResponse, String> {
@@ -133,7 +133,7 @@ impl RestClient {
                 let response_body = response.into_string()
                     .map_err(|e| format!("Failed to read response: {}", e))?;
 
-                info!("📥 [Cancel thread] Got response: status={}, body_len={}", status, response_body.len());
+                debug!("📥 [Cancel thread] Got response: status={}, body_len={}", status, response_body.len());
 
                 if status == 200 || status == 201 {
                     serde_json::from_str(&response_body)
@@ -143,7 +143,7 @@ impl RestClient {
                 }
             })();
 
-            info!("📥 [Cancel thread] DELETE completed in {:?}", thread_start.elapsed());
+            debug!("📥 [Cancel thread] DELETE completed in {:?}", thread_start.elapsed());
 
             let _ = tx.send(result);
         });
@@ -155,7 +155,7 @@ impl RestClient {
 
         match result {
             Ok(response) => {
-                info!("✅ Cancel request successful in {:?}", elapsed);
+                debug!("✅ Cancel request successful in {:?}", elapsed);
                 Ok(response)
             }
             Err(e) => {

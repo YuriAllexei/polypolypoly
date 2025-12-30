@@ -17,6 +17,9 @@ pub struct TakerConfig {
     pub max_take_size: f64,
     /// Minimum size per taker order (orders below this are skipped)
     pub min_take_size: f64,
+    /// Maximum combined average cost for profitability (e.g., 0.99 = require 1% profit)
+    /// Trades with combined_avg >= this value will be rejected
+    pub max_combined_avg: f64,
 }
 
 impl Default for TakerConfig {
@@ -27,6 +30,7 @@ impl Default for TakerConfig {
             min_delta_threshold: 0.1,
             max_take_size: 100.0,
             min_take_size: 1.0,
+            max_combined_avg: 0.99, // Require at least 1% profit margin
         }
     }
 }

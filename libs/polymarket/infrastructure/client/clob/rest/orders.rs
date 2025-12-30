@@ -106,7 +106,7 @@ impl RestClient {
         let timestamp = PolymarketAuth::current_timestamp();
         let nonce = 0u64;
 
-        info!(
+        debug!(
             "Building signed order: token={}, price={}, size={}, side={:?}",
             token_id, price, size, side
         );
@@ -140,9 +140,9 @@ impl RestClient {
 
         let headers = auth.l2_headers(timestamp, "POST", "/order", &body)?;
 
-        info!("📤 SENDING ORDER REQUEST");
-        info!("   URL: {}", url);
-        info!("   Body length: {} bytes", body.len());
+        debug!("📤 SENDING ORDER REQUEST");
+        debug!("   URL: {}", url);
+        debug!("   Body length: {} bytes", body.len());
         debug!("   Full body: {}", body);
 
         let start = Instant::now();
@@ -154,7 +154,7 @@ impl RestClient {
         let headers_clone = headers.clone();
 
         std::thread::spawn(move || {
-            info!("⏳ [Dedicated thread] Starting HTTP request...");
+            debug!("⏳ [Dedicated thread] Starting HTTP request...");
             let thread_start = Instant::now();
 
             // Use ureq (blocking HTTP client) in dedicated thread
@@ -168,7 +168,7 @@ impl RestClient {
                     request = request.set(key, value);
                 }
 
-                info!("⏳ [Dedicated thread] Sending request...");
+                debug!("⏳ [Dedicated thread] Sending request...");
 
                 let response = request
                     .timeout(std::time::Duration::from_secs(15))
@@ -179,7 +179,7 @@ impl RestClient {
                 let response_body = response.into_string()
                     .map_err(|e| format!("Failed to read response: {}", e))?;
 
-                info!("📥 [Dedicated thread] Got response: status={}, body_len={}", status, response_body.len());
+                debug!("📥 [Dedicated thread] Got response: status={}, body_len={}", status, response_body.len());
 
                 if status == 200 || status == 201 {
                     serde_json::from_str(&response_body)
@@ -189,7 +189,7 @@ impl RestClient {
                 }
             })();
 
-            info!("📥 [Dedicated thread] HTTP completed in {:?}", thread_start.elapsed());
+            debug!("📥 [Dedicated thread] HTTP completed in {:?}", thread_start.elapsed());
 
             // Send result back to async context
             let _ = tx.send(result);
@@ -203,7 +203,7 @@ impl RestClient {
 
         match result {
             Ok(response) => {
-                info!("✅ Order request successful in {:?}", elapsed);
+                debug!("✅ Order request successful in {:?}", elapsed);
                 Ok(response)
             }
             Err(e) => {
@@ -232,9 +232,9 @@ impl RestClient {
 
         let headers = auth.l2_headers(timestamp, "POST", "/orders", &body)?;
 
-        info!("📤 SENDING BATCH ORDER REQUEST ({} orders)", signed_orders.len());
-        info!("   URL: {}", url);
-        info!("   Body length: {} bytes", body.len());
+        debug!("📤 SENDING BATCH ORDER REQUEST ({} orders)", signed_orders.len());
+        debug!("   URL: {}", url);
+        debug!("   Body length: {} bytes", body.len());
         debug!("   Full body: {}", body);
 
         let start = Instant::now();
@@ -243,7 +243,7 @@ impl RestClient {
         let headers_clone = headers.clone();
 
         std::thread::spawn(move || {
-            info!("⏳ [Dedicated thread] Starting batch HTTP request...");
+            debug!("⏳ [Dedicated thread] Starting batch HTTP request...");
             let thread_start = Instant::now();
 
             let result = (|| -> std::result::Result<Vec<OrderPlacementResponse>, String> {
@@ -256,7 +256,7 @@ impl RestClient {
                     request = request.set(key, value);
                 }
 
-                info!("⏳ [Dedicated thread] Sending batch request...");
+                debug!("⏳ [Dedicated thread] Sending batch request...");
 
                 let response = request
                     .timeout(std::time::Duration::from_secs(30))
@@ -267,7 +267,7 @@ impl RestClient {
                 let response_body = response.into_string()
                     .map_err(|e| format!("Failed to read response: {}", e))?;
 
-                info!("📥 [Dedicated thread] Got response: status={}, body_len={}", status, response_body.len());
+                debug!("📥 [Dedicated thread] Got response: status={}, body_len={}", status, response_body.len());
 
                 if status == 200 || status == 201 {
                     serde_json::from_str(&response_body)
@@ -277,7 +277,7 @@ impl RestClient {
                 }
             })();
 
-            info!("📥 [Dedicated thread] Batch HTTP completed in {:?}", thread_start.elapsed());
+            debug!("📥 [Dedicated thread] Batch HTTP completed in {:?}", thread_start.elapsed());
             let _ = tx.send(result);
         });
 
@@ -288,7 +288,7 @@ impl RestClient {
 
         match result {
             Ok(responses) => {
-                info!("✅ Batch order request successful in {:?} ({} orders)", elapsed, responses.len());
+                debug!("✅ Batch order request successful in {:?} ({} orders)", elapsed, responses.len());
                 Ok(responses)
             }
             Err(e) => {
@@ -318,9 +318,10 @@ impl RestClient {
 
         let timestamp = PolymarketAuth::current_timestamp();
 
-        let mut nonce = self.get_nonce(auth).await?;
+        // Nonce starts at 0 for each batch (client-managed, not fetched from server)
+        let mut nonce = 0u64;
 
-        info!("Building batch of {} orders, starting nonce={}", orders.len(), nonce);
+        debug!("Building batch of {} orders, starting nonce={}", orders.len(), nonce);
 
         let mut signed_orders: Vec<(SignedOrder, OrderType)> = Vec::with_capacity(orders.len());
 

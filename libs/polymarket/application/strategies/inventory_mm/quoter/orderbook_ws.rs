@@ -284,7 +284,7 @@ pub async fn wait_for_snapshot(
     let start = std::time::Instant::now();
 
     while !ws_client.has_snapshot() {
-        if shutdown_flag.load(Ordering::Acquire) {
+        if !shutdown_flag.load(Ordering::Acquire) {
             info!("[QuoterWS {}] Shutdown during snapshot wait", market_id);
             return false;
         }

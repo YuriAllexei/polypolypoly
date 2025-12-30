@@ -65,7 +65,7 @@ impl TakerTask {
 
         let tick_duration = Duration::from_millis(self.config.tick_interval_ms);
 
-        while !self.shutdown_flag.load(Ordering::Acquire) {
+        while self.shutdown_flag.load(Ordering::Acquire) {
             // Check for taker opportunity
             self.check_and_execute().await;
 
@@ -176,7 +176,13 @@ impl TakerTask {
             new_underweight_avg + down_avg
         };
 
-        if combined_avg > 1.0 {
+        if combined_avg >= self.config.max_combined_avg {
+            debug!(
+                "[Taker:{}] Skipping: combined_avg ${:.4} >= max ${:.4}",
+                self.market.short_desc(),
+                combined_avg,
+                self.config.max_combined_avg
+            );
             return;
         }
 

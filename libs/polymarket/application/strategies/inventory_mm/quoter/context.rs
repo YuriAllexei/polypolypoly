@@ -93,7 +93,7 @@ impl QuoterContext {
     }
 
     pub fn is_running(&self) -> bool {
-        !self.shutdown_flag.load(std::sync::atomic::Ordering::Acquire)
+        self.shutdown_flag.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 

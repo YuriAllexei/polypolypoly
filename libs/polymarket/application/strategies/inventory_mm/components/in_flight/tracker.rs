@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
+use tracing::debug;
 
 /// Converts price to integer key for HashMap (avoids float comparison issues)
 /// 0.7823 → 7823
@@ -91,12 +92,29 @@ impl InFlightTracker {
 
         if let Some(sent_at) = self.pending_placements.get(&key) {
             if sent_at.elapsed() < self.ttl {
+                debug!(
+                    "[InFlight] BLOCKED place: token={}, price={:.2} (pending for {:?})",
+                    &token_id[..8.min(token_id.len())],
+                    price,
+                    sent_at.elapsed()
+                );
                 return false; // Still pending and not expired
             }
+            debug!(
+                "[InFlight] EXPIRED place: token={}, price={:.2} (was pending {:?})",
+                &token_id[..8.min(token_id.len())],
+                price,
+                sent_at.elapsed()
+            );
             // Expired - fall through to allow retry
         }
 
         // Register as pending and allow send
+        debug!(
+            "[InFlight] ALLOW place: token={}, price={:.2}",
+            &token_id[..8.min(token_id.len())],
+            price
+        );
         self.pending_placements.insert(key, Instant::now());
         true
     }
@@ -130,6 +148,8 @@ impl InFlightTracker {
         open_price_levels: &HashSet<(String, i64)>,
     ) {
         let now = Instant::now();
+        let before_cancels = self.pending_cancels.len();
+        let before_placements = self.pending_placements.len();
 
         // Remove cancels if:
         // - Order no longer in OMS (cancel succeeded), OR
@@ -152,6 +172,17 @@ impl InFlightTracker {
             // Keep only if: NOT in OMS AND not expired
             !in_oms && !expired
         });
+
+        let removed_cancels = before_cancels - self.pending_cancels.len();
+        let removed_placements = before_placements - self.pending_placements.len();
+        if removed_cancels > 0 || removed_placements > 0 {
+            debug!(
+                "[InFlight] Cleanup: removed {} cancels, {} placements (OMS has {} price levels)",
+                removed_cancels,
+                removed_placements,
+                open_price_levels.len()
+            );
+        }
     }
 
     /// Convenience method: Build cleanup sets from list of open orders.

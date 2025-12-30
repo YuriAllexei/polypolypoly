@@ -35,6 +35,8 @@ pub struct Quoter {
     merger: Merger,
     merge_pending_until: Option<Instant>,
     ctx: QuoterContext,
+    /// Last logged delta (to reduce log spam)
+    last_logged_delta: Option<f64>,
 }
 
 impl Quoter {
@@ -60,6 +62,7 @@ impl Quoter {
             merger: Merger::new(merger_config),
             merge_pending_until: None,
             ctx,
+            last_logged_delta: None,
         }
     }
 
@@ -77,7 +80,7 @@ impl Quoter {
     /// Runs until shutdown or market expired.
     pub async fn run(mut self) {
         let market_desc = self.market.short_desc();
-        info!("[Quoter:{}] Starting", market_desc);
+        info!("[Quoter:{}] Starting with {}ms tick interval", market_desc, self.tick_interval_ms);
 
         // 1. Start orderbook WebSocket for (up_token_id, down_token_id)
         let ws_config = QuoterWsConfig::new(
@@ -140,6 +143,25 @@ impl Quoter {
 
             // Build input from shared state
             let input = self.extract_input();
+
+            // Log strategy state only when delta changes significantly (reduces spam)
+            let delta = input.inventory.imbalance();
+            let total_inv = input.inventory.up_size + input.inventory.down_size;
+            let should_log = total_inv > 0.0 && self.last_logged_delta
+                .map(|last| (delta - last).abs() >= 0.05)
+                .unwrap_or(true);
+            if should_log {
+                info!(
+                    "[Quoter:{}] delta={:.2}, inv=(UP:{:.1}@${:.2}, DOWN:{:.1}@${:.2})",
+                    market_desc,
+                    delta,
+                    input.inventory.up_size,
+                    input.inventory.up_avg_price,
+                    input.inventory.down_size,
+                    input.inventory.down_avg_price,
+                );
+                self.last_logged_delta = Some(delta);
+            }
 
             // Run tick
             match self.tick(&input) {
@@ -266,7 +288,27 @@ impl Quoter {
 
         let mut output = solve(input);
         output.cancellations.retain(|oid| self.in_flight_tracker.should_cancel(oid));
-        output.limit_orders.retain(|o| self.in_flight_tracker.should_place(&o.token_id, o.price));
+
+        // Filter placements: block if there's already an OPEN order at this price level.
+        // This prevents order accumulation from "top-up" orders when partial fills occur.
+        output.limit_orders.retain(|o| {
+            // Check if we already have an open order at this (token, price)
+            let has_open_order = open_orders.iter().any(|existing| {
+                existing.token_id == o.token_id &&
+                (existing.price - o.price).abs() < 1e-4
+            });
+
+            if has_open_order {
+                debug!(
+                    "[Quoter] BLOCKED placement at {:.2} for {} - order already exists at this price",
+                    o.price,
+                    &o.token_id[..8.min(o.token_id.len())]
+                );
+                return false;
+            }
+
+            self.in_flight_tracker.should_place(&o.token_id, o.price)
+        });
 
         if output.has_actions() {
             if let Err(e) = self.ctx.executor.execute(output.clone()) {

@@ -108,6 +108,14 @@ impl BatchOrderResult {
             })
             .collect()
     }
+
+    /// Get the statuses of successful orders
+    pub fn statuses(&self) -> Vec<(&str, Option<&str>)> {
+        self.succeeded
+            .iter()
+            .map(|(token_id, r)| (token_id.as_str(), r.status.as_deref()))
+            .collect()
+    }
 }
 
 /// High-level trading client for Polymarket

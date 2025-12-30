@@ -11,6 +11,9 @@ use crate::application::strategies::inventory_mm::types::{LimitOrder, OpenOrder,
 const SIZE_TOLERANCE_PCT: f64 = 0.01;
 const SIZE_TOLERANCE_ABS: f64 = 0.1;
 
+/// Polymarket minimum order size (in shares)
+const MIN_ORDER_SIZE: f64 = 5.0;
+
 fn price_to_key(price: f64) -> i64 {
     (price * 10000.0).round() as i64
 }
@@ -61,14 +64,17 @@ pub fn diff_orders(
                 }
             }
 
-            // Case 2: Price is new -> Place new order
+            // Case 2: Price is new -> Place new order (if size meets minimum)
             (None, Some(quote)) => {
-                to_place.push(LimitOrder::new(
-                    token_id.to_string(),
-                    quote.price,
-                    quote.size,
-                    quote.side,
-                ));
+                if quote.size >= MIN_ORDER_SIZE {
+                    to_place.push(LimitOrder::new(
+                        token_id.to_string(),
+                        quote.price,
+                        quote.size,
+                        quote.side,
+                    ));
+                }
+                // Skip quotes with sub-minimum size
             }
 
             // Case 3: Price exists in both -> Smart size adjustment
@@ -117,18 +123,21 @@ fn adjust_size_at_price(
         return (vec![], None);
     }
 
-    // Need MORE - keep all, place additional
+    // Need MORE - keep all, place additional (if above minimum)
     if current_total < desired_size {
         let additional = desired_size - current_total;
-        return (
-            vec![],
+        // Only place if additional size meets minimum
+        let place_order = if additional >= MIN_ORDER_SIZE {
             Some(LimitOrder::new(
                 token_id.to_string(),
                 quote.price,
                 additional,
                 quote.side,
-            )),
-        );
+            ))
+        } else {
+            None  // Skip sub-minimum orders
+        };
+        return (vec![], place_order);
     }
 
     // Need LESS - keep oldest orders, cancel rest
@@ -154,7 +163,8 @@ fn adjust_size_at_price(
         .collect();
 
     let remainder = desired_size - kept_sum;
-    let new_order = if remainder > SIZE_TOLERANCE_ABS {
+    // Only place if remainder meets minimum size requirement
+    let new_order = if remainder >= MIN_ORDER_SIZE {
         Some(LimitOrder::new(
             token_id.to_string(),
             quote.price,
@@ -162,7 +172,7 @@ fn adjust_size_at_price(
             quote.side,
         ))
     } else {
-        None
+        None  // Skip sub-minimum orders
     };
 
     (to_cancel, new_order)

@@ -68,7 +68,10 @@ inventory_mm:
   # How often to poll DB for new markets (seconds)
   poll_interval_secs: 30
   # Quoter tick interval (milliseconds)
-  tick_interval_ms: 100
+  # WARNING: WebSocket fill notifications have 200-500ms latency. Setting this too low
+  # causes orders to be placed based on stale position data, leading to massive imbalance.
+  # Minimum enforced: 100ms. Recommended: 500ms for safety.
+  tick_interval_ms: 500
   # WebSocket snapshot timeout (seconds)
   snapshot_timeout_secs: 30
   # Cooldown between merges (seconds)
@@ -118,3 +121,5 @@ inventory_mm:
     max_take_size: 100.0
     # Minimum size per taker order
     min_take_size: 1.0
+    # Maximum combined avg cost (0.99 = require 1% profit margin)
+    max_combined_avg: 0.99

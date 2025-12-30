@@ -1,8 +1,13 @@
 //! Quote ladder calculation.
 
+use tracing::debug;
+
 use crate::application::strategies::inventory_mm::types::{
     OrderbookSnapshot, Quote, QuoteLadder, SolverConfig,
 };
+
+/// Polymarket minimum order size (in shares)
+const MIN_ORDER_SIZE: f64 = 5.0;
 
 /// Calculate quote ladder for both Up and Down tokens.
 ///
@@ -27,13 +32,24 @@ pub fn calculate_quotes(
     // Calculate skew-adjusted sizes (size adjustment)
     // delta > 0 = heavy UP → reduce UP size, increase DOWN size
     // delta < 0 = heavy DOWN → increase UP size, reduce DOWN size
+    // IMPORTANT: Clamp to [MIN_ORDER_SIZE, max] - NEVER skip due to low size
+    // For inventory MM, we must always quote both sides to manage imbalance
+    // NOTE: Round to whole numbers - Polymarket rejects fractional sizes!
+    let max_size = config.order_size * 3.0;
     let up_size = (config.order_size * (1.0 - delta * config.skew_factor))
-        .clamp(0.0, config.order_size * 3.0);
+        .clamp(MIN_ORDER_SIZE, max_size)
+        .round();
     let down_size = (config.order_size * (1.0 + delta * config.skew_factor))
-        .clamp(0.0, config.order_size * 3.0);
+        .clamp(MIN_ORDER_SIZE, max_size)
+        .round();
 
-    // Build Up quotes (skip if too imbalanced on Up side)
-    if delta < config.max_imbalance {
+    debug!(
+        "[Solver] delta={:.2} → offsets=(UP:{:.3}, DOWN:{:.3}), sizes=(UP:{:.1}, DOWN:{:.1})",
+        delta, up_offset, down_offset, up_size, down_size
+    );
+
+    // Build Up quotes (skip only if TOO imbalanced on Up side - use <= to include boundary)
+    if delta <= config.max_imbalance {
         if let Some(best_ask) = up_ob.best_ask_price() {
             ladder.up_quotes = build_ladder(
                 up_token_id,
@@ -45,8 +61,8 @@ pub fn calculate_quotes(
         }
     }
 
-    // Build Down quotes (skip if too imbalanced on Down side)
-    if delta > -config.max_imbalance {
+    // Build Down quotes (skip only if TOO imbalanced on Down side - use >= to include boundary)
+    if delta >= -config.max_imbalance {
         if let Some(best_ask) = down_ob.best_ask_price() {
             ladder.down_quotes = build_ladder(
                 down_token_id,
@@ -359,13 +375,14 @@ mod tests {
         };
 
         // Heavy UP (delta = 0.5)
-        // up_size = 100 * (1 - 0.5 * 5.0) = 100 * (-1.5) = -150 → clamped to 0
+        // up_size = 100 * (1 - 0.5 * 5.0) = 100 * (-1.5) = -150 → clamped to MIN_ORDER_SIZE (5.0)
         // down_size = 100 * (1 + 0.5 * 5.0) = 100 * 3.5 = 350 → clamped to 300
         let ladder = calculate_quotes(0.5, &up_ob, &down_ob, &config, "up", "down");
 
         assert!(!ladder.up_quotes.is_empty());
         assert!(!ladder.down_quotes.is_empty());
-        assert!((ladder.up_quotes[0].size - 0.0).abs() < 0.01);
+        // Now clamped to MIN_ORDER_SIZE instead of 0
+        assert!((ladder.up_quotes[0].size - MIN_ORDER_SIZE).abs() < 0.01);
         assert!((ladder.down_quotes[0].size - 300.0).abs() < 0.01);
     }
 
