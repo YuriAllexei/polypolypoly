@@ -209,6 +209,17 @@ impl InFlightTracker {
     pub fn pending_placement_count(&self) -> usize {
         self.pending_placements.len()
     }
+
+    /// Count pending placements for a specific token (not expired).
+    /// Used for capacity checking to prevent order accumulation.
+    pub fn pending_placements_for_token(&self, token_id: &str) -> usize {
+        let now = Instant::now();
+        self.pending_placements.iter()
+            .filter(|((tid, _), sent_at)| {
+                tid == token_id && now.duration_since(**sent_at) < self.ttl
+            })
+            .count()
+    }
 }
 
 /// Minimal order info needed for cleanup.

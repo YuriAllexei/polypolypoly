@@ -286,13 +286,44 @@ impl Quoter {
             .collect();
         self.in_flight_tracker.cleanup_from_orders(&open_orders);
 
+        // Count open orders + pending placements per side for capacity check
+        // This prevents order accumulation from race conditions where placements
+        // are sent before OMS updates with confirmations
+        let up_open = input.up_orders.bids.len();
+        let down_open = input.down_orders.bids.len();
+        let up_pending = self.in_flight_tracker.pending_placements_for_token(&input.up_token_id);
+        let down_pending = self.in_flight_tracker.pending_placements_for_token(&input.down_token_id);
+        let up_total = up_open + up_pending;
+        let down_total = down_open + down_pending;
+        let max_orders_per_side = self.config.num_levels;
+
         let mut output = solve(input);
         output.cancellations.retain(|oid| self.in_flight_tracker.should_cancel(oid));
 
-        // Filter placements: block if there's already an OPEN order at this price level.
-        // This prevents order accumulation from "top-up" orders when partial fills occur.
+        // Filter placements with TWO checks:
+        // 1. Block if already at capacity for this side (open + pending >= max)
+        // 2. Block if there's already an OPEN order at this price level
         output.limit_orders.retain(|o| {
-            // Check if we already have an open order at this (token, price)
+            // Check 1: Total order cap per side (open + pending placements)
+            // This prevents accumulation from race conditions
+            let current_total = if o.token_id == input.up_token_id {
+                up_total
+            } else {
+                down_total
+            };
+
+            if current_total >= max_orders_per_side {
+                debug!(
+                    "[Quoter] BLOCKED placement at {:.2} for {} - at capacity ({}/{})",
+                    o.price,
+                    &o.token_id[..8.min(o.token_id.len())],
+                    current_total,
+                    max_orders_per_side
+                );
+                return false;
+            }
+
+            // Check 2: Same-price duplicate check
             let has_open_order = open_orders.iter().any(|existing| {
                 existing.token_id == o.token_id &&
                 (existing.price - o.price).abs() < 1e-4
