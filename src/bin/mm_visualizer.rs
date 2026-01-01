@@ -104,6 +104,14 @@ fn run_app<B: ratatui::backend::Backend>(
                             // Manual refresh (in addition to auto-refresh)
                             app.refresh_markets();
                         }
+                        KeyCode::Char('x') => {
+                            // Cancel all open orders
+                            app.cancel_all_orders();
+                        }
+                        KeyCode::Char('d') => {
+                            // Dump all inventory for selected market
+                            app.dump_inventory();
+                        }
                         _ => {}
                     }
                 }

@@ -34,6 +34,8 @@ pub struct App {
     pub orderbooks: HashMap<String, SharedOrderbooks>,
     /// Database for market metadata
     pub database: Arc<MarketDatabase>,
+    /// Trading client for order operations
+    trading_client: TradingClient,
     /// WebSocket clients (keep them alive)
     ws_clients: Vec<QuoterWsClient>,
     /// Markets we're active in
@@ -48,6 +50,8 @@ pub struct App {
     runtime: Handle,
     /// Whether initialization completed successfully
     pub initialized: bool,
+    /// Status message to show in footer
+    pub status_message: Option<String>,
 }
 
 impl App {
@@ -137,6 +141,7 @@ impl App {
             position_tracker,
             orderbooks,
             database,
+            trading_client,
             ws_clients,
             markets,
             selected_index: 0,
@@ -144,6 +149,7 @@ impl App {
             shutdown_flag,
             runtime,
             initialized: true,
+            status_message: None,
         })
     }
 
@@ -540,6 +546,61 @@ impl App {
         } else {
             "No market selected".to_string()
         }
+    }
+
+    /// Cancel all open orders
+    pub fn cancel_all_orders(&self) {
+        let _ = self.runtime.block_on(async {
+            self.trading_client.cancel_all().await
+        });
+        // OMS will update automatically via WebSocket when orders are cancelled
+    }
+
+    /// Dump all inventory for the selected market using aggressive FAK orders
+    pub fn dump_inventory(&mut self) {
+        let Some(market) = self.get_selected_market() else {
+            self.status_message = Some("No market selected".to_string());
+            return;
+        };
+
+        let up_token = market.up_token_id.clone();
+        let down_token = market.down_token_id.clone();
+        let (up_pos, down_pos) = self.get_market_positions(market);
+
+        if up_pos.abs() < 1.0 && down_pos.abs() < 1.0 {
+            self.status_message = Some("Position too small to dump".to_string());
+            return;
+        }
+
+        let result = self.runtime.block_on(async {
+            let mut msgs = Vec::new();
+
+            // Dump UP position (floor to whole number)
+            let up_size = up_pos.floor();
+            if up_size >= 1.0 {
+                match self.trading_client.sell_fak(&up_token, 0.01, up_size).await {
+                    Ok(_) => msgs.push(format!("Sold {} UP", up_size as i64)),
+                    Err(e) => msgs.push(format!("UP err: {}", e)),
+                }
+            }
+
+            // Dump DOWN position (floor to whole number)
+            let down_size = down_pos.floor();
+            if down_size >= 1.0 {
+                match self.trading_client.sell_fak(&down_token, 0.01, down_size).await {
+                    Ok(_) => msgs.push(format!("Sold {} DOWN", down_size as i64)),
+                    Err(e) => msgs.push(format!("DOWN err: {}", e)),
+                }
+            }
+
+            if msgs.is_empty() {
+                "No full shares to dump".to_string()
+            } else {
+                msgs.join(", ")
+            }
+        });
+
+        self.status_message = Some(result);
     }
 
     /// Shutdown the application

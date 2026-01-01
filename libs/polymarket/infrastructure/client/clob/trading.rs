@@ -328,6 +328,28 @@ impl TradingClient {
             .await
     }
 
+    /// Place a buy order with FAK (Fill And Kill)
+    pub async fn buy_fak(
+        &self,
+        token_id: &str,
+        price: f64,
+        size: f64,
+    ) -> Result<OrderPlacementResponse> {
+        self.place_order(token_id, price, size, Side::Buy, OrderType::FAK)
+            .await
+    }
+
+    /// Place a sell order with FAK (Fill And Kill)
+    pub async fn sell_fak(
+        &self,
+        token_id: &str,
+        price: f64,
+        size: f64,
+    ) -> Result<OrderPlacementResponse> {
+        self.place_order(token_id, price, size, Side::Sell, OrderType::FAK)
+            .await
+    }
+
     /// Place an order with full control over parameters
     pub async fn place_order(
         &self,

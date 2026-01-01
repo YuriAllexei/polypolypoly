@@ -70,11 +70,14 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let status = app.status_message.as_deref().unwrap_or("");
     let position_summary = app.get_position_summary();
-    let footer_text = format!(
-        " {} | q=quit j/k=navigate r=refresh",
-        position_summary
-    );
+
+    let footer_text = if status.is_empty() {
+        format!(" {} | q=quit j/k=nav r=refresh x=cancel d=dump", position_summary)
+    } else {
+        format!(" {} | {}", position_summary, status)
+    };
 
     let footer = Paragraph::new(footer_text)
         .block(Block::default().borders(Borders::ALL));
