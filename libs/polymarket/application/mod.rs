@@ -7,6 +7,7 @@ pub mod facade;
 pub mod sniper;
 pub mod strategies;
 pub mod sync;
+pub mod visualizer;
 
 // Re-export application facade for binaries
 pub use facade::{init_logging, init_logging_with_level, to_sniper_market, EventSyncApp};

@@ -54,6 +54,10 @@ crossbeam-channel = "0.5"
 parking_lot = "0.12"
 futures = "0.3"
 
+# Terminal UI
+ratatui = "0.29"
+crossterm = "0.28"
+
 # Workspace libraries
 hypersockets = { path = "libs/hypersockets" }
 polymarket = { path = "libs/polymarket" }
@@ -86,6 +90,10 @@ path = "src/bin/test_order_eoa.rs"
 name = "test_sports_ws"
 path = "src/bin/test_sports_ws.rs"
 
+[[bin]]
+name = "mm-visualizer"
+path = "src/bin/mm_visualizer.rs"
+
 [dependencies]
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -99,3 +107,5 @@ reqwest = { workspace = true }
 dotenv = { workspace = true }
 ethers = { workspace = true }
 parking_lot = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
