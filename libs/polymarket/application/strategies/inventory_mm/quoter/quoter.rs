@@ -132,9 +132,19 @@ impl Quoter {
 
         // Main tick loop
         while self.ctx.is_running() && !self.market.is_expired() {
-            // Skip tick if WebSocket disconnected (stale orderbook data)
+            // Cancel all orders if WebSocket disconnected (stale orderbook data)
+            // Don't leave orders at potentially stale prices - cancel defensively
             if !ws_client.is_connected() {
-                warn!("[Quoter:{}] WebSocket disconnected, pausing ticks", market_desc);
+                warn!("[Quoter:{}] WebSocket disconnected, cancelling all orders", market_desc);
+
+                // Cancel all orders on both sides (defensive)
+                if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.up_token_id.clone()) {
+                    warn!("[Quoter:{}] Failed to cancel UP orders: {}", market_desc, e);
+                }
+                if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.down_token_id.clone()) {
+                    warn!("[Quoter:{}] Failed to cancel DOWN orders: {}", market_desc, e);
+                }
+
                 tokio::time::sleep(tick_duration).await;
                 continue;
             }

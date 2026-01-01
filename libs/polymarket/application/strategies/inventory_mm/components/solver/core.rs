@@ -9,19 +9,23 @@ use super::diff::diff_orders;
 
 /// Main solver function.
 ///
-/// Quotes are purely market-based. Risk is managed via:
+/// Quotes are market-based with profitability caps. Risk is managed via:
+/// - Profitability cap: limits bids to prices that maintain profitable merge
 /// - Offset mechanism: increases when imbalanced, making bids less aggressive
 /// - Max imbalance threshold: stops quoting entirely when too imbalanced
+/// - Skew sizing: reduces size on overweight side
 pub fn solve(input: &SolverInput) -> SolverOutput {
     let mut output = SolverOutput::new();
 
     let delta = input.inventory.imbalance();
 
     // 1. Calculate desired quote ladder for both sides
+    // Quotes are capped at profitability limits
     let ladder = calculate_quotes(
         delta,
         &input.up_orderbook,
         &input.down_orderbook,
+        &input.inventory,
         &input.config,
         &input.up_token_id,
         &input.down_token_id,

@@ -43,9 +43,10 @@ impl InFlightTracker {
         }
     }
 
-    /// Create with default TTL of 3 seconds.
+    /// Create with default TTL of 1 second.
+    /// Reduced from 3s to allow faster recovery from silent cancel failures.
     pub fn with_default_ttl() -> Self {
-        Self::new(Duration::from_secs(3))
+        Self::new(Duration::from_secs(1))
     }
 
     // =========================================================================

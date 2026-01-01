@@ -196,6 +196,11 @@ mod visual_tests {
             spread_per_level: 1.0,
             offset_scaling: 5.0,
             skew_factor: 2.0,
+            recovery_threshold: 0.99,
+            recovery_relaxation: 0.005,
+            capped_size_factor: 0.5,
+            stuck_threshold: 1.02,
+            min_offset: 0.01,
         }
     }
 
@@ -219,7 +224,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -254,7 +259,7 @@ mod visual_tests {
                 up_size: 60.0,
                 up_avg_price: 0.52,
                 down_size: 40.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -289,7 +294,7 @@ mod visual_tests {
                 up_size: 70.0,
                 up_avg_price: 0.52,
                 down_size: 30.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -324,7 +329,7 @@ mod visual_tests {
                 up_size: 80.0,
                 up_avg_price: 0.52,
                 down_size: 20.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -359,7 +364,7 @@ mod visual_tests {
                 up_size: 95.0,
                 up_avg_price: 0.52,
                 down_size: 5.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -394,7 +399,7 @@ mod visual_tests {
                 up_size: 20.0,
                 up_avg_price: 0.52,
                 down_size: 80.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -429,7 +434,7 @@ mod visual_tests {
                 up_size: 30.0,
                 up_avg_price: 0.52,
                 down_size: 70.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -464,7 +469,7 @@ mod visual_tests {
                 up_size: 40.0,
                 up_avg_price: 0.52,
                 down_size: 60.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -503,7 +508,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.60, 300.0)),
@@ -538,7 +543,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.54, 1000.0)),  // tight: only 1 cent from bid
@@ -678,7 +683,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 2000.0)),  // very deep
@@ -735,7 +740,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -784,7 +789,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -832,7 +837,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -886,7 +891,7 @@ mod visual_tests {
                 up_size: 70.0,  // NOW HEAVY UP!
                 up_avg_price: 0.52,
                 down_size: 30.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -939,7 +944,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.58, 500.0)),  // MOVED UP
@@ -989,7 +994,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1039,7 +1044,7 @@ mod visual_tests {
                 up_size: 95.0,  // EXTREME imbalance
                 up_avg_price: 0.52,
                 down_size: 5.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1088,7 +1093,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1162,7 +1167,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: None,  // No ask!
@@ -1236,7 +1241,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1269,6 +1274,7 @@ mod visual_tests {
         // Current: 3 orders @ 0.54 totaling 300 (timestamps 1000, 1001, 1002)
         // Desired: 140 @ 0.54
         // Expected: Keep oldest (100), cancel middle and newest, place 40 for remainder
+        // NOTE: down_avg_price = 0.44 so max_up_bid = 1.0 - 0.44 - 0.01 = 0.55 (allows 0.54 bids)
         let input = SolverInput {
             up_token_id: "up_token".to_string(),
             down_token_id: "down_token".to_string(),
@@ -1285,7 +1291,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1337,6 +1343,7 @@ mod visual_tests {
         // Current: 1 order @ 0.54 for 100
         // Desired: 250 @ 0.54
         // Expected: Keep existing 100, place new order for 150
+        // NOTE: down_avg_price = 0.44 so max_up_bid = 1.0 - 0.44 - 0.01 = 0.55 (allows 0.54 bids)
         let input = SolverInput {
             up_token_id: "up_token".to_string(),
             down_token_id: "down_token".to_string(),
@@ -1351,7 +1358,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1411,7 +1418,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1467,7 +1474,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1538,7 +1545,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1607,7 +1614,7 @@ mod visual_tests {
                 up_size: 70.0,
                 up_avg_price: 0.52,
                 down_size: 30.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1666,7 +1673,7 @@ mod visual_tests {
                 up_size: 30.0,
                 up_avg_price: 0.52,
                 down_size: 70.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1721,7 +1728,7 @@ mod visual_tests {
                 up_size: 60.0,
                 up_avg_price: 0.52,
                 down_size: 40.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1782,7 +1789,7 @@ mod visual_tests {
                 up_size: 35.0,
                 up_avg_price: 0.52,
                 down_size: 65.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1853,7 +1860,7 @@ mod visual_tests {
                 up_size: 62.5,
                 up_avg_price: 0.52,
                 down_size: 37.5,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1920,7 +1927,7 @@ mod visual_tests {
                 up_size: 80.0,
                 up_avg_price: 0.52,
                 down_size: 20.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1987,7 +1994,7 @@ mod visual_tests {
                 up_size: 65.0,
                 up_avg_price: 0.52,
                 down_size: 35.0,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -2050,7 +2057,7 @@ mod visual_tests {
                 up_size: 57.5,
                 up_avg_price: 0.52,
                 down_size: 42.5,
-                down_avg_price: 0.46,
+                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),

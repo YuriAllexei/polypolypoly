@@ -98,6 +98,43 @@ inventory_mm:
     # Skew factor for size adjustment (0.0 = none, 1.0 = moderate, 2.0 = aggressive)
     skew_factor: 1.0
 
+    # === Spread Crossing Prevention ===
+    # Minimum offset from best_ask to prevent spread crossing
+    # When offsets go negative due to extreme imbalance, this floor prevents
+    # bids from crossing the ask (which would result in immediate TAKER fills).
+    # Must be >= tick_size (0.01) to ensure bid is at least 1 tick below ask.
+    min_offset: 0.01
+
+    # === Recovery Mode (Underwater Position Handling) ===
+    # When combined_avg (up_avg + down_avg) exceeds recovery_threshold, the strategy
+    # enters recovery mode to help escape underwater positions.
+
+    # Threshold to enter recovery mode (combined_avg >= this triggers recovery)
+    # Example: 0.99 means recovery activates when up_avg + down_avg >= $0.99
+    # Lower = more conservative (enters recovery earlier)
+    # Higher = more aggressive (allows worse positions before recovery)
+    recovery_threshold: 0.99
+
+    # How much to relax the profitability margin during recovery on the NEEDED side
+    # This makes it easier to rebalance by allowing slightly worse prices
+    # Example: 0.005 relaxes margin from 0.01 to 0.005 on the side we need
+    # 0.0 = no relaxation, same as normal mode
+    # min_profit_margin = full relaxation (breakeven trades allowed)
+    recovery_relaxation: 0.005
+
+    # Size multiplier when a quote is capped at the profitability limit
+    # Reduces exposure on marginal trades where we're bidding at max profitable price
+    # Example: 0.5 = half size on capped quotes, limiting potential losses
+    # 1.0 = full size (no reduction)
+    # 0.0 = no quotes when capped (too restrictive)
+    capped_size_factor: 0.5
+
+    # Threshold to enter "stuck" mode (cancel all quotes and wait)
+    # When combined_avg >= this, position is too underwater to trade out profitably
+    # Example: 1.02 means if up_avg + down_avg >= $1.02, stop quoting entirely
+    # This prevents making a bad position worse
+    stuck_threshold: 1.02
+
   # === Merger (Merge Conditions) ===
   merger:
     # Minimum pairs before considering a merge

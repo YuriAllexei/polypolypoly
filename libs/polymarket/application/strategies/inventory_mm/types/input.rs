@@ -181,6 +181,27 @@ pub struct SolverConfig {
     /// down_size = order_size * (1 + delta * skew_factor)
     /// 0.0 = no skew, 1.0 = moderate, 2.0 = aggressive
     pub skew_factor: f64,
+
+    /// Recovery mode activation threshold (combined avg >= this triggers recovery)
+    /// When underwater, relax profitability caps on needed side to escape
+    pub recovery_threshold: f64,
+
+    /// How much to relax profitability margin during recovery (0.0 to margin)
+    /// Applied to the needed side only to help rebalance
+    pub recovery_relaxation: f64,
+
+    /// Size multiplier when quote is capped at profitability limit
+    /// Limits exposure on marginal trades (e.g., 0.5 = half size)
+    pub capped_size_factor: f64,
+
+    /// Stuck threshold - beyond this, cancel all quotes and wait
+    /// When combined_avg >= this, position is too underwater to trade out
+    pub stuck_threshold: f64,
+
+    /// Minimum offset from best_ask to prevent spread crossing
+    /// When offsets go negative due to extreme imbalance, this floor
+    /// prevents bids from crossing the ask. Must be >= tick_size (0.01).
+    pub min_offset: f64,
 }
 
 impl Default for SolverConfig {
@@ -195,6 +216,11 @@ impl Default for SolverConfig {
             spread_per_level: 1.0,       // 1 cent wider per level
             offset_scaling: 5.0,         // Scale offset 5x with imbalance
             skew_factor: 1.0,            // Moderate size skew based on delta
+            recovery_threshold: 0.99,    // Enter recovery when combined >= 0.99
+            recovery_relaxation: 0.005,  // Relax margin by 0.5 cents in recovery
+            capped_size_factor: 0.5,     // Half size when capped at profitability limit
+            stuck_threshold: 1.02,       // Cancel all quotes if combined >= 1.02
+            min_offset: 0.01,            // Min offset = tick_size to prevent spread crossing
         }
     }
 }
