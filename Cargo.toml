@@ -54,6 +54,12 @@ crossbeam-channel = "0.5"
 parking_lot = "0.12"
 futures = "0.3"
 
+# ChainLink Data Streams
+chainlink-data-streams-report = "1.0.3"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
 # Terminal UI
 ratatui = "0.29"
 crossterm = "0.28"
@@ -93,6 +99,10 @@ path = "src/bin/test_sports_ws.rs"
 [[bin]]
 name = "mm-visualizer"
 path = "src/bin/mm_visualizer.rs"
+
+[[bin]]
+name = "test_chainlink_ws"
+path = "src/bin/test_chainlink_ws.rs"
 
 [dependencies]
 tokio = { workspace = true }
