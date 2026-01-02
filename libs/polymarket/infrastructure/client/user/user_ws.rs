@@ -34,6 +34,8 @@ pub struct UserConfig {
     pub api_key: String,
     pub api_secret: String,
     pub api_passphrase: String,
+    /// REST API base URL for re-hydration on reconnect
+    pub rest_base_url: Option<String>,
 }
 
 impl UserConfig {
@@ -45,11 +47,13 @@ impl UserConfig {
             .map_err(|_| anyhow::anyhow!("API_SECRET environment variable not set"))?;
         let api_passphrase = std::env::var("API_PASSPHRASE")
             .map_err(|_| anyhow::anyhow!("API_PASSPHRASE environment variable not set"))?;
+        let rest_base_url = std::env::var("CLOB_URL").ok();
 
         Ok(Self {
             api_key,
             api_secret,
             api_passphrase,
+            rest_base_url,
         })
     }
 
@@ -385,8 +389,11 @@ async fn run_user_tracker(
     shutdown_flag: Arc<AtomicBool>,
 ) -> Result<()> {
     // Build and connect WebSocket client
-    let client = build_ws_client(&config, state).await?;
+    let client = build_ws_client(&config, state.clone()).await?;
     info!("[UserWS] Connected and authenticated");
+
+    // Track connection state for re-hydration on reconnect
+    let mut was_disconnected = false;
 
     // Main tracking loop
     loop {
@@ -399,6 +406,41 @@ async fn run_user_tracker(
         // Handle WebSocket events
         match client.try_recv_event() {
             Some(event) => {
+                match &event {
+                    ClientEvent::Disconnected => {
+                        was_disconnected = true;
+                    }
+                    ClientEvent::Connected => {
+                        // If we were disconnected, this is a reconnection - re-hydrate from REST
+                        if was_disconnected {
+                            was_disconnected = false;
+                            info!("[UserWS] Reconnected - re-hydrating from REST API...");
+
+                            // Re-hydrate from REST API if we have the base URL
+                            if let Some(ref base_url) = config.rest_base_url {
+                                // Create a temporary auth for re-hydration
+                                let auth = super::super::clob::types::ApiCredentials {
+                                    key: config.api_key.clone(),
+                                    secret: config.api_secret.clone(),
+                                    passphrase: config.api_passphrase.clone(),
+                                };
+
+                                // Spawn re-hydration task (don't block the main loop)
+                                let url = base_url.clone();
+                                let state_clone = state.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = rehydrate_from_rest(&url, &auth, &state_clone).await {
+                                        warn!("[UserWS] Re-hydration failed: {}", e);
+                                    }
+                                });
+                            } else {
+                                warn!("[UserWS] Cannot re-hydrate: CLOB_URL not configured");
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
                 if !handle_client_event(event) {
                     break;
                 }
@@ -415,6 +457,47 @@ async fn run_user_tracker(
         warn!("[UserWS] Error during shutdown: {}", e);
     }
     info!("[UserWS] User tracker stopped");
+
+    Ok(())
+}
+
+/// Re-hydrate order state from REST API after reconnection
+async fn rehydrate_from_rest(
+    base_url: &str,
+    auth: &super::super::clob::types::ApiCredentials,
+    state: &SharedOrderState,
+) -> Result<()> {
+    use super::super::auth::PolymarketAuth;
+
+    // Create temporary REST client
+    let rest = RestClient::new(base_url);
+
+    // Create temporary auth with the API credentials (L2-only, no wallet needed)
+    let temp_auth = PolymarketAuth::from_api_credentials(auth.clone());
+
+    // Re-hydrate orders
+    info!("[UserWS] Re-hydrating orders...");
+    match rest.get_all_orders(&temp_auth, None).await {
+        Ok(orders) => {
+            state.write().hydrate_orders(&orders);
+            info!("[UserWS] Re-hydrated {} orders", orders.len());
+        }
+        Err(e) => {
+            warn!("[UserWS] Failed to re-hydrate orders: {}", e);
+        }
+    }
+
+    // Re-hydrate trades
+    info!("[UserWS] Re-hydrating trades...");
+    match rest.get_all_trades(&temp_auth, None).await {
+        Ok(trades) => {
+            state.write().hydrate_trades(&trades);
+            info!("[UserWS] Re-hydrated {} trades", trades.len());
+        }
+        Err(e) => {
+            warn!("[UserWS] Failed to re-hydrate trades: {}", e);
+        }
+    }
 
     Ok(())
 }

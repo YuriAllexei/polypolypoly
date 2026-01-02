@@ -198,15 +198,68 @@ pub struct NegRiskResponse {
     pub neg_risk: bool,
 }
 
-/// User position
+/// User position from Data API
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Position {
+    /// Token ID (called "asset" in Data API)
+    #[serde(alias = "asset")]
     pub asset_id: String,
-    pub market: String,
+
+    /// Condition ID (market)
+    #[serde(default)]
+    pub condition_id: Option<String>,
+
+    /// Position size (number of shares) - stored as string for flexibility
+    #[serde(deserialize_with = "deserialize_size")]
     pub size: String,
+
+    /// Average entry price
+    #[serde(default)]
+    pub avg_price: Option<f64>,
+
+    /// Current price
+    #[serde(default)]
+    pub cur_price: Option<f64>,
+
+    /// Realized P&L
+    #[serde(default)]
+    pub realized_pnl: Option<f64>,
+
+    /// Outcome name (YES/NO)
+    #[serde(default)]
+    pub outcome: Option<String>,
+
+    /// Whether position is mergeable
+    #[serde(default)]
+    pub mergeable: Option<bool>,
+
+    /// Opposite asset (for merge)
+    #[serde(default)]
+    pub opposite_asset: Option<String>,
 
     #[serde(default)]
     pub side: Option<Side>,
+}
+
+/// Deserialize size as string (handles both number and string from API)
+fn deserialize_size<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNumber {
+        String(String),
+        Number(f64),
+    }
+
+    match StringOrNumber::deserialize(deserializer)? {
+        StringOrNumber::String(s) => Ok(s),
+        StringOrNumber::Number(n) => Ok(n.to_string()),
+    }
 }
 
 /// API credentials (L2 auth)

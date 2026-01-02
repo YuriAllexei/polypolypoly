@@ -205,6 +205,12 @@ impl Quoter {
     }
 
     /// Extract SolverInput from shared state.
+    ///
+    /// NOTE: This reads from OMS, position tracker, and orderbooks with separate locks.
+    /// There is a potential race condition where state could change between reads.
+    /// Under normal operation, this is acceptable as the reads happen in quick succession
+    /// (typically < 1ms total). For high-frequency scenarios, consider implementing
+    /// a versioned snapshot system.
     fn extract_input(&self) -> SolverInput {
         // 1. Extract open orders from OMS
         let (up_orders, down_orders) = {
@@ -303,8 +309,19 @@ impl Quoter {
         let down_open = input.down_orders.bids.len();
         let up_pending = self.in_flight_tracker.pending_placements_for_token(&input.up_token_id);
         let down_pending = self.in_flight_tracker.pending_placements_for_token(&input.down_token_id);
-        let up_total = up_open + up_pending;
-        let down_total = down_open + down_pending;
+
+        // Count pending cancellations for orders we currently see as open
+        // These orders are being cancelled, so don't count them toward capacity
+        let up_pending_cancels = input.up_orders.bids.iter()
+            .filter(|o| self.in_flight_tracker.is_cancel_pending(&o.order_id))
+            .count();
+        let down_pending_cancels = input.down_orders.bids.iter()
+            .filter(|o| self.in_flight_tracker.is_cancel_pending(&o.order_id))
+            .count();
+
+        // Effective total = open + pending_placements - pending_cancels
+        let up_total = (up_open + up_pending).saturating_sub(up_pending_cancels);
+        let down_total = (down_open + down_pending).saturating_sub(down_pending_cancels);
         let max_orders_per_side = self.config.num_levels;
 
         let mut output = solve(input);
@@ -312,44 +329,52 @@ impl Quoter {
         // FIX: Don't filter cancellations - they are IDEMPOTENT and safe to retry.
         // The exchange will just return "order already cancelled" if we send twice.
         // Blocking cancels causes massive order accumulation when OMS confirmation is slow.
-        // We still track them for debugging but don't prevent retries.
+        // We still track them so is_cancel_pending() returns true for capacity calculations.
         for oid in &output.cancellations {
-            // Just mark as pending for tracking purposes (allows debugging)
-            // Don't use should_cancel() which would block retries
-            let _ = self.in_flight_tracker.is_cancel_pending(oid);
+            // Mark as pending for tracking - this makes is_cancel_pending() return true
+            // which reduces effective_open count and prevents repeated "excess orders" warnings
+            self.in_flight_tracker.mark_cancel_pending(oid);
         }
 
         // EMERGENCY FIX: If we have WAY more orders than max_orders_per_side,
         // cancel ALL excess orders immediately (not just price mismatches).
         // This handles accumulation from previous bugs or race conditions.
-        let up_excess = up_open.saturating_sub(max_orders_per_side);
-        let down_excess = down_open.saturating_sub(max_orders_per_side);
+        // Use effective open count (excluding orders with pending cancellations)
+        let up_effective_open = up_open.saturating_sub(up_pending_cancels);
+        let down_effective_open = down_open.saturating_sub(down_pending_cancels);
+        let up_excess = up_effective_open.saturating_sub(max_orders_per_side);
+        let down_excess = down_effective_open.saturating_sub(max_orders_per_side);
 
         if up_excess > 0 {
             warn!(
-                "[Quoter:{}] UP has {} excess orders ({} open, max {}), cancelling oldest",
-                self.market.short_desc(), up_excess, up_open, max_orders_per_side
+                "[Quoter:{}] UP has {} excess orders ({} effective, {} pending_cancels, max {}), cancelling oldest",
+                self.market.short_desc(), up_excess, up_effective_open, up_pending_cancels, max_orders_per_side
             );
-            // Get oldest orders to keep, cancel the rest
+            // Sort by created_at DESCENDING (newest first) - keep newest, cancel oldest
             let mut up_orders: Vec<_> = input.up_orders.bids.iter().collect();
-            up_orders.sort_by_key(|o| o.created_at);
+            up_orders.sort_by_key(|o| std::cmp::Reverse(o.created_at));
             for order in up_orders.iter().skip(max_orders_per_side) {
                 if !output.cancellations.contains(&order.order_id) {
                     output.cancellations.push(order.order_id.clone());
+                    // CRITICAL: Mark excess cancellations as pending too!
+                    self.in_flight_tracker.mark_cancel_pending(&order.order_id);
                 }
             }
         }
 
         if down_excess > 0 {
             warn!(
-                "[Quoter:{}] DOWN has {} excess orders ({} open, max {}), cancelling oldest",
-                self.market.short_desc(), down_excess, down_open, max_orders_per_side
+                "[Quoter:{}] DOWN has {} excess orders ({} effective, {} pending_cancels, max {}), cancelling oldest",
+                self.market.short_desc(), down_excess, down_effective_open, down_pending_cancels, max_orders_per_side
             );
+            // Sort by created_at DESCENDING (newest first) - keep newest, cancel oldest
             let mut down_orders: Vec<_> = input.down_orders.bids.iter().collect();
-            down_orders.sort_by_key(|o| o.created_at);
+            down_orders.sort_by_key(|o| std::cmp::Reverse(o.created_at));
             for order in down_orders.iter().skip(max_orders_per_side) {
                 if !output.cancellations.contains(&order.order_id) {
                     output.cancellations.push(order.order_id.clone());
+                    // CRITICAL: Mark excess cancellations as pending too!
+                    self.in_flight_tracker.mark_cancel_pending(&order.order_id);
                 }
             }
         }

@@ -20,20 +20,27 @@ pub enum AuthError {
 
     #[error("HMAC error: {0}")]
     HmacError(String),
+
+    #[error("Wallet not available (L2-only auth cannot perform this operation)")]
+    WalletNotAvailable,
 }
 
 pub type Result<T> = std::result::Result<T, AuthError>;
 
 /// Polymarket authentication manager
+///
+/// Supports two modes:
+/// - Full auth (with wallet): Can perform both L1 and L2 operations
+/// - L2-only auth (API credentials only): Can only perform L2 operations (REST API calls)
 pub struct PolymarketAuth {
-    wallet: LocalWallet,
-    wallet_address: Address,
+    wallet: Option<LocalWallet>,
+    wallet_address: Option<Address>,
     chain_id: u64,
     api_key: Option<ApiCredentials>,
 }
 
 impl PolymarketAuth {
-    /// Create new auth manager from private key
+    /// Create new auth manager from private key (full L1+L2 capabilities)
     pub fn new(private_key: &str, chain_id: u64) -> Result<Self> {
         // Remove 0x prefix if present
         let key = private_key.trim_start_matches("0x");
@@ -46,15 +53,15 @@ impl PolymarketAuth {
         let wallet_address = wallet.address();
 
         Ok(Self {
-            wallet,
-            wallet_address,
+            wallet: Some(wallet),
+            wallet_address: Some(wallet_address),
             chain_id,
             api_key: None,
         })
     }
 
-    /// Get wallet address
-    pub fn address(&self) -> Address {
+    /// Get wallet address (if available)
+    pub fn address(&self) -> Option<Address> {
         self.wallet_address
     }
 
@@ -63,21 +70,40 @@ impl PolymarketAuth {
         self.api_key = Some(credentials);
     }
 
+    /// Create auth from API credentials only (for L2 operations).
+    /// This is useful when you only need to make authenticated REST API calls
+    /// (like get_all_orders, get_all_trades) without L1 signing capability.
+    ///
+    /// Note: L1 operations and methods requiring wallet address will fail with this auth.
+    pub fn from_api_credentials(credentials: ApiCredentials) -> Self {
+        Self {
+            wallet: None,
+            wallet_address: None,
+            chain_id: 137, // Polygon mainnet (default)
+            api_key: Some(credentials),
+        }
+    }
+
     /// Get current API key
     pub fn api_key(&self) -> Option<&ApiCredentials> {
         self.api_key.as_ref()
     }
 
     /// Generate L1 EIP-712 signature for authentication
+    ///
+    /// Requires a wallet to be available (created via `new()`, not `from_api_credentials()`).
     pub async fn sign_l1_message(&self, timestamp: u64, nonce: u64) -> Result<String> {
+        let wallet = self.wallet.as_ref().ok_or(AuthError::WalletNotAvailable)?;
+        let wallet_address = self.wallet_address.ok_or(AuthError::WalletNotAvailable)?;
+
         // Build message string for signing
         let message = format!(
             "This message attests that I control the given wallet\nAddress: {:?}\nTimestamp: {}\nNonce: {}",
-            self.wallet_address, timestamp, nonce
+            wallet_address, timestamp, nonce
         );
 
         // Sign the message
-        let signature = self.wallet
+        let signature = wallet
             .sign_message(message.as_bytes())
             .await
             .map_err(|e| AuthError::SigningError(e.to_string()))?;
@@ -126,14 +152,17 @@ impl PolymarketAuth {
     }
 
     /// Build L1 authentication headers
+    ///
+    /// Requires a wallet to be available (created via `new()`, not `from_api_credentials()`).
     pub async fn l1_headers(&self, timestamp: u64, nonce: u64) -> Result<HashMap<String, String>> {
+        let wallet_address = self.wallet_address.ok_or(AuthError::WalletNotAvailable)?;
         let signature = self.sign_l1_message(timestamp, nonce).await?;
 
         let mut headers = HashMap::new();
         // Use checksummed address to match Python client
         headers.insert(
             "POLY_ADDRESS".to_string(),
-            ethers::utils::to_checksum(&self.wallet_address, None),
+            ethers::utils::to_checksum(&wallet_address, None),
         );
         headers.insert("POLY_SIGNATURE".to_string(), signature);
         headers.insert("POLY_TIMESTAMP".to_string(), timestamp.to_string());
@@ -143,6 +172,9 @@ impl PolymarketAuth {
     }
 
     /// Build L2 authentication headers for API requests
+    ///
+    /// Note: If wallet address is available, it will be included in headers.
+    /// For L2-only auth (from_api_credentials), address is omitted.
     pub fn l2_headers(
         &self,
         timestamp: u64,
@@ -158,11 +190,13 @@ impl PolymarketAuth {
         let signature = self.sign_l2_request(timestamp, method, path, body)?;
 
         let mut headers = HashMap::new();
-        // Use checksummed address (ethers to_checksum) to match Python client
-        headers.insert(
-            "POLY_ADDRESS".to_string(),
-            ethers::utils::to_checksum(&self.wallet_address, None),
-        );
+        // Include address if available (use checksummed address to match Python client)
+        if let Some(wallet_address) = self.wallet_address {
+            headers.insert(
+                "POLY_ADDRESS".to_string(),
+                ethers::utils::to_checksum(&wallet_address, None),
+            );
+        }
         headers.insert("POLY_SIGNATURE".to_string(), signature);
         headers.insert("POLY_TIMESTAMP".to_string(), timestamp.to_string());
         headers.insert("POLY_API_KEY".to_string(), api_key.key.clone());
@@ -180,8 +214,10 @@ impl PolymarketAuth {
     }
 
     /// Get the wallet reference (for order building)
-    pub fn wallet(&self) -> &LocalWallet {
-        &self.wallet
+    ///
+    /// Returns None for L2-only auth (created via `from_api_credentials()`).
+    pub fn wallet(&self) -> Option<&LocalWallet> {
+        self.wallet.as_ref()
     }
 
     /// Get the chain ID
@@ -193,13 +229,18 @@ impl PolymarketAuth {
     ///
     /// This signs the 32-byte hash directly without any prefix.
     /// Used for EIP-712 typed data signing where the hash is already computed.
+    ///
+    /// Requires a wallet to be available (created via `new()`, not `from_api_credentials()`).
     pub fn sign_hash(&self, hash: H256) -> Result<Signature> {
-        self.wallet
+        let wallet = self.wallet.as_ref().ok_or(AuthError::WalletNotAvailable)?;
+        wallet
             .sign_hash(hash)
             .map_err(|e| AuthError::SigningError(e.to_string()))
     }
 
     /// Sign a raw message hash and return as hex string
+    ///
+    /// Requires a wallet to be available (created via `new()`, not `from_api_credentials()`).
     pub fn sign_hash_hex(&self, hash: H256) -> Result<String> {
         let signature = self.sign_hash(hash)?;
         Ok(format!("0x{}", hex::encode(signature.to_vec())))

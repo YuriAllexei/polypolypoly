@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
         .context("Failed to create auth from private key")?;
 
     // For EOA, the wallet address derived from private key is both signer and maker
-    let wallet_addr = auth.address();
+    let wallet_addr = auth.address().expect("EOA auth requires wallet address");
 
     println!("  Wallet:     {:?}", wallet_addr);
     println!("  Sig Type:   EOA (0)");

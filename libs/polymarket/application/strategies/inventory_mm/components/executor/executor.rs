@@ -368,16 +368,18 @@ impl Executor {
                 }
 
                 if result.cancelled_count > 0 {
-                    info!("[Executor] Cancelled {} orders", result.cancelled_count);
-
                     // FIX: Update OMS directly after REST confirms cancellation.
                     // This fixes the critical issue where WebSocket CANCELLATION messages
                     // are delayed or dropped, causing the OMS to keep stale "Open" status.
                     if let Some(ref order_state) = self.order_state {
                         let updated = order_state.write().mark_orders_cancelled(&result.cancelled_ids);
-                        if updated > 0 {
-                            debug!("[Executor] Updated OMS: marked {} orders as cancelled", updated);
-                        }
+                        let pending = result.cancelled_count - updated;
+                        info!(
+                            "[Executor] Cancelled {} orders (REST confirmed), {} updated in OMS, {} pending",
+                            result.cancelled_count, updated, pending
+                        );
+                    } else {
+                        info!("[Executor] Cancelled {} orders (no OMS to update)", result.cancelled_count);
                     }
                 }
             }

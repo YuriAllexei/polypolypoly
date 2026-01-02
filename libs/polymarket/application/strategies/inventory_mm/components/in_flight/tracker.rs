@@ -43,10 +43,11 @@ impl InFlightTracker {
         }
     }
 
-    /// Create with default TTL of 1 second.
-    /// Reduced from 3s to allow faster recovery from silent cancel failures.
+    /// Create with default TTL of 5 seconds.
+    /// This gives enough time for WebSocket CANCELLATION messages to arrive
+    /// before we retry. Too short = repeated cancels, too long = slow recovery.
     pub fn with_default_ttl() -> Self {
-        Self::new(Duration::from_secs(1))
+        Self::new(Duration::from_secs(5))
     }
 
     // =========================================================================
@@ -79,6 +80,13 @@ impl InFlightTracker {
         self.pending_cancels.get(order_id)
             .map(|sent_at| sent_at.elapsed() < self.ttl)
             .unwrap_or(false)
+    }
+
+    /// Mark an order as pending cancellation without blocking logic.
+    /// Use this when you want to track that a cancel was sent but don't want
+    /// to prevent retries (cancels are idempotent on the exchange).
+    pub fn mark_cancel_pending(&mut self, order_id: &str) {
+        self.pending_cancels.insert(order_id.to_string(), Instant::now());
     }
 
     // =========================================================================

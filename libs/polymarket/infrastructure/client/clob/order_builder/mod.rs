@@ -302,7 +302,7 @@ mod tests {
         let auth = PolymarketAuth::new(private_key, POLYGON_CHAIN_ID).unwrap();
 
         // Verify the address matches
-        let maker = auth.address();
+        let maker = auth.address().expect("auth should have address");
         assert_eq!(
             format!("{:?}", maker).to_lowercase(),
             "0x497284cd581433f3c8224f07556a8d903113e0d3",

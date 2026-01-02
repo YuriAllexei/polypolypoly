@@ -59,6 +59,17 @@ impl InventoryMMStrategy {
         let snapshot_timeout_secs = self.config.snapshot_timeout_secs;
         let merge_cooldown_secs = self.config.merge_cooldown_secs;
 
+        // Register the token pair for this market (enables merge detection)
+        ctx.position_tracker.write().register_token_pair(
+            &market.up_token_id,
+            &market.down_token_id,
+            &market.condition_id,
+        );
+        debug!(
+            "[InventoryMM] Registered token pair for market {}: {} <-> {}",
+            market.market_id, market.up_token_id, market.down_token_id
+        );
+
         let handle = tokio::spawn(async move {
             let quoter = Quoter::new(
                 market,
@@ -246,6 +257,31 @@ impl Strategy for InventoryMMStrategy {
             Some(ctx.order_state.clone()),
         );
         self.executor_handle = Some(executor);
+
+        // Fetch and hydrate existing positions from REST API
+        info!("[InventoryMM] Fetching initial positions from REST API...");
+        match ctx.trading.rest().get_positions(ctx.trading.auth()).await {
+            Ok(positions) => {
+                let mut tracker = ctx.position_tracker.write();
+                let mut hydrated = 0;
+                for pos in &positions {
+                    // Parse size (API returns string)
+                    if let Ok(size) = pos.size.parse::<f64>() {
+                        if size.abs() > 0.001 {
+                            // Only hydrate non-zero positions
+                            // Note: REST API doesn't provide avg_price, set to 0
+                            tracker.hydrate_position(&pos.asset_id, size, 0.0);
+                            debug!("[InventoryMM] Hydrated position: {} = {}", pos.asset_id, size);
+                            hydrated += 1;
+                        }
+                    }
+                }
+                info!("[InventoryMM] Hydrated {} positions (of {} total)", hydrated, positions.len());
+            }
+            Err(e) => {
+                warn!("[InventoryMM] Failed to fetch initial positions: {}. Positions will build from fills.", e);
+            }
+        }
 
         info!("[InventoryMM] Strategy initialized");
         Ok(())

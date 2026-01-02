@@ -13,11 +13,16 @@ use super::types::{MessageType, OrderMessage, TradeMessage};
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, warn};
 
 /// Maximum number of trade IDs to track for deduplication
 /// When exceeded, oldest entries are automatically pruned
 const MAX_SEEN_TRADE_IDS: usize = 10_000;
+/// Maximum pending cancels to track (cleanup oldest when exceeded)
+const MAX_PENDING_CANCELS: usize = 1_000;
+/// TTL for pending cancels in seconds (remove after this time)
+const PENDING_CANCEL_TTL_SECS: u64 = 60;
 
 /// Parse a timestamp string into a comparable i64 value
 /// Handles:
@@ -651,6 +656,13 @@ pub struct OrderStateStore {
     callback: Arc<dyn OrderEventCallback>,
     /// Token pair registry for self-trade prevention
     token_pairs: TokenPairRegistry,
+    /// Order IDs that should be cancelled when they arrive via WebSocket.
+    /// This handles the race condition where REST cancellation confirms before
+    /// the WebSocket PLACEMENT message arrives.
+    /// Maps order_id -> insertion time for TTL cleanup.
+    pending_cancels: HashMap<String, Instant>,
+    /// Track insertion order for LRU cleanup
+    pending_cancels_order: VecDeque<String>,
 }
 
 impl std::fmt::Debug for OrderStateStore {
@@ -688,6 +700,8 @@ impl OrderStateStore {
             terminal_trade_ids: HashSet::new(),
             callback,
             token_pairs: TokenPairRegistry::new(),
+            pending_cancels: HashMap::new(),
+            pending_cancels_order: VecDeque::new(),
         }
     }
 
@@ -892,8 +906,27 @@ impl OrderStateStore {
         self.order_to_asset
             .insert(msg.id.clone(), msg.asset_id.clone());
 
+        // Check if this order should be immediately cancelled due to pending REST cancellation.
+        // This handles the race condition where REST cancellation confirms before WebSocket PLACEMENT.
+        let should_cancel = self.pending_cancels.remove(&msg.id).is_some();
+
         let book = self.get_or_create_asset(&msg.asset_id);
         book.upsert_order(order);
+
+        if should_cancel {
+            // Order was in pending_cancels - mark it as CANCELLED immediately
+            if let Some(inserted_order) = book.bids.get_mut(&msg.id)
+                .or_else(|| book.asks.get_mut(&msg.id))
+            {
+                inserted_order.status = OrderStatus::Cancelled;
+                debug!(
+                    "[OrderState] Auto-cancelled order {} from pending_cancels",
+                    &msg.id[..16.min(msg.id.len())]
+                );
+                // Return Cancelled event instead of original event
+                return Some(OrderEvent::Cancelled(inserted_order.clone()));
+            }
+        }
 
         Some(event)
     }
@@ -1475,6 +1508,7 @@ impl OrderStateStore {
     /// Returns the number of orders that were updated.
     pub fn mark_orders_cancelled(&mut self, order_ids: &[String]) -> usize {
         let mut updated = 0;
+        let mut pending = 0;
 
         for order_id in order_ids {
             // Look up which asset this order belongs to
@@ -1503,11 +1537,39 @@ impl OrderStateStore {
                         }
                     }
                 }
+            } else {
+                // Order doesn't exist yet in OMS - store for cancellation when it arrives.
+                // This handles the race condition where REST cancellation confirms before
+                // the WebSocket PLACEMENT message is processed.
+                self.pending_cancels.insert(order_id.clone(), Instant::now());
+                self.pending_cancels_order.push_back(order_id.clone());
+                pending += 1;
+                debug!(
+                    "[OrderState] Order {} not found, storing in pending_cancels",
+                    &order_id[..16.min(order_id.len())]
+                );
             }
         }
 
-        if updated > 0 {
-            debug!("[OrderState] REST-confirmed {} orders as cancelled", updated);
+        // Cleanup expired pending cancels (TTL-based)
+        let now = Instant::now();
+        let ttl = std::time::Duration::from_secs(PENDING_CANCEL_TTL_SECS);
+        self.pending_cancels.retain(|_, inserted_at| {
+            now.duration_since(*inserted_at) < ttl
+        });
+
+        // Cleanup oldest if over max size (LRU-based)
+        while self.pending_cancels_order.len() > MAX_PENDING_CANCELS {
+            if let Some(oldest_id) = self.pending_cancels_order.pop_front() {
+                self.pending_cancels.remove(&oldest_id);
+            }
+        }
+        // Keep order deque in sync with map
+        self.pending_cancels_order
+            .retain(|id| self.pending_cancels.contains_key(id));
+
+        if updated > 0 || pending > 0 {
+            debug!("[OrderState] REST-confirmed {} orders as cancelled, {} pending", updated, pending);
         }
 
         updated

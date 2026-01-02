@@ -79,16 +79,23 @@ impl RestClient {
             .map_err(|e| RestError::ApiError(format!("Failed to parse nonce: {}", e)))
     }
 
-    /// Get user positions
+    /// Get user positions from the Data API
+    /// Note: This uses the Data API (data-api.polymarket.com), not the CLOB API
     pub async fn get_positions(&self, auth: &PolymarketAuth) -> Result<Vec<Position>> {
-        let url = format!("{}/positions", self.base_url);
-        let timestamp = PolymarketAuth::current_timestamp();
+        // Get the wallet address from auth
+        let address = auth.address()
+            .ok_or_else(|| RestError::ApiError("No wallet address available for positions query".to_string()))?;
 
-        debug!("Fetching user positions");
+        // Use Data API endpoint (not CLOB API)
+        let url = format!(
+            "https://data-api.polymarket.com/positions?user={:?}",
+            address
+        );
 
-        let headers = auth.l2_headers(timestamp, "GET", "/positions", "")?;
-        let req = with_headers(self.client().get(&url), headers);
-        let response = req.send().await?;
+        debug!("Fetching user positions from Data API for {:?}", address);
+
+        // Data API doesn't require authentication - just GET with address
+        let response = self.client().get(&url).send().await?;
 
         if !response.status().is_success() {
             return Err(extract_api_error(response, "Failed to fetch positions").await);

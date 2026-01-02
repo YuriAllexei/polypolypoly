@@ -179,7 +179,8 @@ impl TradingClient {
         existing_creds: Option<ApiCredentials>,
     ) -> Result<Self> {
         let mut auth = PolymarketAuth::new(private_key, POLYGON_CHAIN_ID)?;
-        let signer_addr = auth.address();
+        // address() is guaranteed to return Some when auth is created via new()
+        let signer_addr = auth.address().expect("PolymarketAuth::new() always sets wallet address");
 
         let proxy_addr = match proxy_wallet {
             Some(addr) => Some(
