@@ -96,7 +96,8 @@ pub fn calculate_quotes(
     // Build Up quotes
     // Skip if TOO imbalanced on UP side, UNLESS we have no DOWN inventory (one-sided)
     // One-sided positions need to keep quoting to allow profit-taking if market recovers
-    let skip_up = delta > config.max_imbalance && inventory.down_size > 0.0;
+    // FIX: Use >= to include boundary (delta=0.8 should skip, not just delta>0.8)
+    let skip_up = delta >= config.max_imbalance && inventory.down_size > 0.0;
     if !skip_up {
         if let Some(best_ask) = up_ob.best_ask_price() {
             ladder.up_quotes = build_ladder(
@@ -113,7 +114,8 @@ pub fn calculate_quotes(
 
     // Build Down quotes
     // Skip if TOO imbalanced on DOWN side, UNLESS we have no UP inventory (one-sided)
-    let skip_down = delta < -config.max_imbalance && inventory.up_size > 0.0;
+    // FIX: Use <= to include boundary (delta=-0.8 should skip, not just delta<-0.8)
+    let skip_down = delta <= -config.max_imbalance && inventory.up_size > 0.0;
     if !skip_down {
         if let Some(best_ask) = down_ob.best_ask_price() {
             ladder.down_quotes = build_ladder(

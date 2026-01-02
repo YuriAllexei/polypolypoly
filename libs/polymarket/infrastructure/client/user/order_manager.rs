@@ -639,8 +639,15 @@ pub type SharedOrderState = Arc<RwLock<OrderStateStore>>;
 pub struct OrderStateStore {
     assets: HashMap<String, AssetOrderBook>,
     order_to_asset: HashMap<String, String>,
-    seen_trade_ids: HashSet<String>,
-    seen_trade_ids_order: VecDeque<String>,
+    /// Track (trade_id, status) pairs to allow status transitions.
+    /// CRITICAL: Polymarket sends separate messages for MATCHED -> MINED -> CONFIRMED.
+    /// We must allow all status updates, not just the first message for a trade_id.
+    /// Key format: "trade_id:STATUS" (e.g., "0x123:CONFIRMED")
+    seen_trade_status: HashSet<String>,
+    seen_trade_status_order: VecDeque<String>,
+    /// Track which trades have reached terminal status (CONFIRMED or FAILED).
+    /// Once terminal, we ignore all future messages for that trade_id.
+    terminal_trade_ids: HashSet<String>,
     callback: Arc<dyn OrderEventCallback>,
     /// Token pair registry for self-trade prevention
     token_pairs: TokenPairRegistry,
@@ -651,7 +658,8 @@ impl std::fmt::Debug for OrderStateStore {
         f.debug_struct("OrderStateStore")
             .field("assets", &self.assets)
             .field("order_to_asset", &self.order_to_asset)
-            .field("seen_trade_ids_count", &self.seen_trade_ids.len())
+            .field("seen_trade_status_count", &self.seen_trade_status.len())
+            .field("terminal_trade_ids_count", &self.terminal_trade_ids.len())
             .field("token_pairs_count", &self.token_pairs.pair_count())
             .field("callback", &"<callback>")
             .finish()
@@ -675,8 +683,9 @@ impl OrderStateStore {
         Self {
             assets: HashMap::new(),
             order_to_asset: HashMap::new(),
-            seen_trade_ids: HashSet::new(),
-            seen_trade_ids_order: VecDeque::new(),
+            seen_trade_status: HashSet::new(),
+            seen_trade_status_order: VecDeque::new(),
+            terminal_trade_ids: HashSet::new(),
             callback,
             token_pairs: TokenPairRegistry::new(),
         }
@@ -942,16 +951,45 @@ impl OrderStateStore {
             return None;
         }
 
-        if self.seen_trade_ids.contains(&msg.id) {
+        // CRITICAL FIX: Allow status transitions for the same trade_id.
+        // Polymarket sends: MATCHED -> MINED -> CONFIRMED (or FAILED)
+        // We must process each status update, not just the first message.
+
+        // Skip if this trade has already reached a terminal status (CONFIRMED or FAILED)
+        if self.terminal_trade_ids.contains(&msg.id) {
+            debug!(
+                "[OrderState] Ignoring trade {} - already terminal",
+                &msg.id[..16.min(msg.id.len())]
+            );
             return None;
         }
 
-        self.seen_trade_ids.insert(msg.id.clone());
-        self.seen_trade_ids_order.push_back(msg.id.clone());
+        // Create composite key: "trade_id:STATUS"
+        let status_key = format!("{}:{}", msg.id, msg.status);
 
-        while self.seen_trade_ids_order.len() > MAX_SEEN_TRADE_IDS {
-            if let Some(oldest_id) = self.seen_trade_ids_order.pop_front() {
-                self.seen_trade_ids.remove(&oldest_id);
+        // Skip if we've already seen this exact (trade_id, status) combination
+        if self.seen_trade_status.contains(&status_key) {
+            return None;
+        }
+
+        // Track this (trade_id, status) pair
+        self.seen_trade_status.insert(status_key.clone());
+        self.seen_trade_status_order.push_back(status_key);
+
+        // If this is a terminal status, mark the trade as terminal
+        let status = TradeStatus::from_str_or_default(&msg.status);
+        if matches!(status, TradeStatus::Confirmed | TradeStatus::Failed) {
+            self.terminal_trade_ids.insert(msg.id.clone());
+        }
+
+        // Cleanup old entries to prevent unbounded growth
+        while self.seen_trade_status_order.len() > MAX_SEEN_TRADE_IDS {
+            if let Some(oldest_key) = self.seen_trade_status_order.pop_front() {
+                self.seen_trade_status.remove(&oldest_key);
+                // Extract trade_id from "trade_id:STATUS" and remove from terminal set
+                if let Some(trade_id) = oldest_key.split(':').next() {
+                    self.terminal_trade_ids.remove(trade_id);
+                }
             }
         }
 
@@ -1083,17 +1121,33 @@ impl OrderStateStore {
     }
 
     /// Hydrate from REST API trades response
+    /// NOTE: REST API typically returns CONFIRMED trades only, but we check status to be safe.
     pub fn hydrate_trades(&mut self, trades: &[serde_json::Value]) {
         for trade_json in trades {
             if let Some(fill) = Self::parse_rest_trade(trade_json) {
-                // Skip duplicates
-                if self.seen_trade_ids.contains(&fill.trade_id) {
+                // Only process CONFIRMED trades from REST hydration
+                // This ensures position tracking is accurate from startup
+                if !matches!(fill.status, TradeStatus::Confirmed) {
+                    debug!(
+                        "[OrderState] Skipping non-CONFIRMED trade {} during hydration (status: {})",
+                        &fill.trade_id[..16.min(fill.trade_id.len())],
+                        fill.status
+                    );
+                    continue;
+                }
+
+                // Create composite key for deduplication
+                let status_key = format!("{}:{}", fill.trade_id, fill.status);
+
+                // Skip if already seen
+                if self.seen_trade_status.contains(&status_key) {
                     continue;
                 }
 
                 // Track for deduplication
-                self.seen_trade_ids.insert(fill.trade_id.clone());
-                self.seen_trade_ids_order.push_back(fill.trade_id.clone());
+                self.seen_trade_status.insert(status_key.clone());
+                self.seen_trade_status_order.push_back(status_key);
+                self.terminal_trade_ids.insert(fill.trade_id.clone());
 
                 let book = self.get_or_create_asset(&fill.asset_id);
                 book.add_fill(fill);
@@ -1101,9 +1155,12 @@ impl OrderStateStore {
         }
 
         // Apply cap after hydration
-        while self.seen_trade_ids_order.len() > MAX_SEEN_TRADE_IDS {
-            if let Some(oldest_id) = self.seen_trade_ids_order.pop_front() {
-                self.seen_trade_ids.remove(&oldest_id);
+        while self.seen_trade_status_order.len() > MAX_SEEN_TRADE_IDS {
+            if let Some(oldest_key) = self.seen_trade_status_order.pop_front() {
+                self.seen_trade_status.remove(&oldest_key);
+                if let Some(trade_id) = oldest_key.split(':').next() {
+                    self.terminal_trade_ids.remove(trade_id);
+                }
             }
         }
     }
@@ -1403,6 +1460,60 @@ impl OrderStateStore {
     }
 
     // =========================================================================
+    // REST API Sync (for when WebSocket messages are delayed/dropped)
+    // =========================================================================
+
+    /// Mark orders as cancelled after REST API confirms the cancellation.
+    ///
+    /// This fixes a critical issue where WebSocket CANCELLATION messages are delayed
+    /// or dropped entirely, causing the OMS to keep stale "Open" order status.
+    /// The quoter then keeps trying to cancel these "ghost" orders.
+    ///
+    /// ONLY call this with order IDs that were confirmed cancelled by the REST API.
+    /// Do NOT call this optimistically before confirmation.
+    ///
+    /// Returns the number of orders that were updated.
+    pub fn mark_orders_cancelled(&mut self, order_ids: &[String]) -> usize {
+        let mut updated = 0;
+
+        for order_id in order_ids {
+            // Look up which asset this order belongs to
+            if let Some(asset_id) = self.order_to_asset.get(order_id).cloned() {
+                if let Some(book) = self.assets.get_mut(&asset_id) {
+                    // Try to find and update the order in bids
+                    if let Some(order) = book.bids.get_mut(order_id) {
+                        if order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled {
+                            order.status = OrderStatus::Cancelled;
+                            updated += 1;
+                            debug!(
+                                "[OrderState] REST-confirmed: marked order {} as CANCELLED",
+                                &order_id[..16.min(order_id.len())]
+                            );
+                        }
+                    }
+                    // Also check asks
+                    else if let Some(order) = book.asks.get_mut(order_id) {
+                        if order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled {
+                            order.status = OrderStatus::Cancelled;
+                            updated += 1;
+                            debug!(
+                                "[OrderState] REST-confirmed: marked order {} as CANCELLED",
+                                &order_id[..16.min(order_id.len())]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if updated > 0 {
+            debug!("[OrderState] REST-confirmed {} orders as cancelled", updated);
+        }
+
+        updated
+    }
+
+    // =========================================================================
     // Global Stats
     // =========================================================================
 
@@ -1434,9 +1545,14 @@ impl OrderStateStore {
         self.assets.get(asset_id)
     }
 
-    /// Number of seen trade IDs (for deduplication tracking)
+    /// Number of seen trade status pairs (for deduplication tracking)
     pub fn seen_trade_count(&self) -> usize {
-        self.seen_trade_ids.len()
+        self.seen_trade_status.len()
+    }
+
+    /// Number of terminal (CONFIRMED/FAILED) trades
+    pub fn terminal_trade_count(&self) -> usize {
+        self.terminal_trade_ids.len()
     }
 
     // =========================================================================
@@ -1456,19 +1572,20 @@ impl OrderStateStore {
     }
 
     /// Prune old trades, keeping only the most recent N per asset
-    /// Also cleans up the seen_trade_ids set and order tracking
+    /// Also cleans up the deduplication tracking
     pub fn prune_old_trades(&mut self, keep_last_n_per_asset: usize) {
         for book in self.assets.values_mut() {
             let removed = book.prune_trades(keep_last_n_per_asset);
-            // Clean up the seen_trade_ids set
+            // Clean up deduplication tracking for removed trades
             for trade_id in removed {
-                self.seen_trade_ids.remove(&trade_id);
+                // Remove all status entries for this trade
+                self.seen_trade_status.retain(|key| !key.starts_with(&format!("{}:", trade_id)));
+                self.terminal_trade_ids.remove(&trade_id);
             }
         }
         // Rebuild the order VecDeque to match the HashSet
-        // (More efficient than searching and removing individual entries)
-        self.seen_trade_ids_order
-            .retain(|id| self.seen_trade_ids.contains(id));
+        self.seen_trade_status_order
+            .retain(|key| self.seen_trade_status.contains(key));
     }
 }
 
@@ -1854,7 +1971,7 @@ mod tests {
     }
 
     #[test]
-    fn test_seen_trade_ids_auto_cap() {
+    fn test_seen_trade_status_auto_cap() {
         let mut store = OrderStateStore::new();
 
         // Add trades up to the limit
@@ -1866,8 +1983,9 @@ mod tests {
         assert_eq!(store.fill_count(), 100);
         assert_eq!(store.seen_trade_count(), 100);
 
-        // The first trade ID should still be tracked (we're under the cap)
-        assert!(store.seen_trade_ids.contains("trade-0"));
+        // The first trade's status key should still be tracked (we're under the cap)
+        // Status key format: "trade_id:STATUS"
+        assert!(store.seen_trade_status.contains("trade-0:MATCHED"));
     }
 
     #[test]

@@ -11,6 +11,7 @@ use super::commands::{ExecutorCommand, ExecutorResult};
 use crate::application::strategies::inventory_mm::types::{SolverOutput, LimitOrder, Side};
 use crate::infrastructure::client::clob::{TradingClient, Side as TradingSide, OrderType};
 use crate::infrastructure::client::ctf::{merge as ctf_merge, usdc_to_raw};
+use crate::infrastructure::SharedOrderState;
 
 /// Lightweight executor handle for quoters (Clone-able).
 /// Does NOT have shutdown capability - only main strategy can shutdown.
@@ -164,11 +165,23 @@ pub struct Executor {
     trading: Arc<TradingClient>,
     /// Tokio runtime for async calls
     runtime: Runtime,
+    /// Shared order state for optimistic updates after REST confirms cancellations.
+    /// This fixes the issue where WebSocket CANCELLATION messages are delayed/dropped
+    /// causing the OMS to keep stale "Open" order status.
+    order_state: Option<SharedOrderState>,
 }
 
 impl Executor {
-    /// Spawn the executor on a new thread with a trading client
+    /// Spawn the executor on a new thread with a trading client.
+    /// Optionally accepts SharedOrderState for optimistic OMS updates when cancels are confirmed.
     pub fn spawn(trading: Arc<TradingClient>) -> ExecutorHandle {
+        Self::spawn_with_order_state(trading, None)
+    }
+
+    /// Spawn the executor with SharedOrderState for optimistic OMS updates.
+    /// When the REST API confirms cancellations, the executor will update the OMS directly
+    /// instead of waiting for WebSocket CANCELLATION messages (which may be delayed/dropped).
+    pub fn spawn_with_order_state(trading: Arc<TradingClient>, order_state: Option<SharedOrderState>) -> ExecutorHandle {
         let (command_tx, command_rx) = unbounded();
 
         let runtime = Runtime::new().expect("Failed to create tokio runtime");
@@ -177,6 +190,7 @@ impl Executor {
             command_rx,
             trading,
             runtime,
+            order_state,
         };
 
         let thread_handle = thread::Builder::new()
@@ -355,6 +369,16 @@ impl Executor {
 
                 if result.cancelled_count > 0 {
                     info!("[Executor] Cancelled {} orders", result.cancelled_count);
+
+                    // FIX: Update OMS directly after REST confirms cancellation.
+                    // This fixes the critical issue where WebSocket CANCELLATION messages
+                    // are delayed or dropped, causing the OMS to keep stale "Open" status.
+                    if let Some(ref order_state) = self.order_state {
+                        let updated = order_state.write().mark_orders_cancelled(&result.cancelled_ids);
+                        if updated > 0 {
+                            debug!("[Executor] Updated OMS: marked {} orders as cancelled", updated);
+                        }
+                    }
                 }
             }
             Err(e) => {

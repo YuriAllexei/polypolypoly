@@ -237,8 +237,14 @@ impl Strategy for InventoryMMStrategy {
     async fn initialize(&mut self, ctx: &StrategyContext) -> StrategyResult<()> {
         info!("[InventoryMM] Initializing strategy");
 
-        // Spawn executor with TradingClient
-        let executor = Executor::spawn(ctx.trading.clone());
+        // Spawn executor with TradingClient AND SharedOrderState.
+        // The order_state allows the executor to update OMS directly after REST API
+        // confirms cancellations, fixing the issue where WebSocket CANCELLATION messages
+        // are delayed/dropped causing stale "Open" order status in OMS.
+        let executor = Executor::spawn_with_order_state(
+            ctx.trading.clone(),
+            Some(ctx.order_state.clone()),
+        );
         self.executor_handle = Some(executor);
 
         info!("[InventoryMM] Strategy initialized");

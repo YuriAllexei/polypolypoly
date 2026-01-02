@@ -29,11 +29,11 @@
 //! let merges = tracker.read().get_merge_opportunities();
 //! ```
 
-use super::order_manager::{Fill, Order, OrderEventCallback, Side, TokenPairRegistry};
+use super::order_manager::{Fill, Order, OrderEventCallback, Side, TokenPairRegistry, TradeStatus};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Epsilon for floating point comparisons
 const POSITION_EPSILON: f64 = 1e-9;
@@ -591,38 +591,74 @@ impl OrderEventCallback for PositionTrackerBridge {
     }
 
     fn on_trade(&self, fill: &Fill) {
-        // Apply fill and get events (acquire write lock)
-        let (event, merge_opportunity) = self.tracker.write().apply_fill(fill);
+        // CRITICAL FIX: Only update positions when trades are CONFIRMED (on-chain finality).
+        //
+        // Trade status lifecycle from Polymarket docs:
+        //   MATCHED  -> Trade matched, sent to executor, NOT yet on-chain
+        //   MINED    -> Transaction mined but no finality established
+        //   CONFIRMED -> Trade has strong probabilistic finality and was SUCCESSFUL
+        //   RETRYING -> Transaction FAILED, being retried
+        //   FAILED   -> Trade FAILED permanently
+        //
+        // Processing MATCHED would update positions for trades that may never settle,
+        // causing position drift when trades fail or are retried.
+        match fill.status {
+            TradeStatus::Confirmed => {
+                // Apply fill and get events (acquire write lock)
+                let (event, merge_opportunity) = self.tracker.write().apply_fill(fill);
 
-        // Log the fill for visibility
-        if let PositionEvent::Updated { ref new_position, .. } = event {
-            info!(
-                "[PositionTracker] {} {} {:.2} @ ${:.4} | New position: {:.2} shares @ ${:.4} avg | Realized P&L: ${:.2}",
-                fill.side,
-                &fill.asset_id[..8.min(fill.asset_id.len())],
-                fill.size,
-                fill.price,
-                new_position.size,
-                new_position.avg_entry_price,
-                new_position.realized_pnl
-            );
-        }
+                // Log the fill for visibility
+                if let PositionEvent::Updated { ref new_position, .. } = event {
+                    info!(
+                        "[PositionTracker] CONFIRMED: {} {} {:.2} @ ${:.4} | Position: {:.2} shares @ ${:.4} avg | Realized P&L: ${:.2}",
+                        fill.side,
+                        &fill.asset_id[..8.min(fill.asset_id.len())],
+                        fill.size,
+                        fill.price,
+                        new_position.size,
+                        new_position.avg_entry_price,
+                        new_position.realized_pnl
+                    );
+                }
 
-        // Fire callbacks OUTSIDE the lock scope to prevent deadlocks
-        // This allows callbacks to safely read the tracker
-        {
-            let tracker = self.tracker.read();
-            tracker.fire_callback(&event);
+                // Fire callbacks OUTSIDE the lock scope to prevent deadlocks
+                // This allows callbacks to safely read the tracker
+                {
+                    let tracker = self.tracker.read();
+                    tracker.fire_callback(&event);
 
-            if let Some(ref merge) = merge_opportunity {
-                info!(
-                    "[PositionTracker] MERGE OPPORTUNITY: {:.2} pairs available, profit: ${:.2} ({:.1}%)",
-                    merge.mergeable_pairs,
-                    merge.potential_profit,
-                    merge.profit_percentage()
+                    if let Some(ref merge) = merge_opportunity {
+                        info!(
+                            "[PositionTracker] MERGE OPPORTUNITY: {:.2} pairs available, profit: ${:.2} ({:.1}%)",
+                            merge.mergeable_pairs,
+                            merge.potential_profit,
+                            merge.profit_percentage()
+                        );
+                        let merge_event = PositionEvent::MergeOpportunity(merge.clone());
+                        tracker.fire_callback(&merge_event);
+                    }
+                }
+            }
+            TradeStatus::Failed => {
+                // Log failed trades for visibility but don't update positions
+                warn!(
+                    "[PositionTracker] FAILED trade: {} {} {:.2} @ ${:.4} (not applied to position)",
+                    fill.side,
+                    &fill.asset_id[..8.min(fill.asset_id.len())],
+                    fill.size,
+                    fill.price
                 );
-                let merge_event = PositionEvent::MergeOpportunity(merge.clone());
-                tracker.fire_callback(&merge_event);
+            }
+            _ => {
+                // MATCHED, MINED, RETRYING - log but don't apply to positions
+                debug!(
+                    "[PositionTracker] {} trade (not applied): {} {} {:.2} @ ${:.4}",
+                    fill.status,
+                    fill.side,
+                    &fill.asset_id[..8.min(fill.asset_id.len())],
+                    fill.size,
+                    fill.price
+                );
             }
         }
     }
@@ -980,6 +1016,45 @@ mod tests {
         bridge.on_trade(&fill);
 
         let pos = tracker.read().get_position("token-1").unwrap().clone();
+        assert_eq!(pos.size, 100.0);
+    }
+
+    #[test]
+    fn test_bridge_ignores_non_confirmed_fills() {
+        use super::super::order_manager::TradeStatus;
+
+        let tracker = Arc::new(RwLock::new(PositionTracker::new()));
+        let bridge = PositionTrackerBridge::new(tracker.clone());
+
+        // MATCHED trades should NOT be applied
+        let mut matched_fill = make_fill("token-1", Side::Buy, 0.50, 100.0);
+        matched_fill.status = TradeStatus::Matched;
+        bridge.on_trade(&matched_fill);
+        assert!(tracker.read().get_position("token-1").is_none());
+
+        // MINED trades should NOT be applied
+        let mut mined_fill = make_fill("token-2", Side::Buy, 0.50, 100.0);
+        mined_fill.status = TradeStatus::Mined;
+        bridge.on_trade(&mined_fill);
+        assert!(tracker.read().get_position("token-2").is_none());
+
+        // RETRYING trades should NOT be applied
+        let mut retrying_fill = make_fill("token-3", Side::Buy, 0.50, 100.0);
+        retrying_fill.status = TradeStatus::Retrying;
+        bridge.on_trade(&retrying_fill);
+        assert!(tracker.read().get_position("token-3").is_none());
+
+        // FAILED trades should NOT be applied
+        let mut failed_fill = make_fill("token-4", Side::Buy, 0.50, 100.0);
+        failed_fill.status = TradeStatus::Failed;
+        bridge.on_trade(&failed_fill);
+        assert!(tracker.read().get_position("token-4").is_none());
+
+        // CONFIRMED trades SHOULD be applied
+        let confirmed_fill = make_fill("token-5", Side::Buy, 0.50, 100.0);
+        // make_fill already sets status to Confirmed
+        bridge.on_trade(&confirmed_fill);
+        let pos = tracker.read().get_position("token-5").unwrap().clone();
         assert_eq!(pos.size, 100.0);
     }
 }

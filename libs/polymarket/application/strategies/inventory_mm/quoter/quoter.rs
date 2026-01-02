@@ -308,7 +308,51 @@ impl Quoter {
         let max_orders_per_side = self.config.num_levels;
 
         let mut output = solve(input);
-        output.cancellations.retain(|oid| self.in_flight_tracker.should_cancel(oid));
+
+        // FIX: Don't filter cancellations - they are IDEMPOTENT and safe to retry.
+        // The exchange will just return "order already cancelled" if we send twice.
+        // Blocking cancels causes massive order accumulation when OMS confirmation is slow.
+        // We still track them for debugging but don't prevent retries.
+        for oid in &output.cancellations {
+            // Just mark as pending for tracking purposes (allows debugging)
+            // Don't use should_cancel() which would block retries
+            let _ = self.in_flight_tracker.is_cancel_pending(oid);
+        }
+
+        // EMERGENCY FIX: If we have WAY more orders than max_orders_per_side,
+        // cancel ALL excess orders immediately (not just price mismatches).
+        // This handles accumulation from previous bugs or race conditions.
+        let up_excess = up_open.saturating_sub(max_orders_per_side);
+        let down_excess = down_open.saturating_sub(max_orders_per_side);
+
+        if up_excess > 0 {
+            warn!(
+                "[Quoter:{}] UP has {} excess orders ({} open, max {}), cancelling oldest",
+                self.market.short_desc(), up_excess, up_open, max_orders_per_side
+            );
+            // Get oldest orders to keep, cancel the rest
+            let mut up_orders: Vec<_> = input.up_orders.bids.iter().collect();
+            up_orders.sort_by_key(|o| o.created_at);
+            for order in up_orders.iter().skip(max_orders_per_side) {
+                if !output.cancellations.contains(&order.order_id) {
+                    output.cancellations.push(order.order_id.clone());
+                }
+            }
+        }
+
+        if down_excess > 0 {
+            warn!(
+                "[Quoter:{}] DOWN has {} excess orders ({} open, max {}), cancelling oldest",
+                self.market.short_desc(), down_excess, down_open, max_orders_per_side
+            );
+            let mut down_orders: Vec<_> = input.down_orders.bids.iter().collect();
+            down_orders.sort_by_key(|o| o.created_at);
+            for order in down_orders.iter().skip(max_orders_per_side) {
+                if !output.cancellations.contains(&order.order_id) {
+                    output.cancellations.push(order.order_id.clone());
+                }
+            }
+        }
 
         // Filter placements with TWO checks:
         // 1. Block if already at capacity for this side (open + pending >= max)
