@@ -392,7 +392,8 @@ async fn spawn_single_oracle_tracker(
 /// Spawn both ChainLink and Binance oracle WebSocket connections.
 ///
 /// Returns the shared price manager for reading prices.
-/// Both connections run in background tasks and update the shared state.
+/// - ChainLink: Direct connection to ChainLink Data Streams WebSocket API
+/// - Binance: Via Polymarket's live data WebSocket relay
 pub async fn spawn_oracle_trackers(
     shutdown_flag: Arc<AtomicBool>,
 ) -> Result<SharedOraclePrices> {
@@ -400,29 +401,27 @@ pub async fn spawn_oracle_trackers(
     let prices: SharedOraclePrices = Arc::new(RwLock::new(OraclePriceManager::new()));
 
     info!("════════════════════════════════════════════════════════════════");
-    info!("🔮 STARTING ORACLE PRICE TRACKERS");
+    info!("STARTING ORACLE PRICE TRACKERS");
     info!("════════════════════════════════════════════════════════════════");
-    info!("  ChainLink: crypto_prices_chainlink");
-    info!("  Binance:   crypto_prices");
-    info!("  Heartbeat: {} seconds", HEARTBEAT_INTERVAL_SECS);
+    info!("  ChainLink: Direct Data Streams WebSocket (BTC, ETH, SOL, XRP)");
+    info!("  Binance:   Polymarket relay (crypto_prices)");
     info!("════════════════════════════════════════════════════════════════");
 
-    // Spawn ChainLink tracker
+    // Spawn ChainLink tracker (direct WebSocket connection)
     let chainlink_prices = Arc::clone(&prices);
     let chainlink_shutdown = Arc::clone(&shutdown_flag);
     tokio::spawn(async move {
-        if let Err(e) = spawn_single_oracle_tracker(
-            OracleType::ChainLink,
+        if let Err(e) = super::chainlink_ws::spawn_chainlink_tracker(
             chainlink_prices,
             chainlink_shutdown,
         )
         .await
         {
-            warn!("[Oracle ChainLink] Tracker failed: {}", e);
+            warn!("[ChainLink WS] Tracker failed: {}", e);
         }
     });
 
-    // Spawn Binance tracker
+    // Spawn Binance tracker (via Polymarket relay)
     let binance_prices = Arc::clone(&prices);
     let binance_shutdown = Arc::clone(&shutdown_flag);
     tokio::spawn(async move {
