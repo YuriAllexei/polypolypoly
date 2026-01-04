@@ -1502,39 +1502,57 @@ impl OrderStateStore {
     /// or dropped entirely, causing the OMS to keep stale "Open" order status.
     /// The quoter then keeps trying to cancel these "ghost" orders.
     ///
+    /// CRITICAL FIX: This now REMOVES cancelled orders from the OMS HashMap entirely,
+    /// rather than just marking status. This prevents:
+    /// 1. Memory growth from accumulated cancelled orders
+    /// 2. Stale orders appearing in queries if status update is delayed
+    /// 3. Order count exceeding limits due to ghost orders
+    ///
     /// ONLY call this with order IDs that were confirmed cancelled by the REST API.
     /// Do NOT call this optimistically before confirmation.
     ///
-    /// Returns the number of orders that were updated.
+    /// Returns the number of orders that were removed.
     pub fn mark_orders_cancelled(&mut self, order_ids: &[String]) -> usize {
-        let mut updated = 0;
+        let mut removed = 0;
         let mut pending = 0;
 
         for order_id in order_ids {
             // Look up which asset this order belongs to
             if let Some(asset_id) = self.order_to_asset.get(order_id).cloned() {
                 if let Some(book) = self.assets.get_mut(&asset_id) {
-                    // Try to find and update the order in bids
-                    if let Some(order) = book.bids.get_mut(order_id) {
-                        if order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled {
-                            order.status = OrderStatus::Cancelled;
-                            updated += 1;
-                            debug!(
-                                "[OrderState] REST-confirmed: marked order {} as CANCELLED",
-                                &order_id[..16.min(order_id.len())]
-                            );
-                        }
+                    // Check if order is in bids and is open
+                    let was_in_bids = if let Some(order) = book.bids.get(order_id) {
+                        order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled
+                    } else {
+                        false
+                    };
+
+                    // Check if order is in asks and is open
+                    let was_in_asks = if let Some(order) = book.asks.get(order_id) {
+                        order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled
+                    } else {
+                        false
+                    };
+
+                    // Remove from bids if it was open
+                    if was_in_bids {
+                        book.bids.remove(order_id);
+                        self.order_to_asset.remove(order_id);
+                        removed += 1;
+                        debug!(
+                            "[OrderState] REST-confirmed: REMOVED order {} from bids",
+                            &order_id[..16.min(order_id.len())]
+                        );
                     }
-                    // Also check asks
-                    else if let Some(order) = book.asks.get_mut(order_id) {
-                        if order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled {
-                            order.status = OrderStatus::Cancelled;
-                            updated += 1;
-                            debug!(
-                                "[OrderState] REST-confirmed: marked order {} as CANCELLED",
-                                &order_id[..16.min(order_id.len())]
-                            );
-                        }
+                    // Remove from asks if it was open
+                    else if was_in_asks {
+                        book.asks.remove(order_id);
+                        self.order_to_asset.remove(order_id);
+                        removed += 1;
+                        debug!(
+                            "[OrderState] REST-confirmed: REMOVED order {} from asks",
+                            &order_id[..16.min(order_id.len())]
+                        );
                     }
                 }
             } else {
@@ -1568,11 +1586,11 @@ impl OrderStateStore {
         self.pending_cancels_order
             .retain(|id| self.pending_cancels.contains_key(id));
 
-        if updated > 0 || pending > 0 {
-            debug!("[OrderState] REST-confirmed {} orders as cancelled, {} pending", updated, pending);
+        if removed > 0 || pending > 0 {
+            debug!("[OrderState] REST-confirmed: removed {} orders, {} pending", removed, pending);
         }
 
-        updated
+        removed
     }
 
     // =========================================================================

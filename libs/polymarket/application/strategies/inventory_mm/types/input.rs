@@ -60,12 +60,20 @@ pub struct InventorySnapshot {
 impl InventorySnapshot {
     /// Calculate imbalance ratio: (up - down) / (up + down)
     /// Returns value between -1.0 (all down) and +1.0 (all up)
+    ///
+    /// IMPORTANT: Uses signed values to correctly handle short positions.
+    /// - Positive size = long position (we own tokens)
+    /// - Negative size = short position (we owe tokens)
+    ///
+    /// Example: up_size=100, down_size=-80 (short 80 DOWN)
+    /// Imbalance = (100 - (-80)) / (|100| + |-80|) = 180/180 = 1.0 (heavily long UP)
     pub fn imbalance(&self) -> f64 {
         let total = self.up_size.abs() + self.down_size.abs();
         if total < 1e-9 {
             return 0.0;
         }
-        (self.up_size.abs() - self.down_size.abs()) / total
+        // Use signed values in numerator to correctly handle shorts
+        (self.up_size - self.down_size) / total
     }
 
     /// Combined average cost for merge profitability
@@ -266,6 +274,46 @@ mod tests {
     fn test_imbalance_empty() {
         let inv = InventorySnapshot::default();
         assert!((inv.imbalance() - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_imbalance_with_short_position() {
+        // Long 100 UP, Short 80 DOWN (negative = short/owe tokens)
+        // This is heavily imbalanced toward UP
+        // Imbalance = (100 - (-80)) / (|100| + |-80|) = 180 / 180 = 1.0
+        let inv = InventorySnapshot {
+            up_size: 100.0,
+            up_avg_price: 0.55,
+            down_size: -80.0, // SHORT position
+            down_avg_price: 0.45,
+        };
+        assert!((inv.imbalance() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_imbalance_with_both_shorts() {
+        // Short 50 UP, Short 50 DOWN
+        // Imbalance = (-50 - (-50)) / (50 + 50) = 0 / 100 = 0.0
+        let inv = InventorySnapshot {
+            up_size: -50.0, // SHORT
+            up_avg_price: 0.55,
+            down_size: -50.0, // SHORT
+            down_avg_price: 0.45,
+        };
+        assert!((inv.imbalance() - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_imbalance_long_down_short_up() {
+        // Short 30 UP, Long 70 DOWN
+        // Imbalance = (-30 - 70) / (30 + 70) = -100 / 100 = -1.0
+        let inv = InventorySnapshot {
+            up_size: -30.0, // SHORT
+            up_avg_price: 0.55,
+            down_size: 70.0, // LONG
+            down_avg_price: 0.45,
+        };
+        assert!((inv.imbalance() - (-1.0)).abs() < 0.001);
     }
 
     #[test]

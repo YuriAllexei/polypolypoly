@@ -75,6 +75,29 @@ impl InFlightTracker {
         self.pending_cancels.remove(order_id);
     }
 
+    /// Call when a cancel command succeeds (REST API confirms).
+    /// This immediately clears the pending cancel, avoiding the need to wait
+    /// for cleanup() to see the order removed from OMS.
+    ///
+    /// IMPORTANT: Call this when REST API confirms cancellation, not when WebSocket
+    /// sends the CANCELLATION message. This prevents race conditions where WebSocket
+    /// is delayed but REST has already confirmed.
+    pub fn cancel_confirmed(&mut self, order_id: &str) {
+        if self.pending_cancels.remove(order_id).is_some() {
+            debug!(
+                "[InFlight] Cancel confirmed (REST): {}",
+                &order_id[..16.min(order_id.len())]
+            );
+        }
+    }
+
+    /// Batch version of cancel_confirmed for multiple order IDs.
+    pub fn cancels_confirmed(&mut self, order_ids: &[String]) {
+        for order_id in order_ids {
+            self.cancel_confirmed(order_id);
+        }
+    }
+
     /// Check if an order ID is currently pending cancellation.
     pub fn is_cancel_pending(&self, order_id: &str) -> bool {
         self.pending_cancels.get(order_id)
