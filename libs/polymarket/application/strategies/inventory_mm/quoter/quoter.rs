@@ -502,14 +502,29 @@ impl Quoter {
         let down_ob_bid = input.down_orderbook.best_bid_price();
         let delta_snapshot = input.inventory.imbalance();
 
+        // CRITICAL SAFETY: Check if either side has ZERO inventory
+        // If inventory is zero on a side, we MUST allow placements regardless of OMS state
+        // because the OMS levels are likely ghost/stale orders
+        let up_inventory_zero = input.inventory.up_size.abs() < 1.0;
+        let down_inventory_zero = input.inventory.down_size.abs() < 1.0;
+
         output.limit_orders.retain(|o| {
             let price_key = price_to_key(o.price);
+            let is_up_token = o.token_id == input.up_token_id;
 
-            let (all_levels, total_level_count) = if o.token_id == input.up_token_id {
+            let (all_levels, total_level_count) = if is_up_token {
                 (&up_all_levels, up_total_levels)
             } else {
                 (&down_all_levels, down_total_levels)
             };
+
+            // CRITICAL SAFETY BYPASS: If inventory on this side is ZERO, allow ALL placements
+            // This prevents the disaster where OMS shows stale orders but actual inventory is 0
+            let inventory_zero_bypass = if is_up_token { up_inventory_zero } else { down_inventory_zero };
+            if inventory_zero_bypass {
+                // Always allow placements when we have ZERO inventory on this side
+                return self.in_flight_tracker.should_place(&o.token_id, o.price);
+            }
 
             // If price level already exists (OMS or pending), allow for FIFO preservation
             let is_existing_level = all_levels.contains(&price_key);
@@ -522,8 +537,8 @@ impl Quoter {
                     &o.token_id[..8.min(o.token_id.len())],
                     total_level_count,
                     max_price_levels,
-                    if o.token_id == input.up_token_id { up_oms_levels.len() } else { down_oms_levels.len() },
-                    if o.token_id == input.up_token_id { up_pending_levels.len() } else { down_pending_levels.len() }
+                    if is_up_token { up_oms_levels.len() } else { down_oms_levels.len() },
+                    if is_up_token { up_pending_levels.len() } else { down_pending_levels.len() }
                 );
                 return false;
             }

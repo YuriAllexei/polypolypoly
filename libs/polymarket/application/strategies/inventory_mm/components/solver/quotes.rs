@@ -3,7 +3,7 @@
 //! Simple market-making: place bids below best_ask with offset based on imbalance.
 //! No profitability checks - that will be redesigned separately.
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::application::strategies::inventory_mm::types::{
     InventorySnapshot, OrderbookSnapshot, Quote, QuoteLadder, SolverConfig,
@@ -71,9 +71,32 @@ pub fn calculate_quotes(
     let is_building_down_from_scratch = inventory.down_size.abs() < config.order_size;
 
     // Skip UP if heavily long UP AND we have significant UP to rebalance from
-    let skip_up = delta >= config.max_imbalance && !is_building_up_from_scratch;
+    let mut skip_up = delta >= config.max_imbalance && !is_building_up_from_scratch;
     // Skip DOWN if heavily long DOWN AND we have significant DOWN to rebalance from
-    let skip_down = delta <= -config.max_imbalance && !is_building_down_from_scratch;
+    let mut skip_down = delta <= -config.max_imbalance && !is_building_down_from_scratch;
+
+    // SAFETY LIMIT: Skip quoting if max_position is reached
+    // This prevents runaway inventory accumulation during testing
+    if config.max_position > 0.0 {
+        if inventory.up_size.abs() >= config.max_position {
+            if !skip_up {
+                warn!(
+                    "[Solver] MAX POSITION LIMIT: UP position {:.1} >= limit {:.1}, stopping UP quotes",
+                    inventory.up_size.abs(), config.max_position
+                );
+            }
+            skip_up = true;
+        }
+        if inventory.down_size.abs() >= config.max_position {
+            if !skip_down {
+                warn!(
+                    "[Solver] MAX POSITION LIMIT: DOWN position {:.1} >= limit {:.1}, stopping DOWN quotes",
+                    inventory.down_size.abs(), config.max_position
+                );
+            }
+            skip_down = true;
+        }
+    }
 
     if skip_up || skip_down {
         debug!(
@@ -264,6 +287,7 @@ mod tests {
             offset_scaling: 5.0,
             skew_factor: 1.0,
             min_offset: 0.01,
+            max_position: 0.0,  // 0 = unlimited for tests
         }
     }
 

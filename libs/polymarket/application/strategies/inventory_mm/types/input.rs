@@ -191,6 +191,10 @@ pub struct SolverConfig {
     /// When offsets go negative due to extreme imbalance, this floor
     /// prevents bids from crossing the ask. Must be >= tick_size (0.01).
     pub min_offset: f64,
+
+    /// Maximum position size per side (UP/DOWN) - stops quoting when reached.
+    /// Set to 0.0 for unlimited. This is a safety limit for testing.
+    pub max_position: f64,
 }
 
 impl Default for SolverConfig {
@@ -205,6 +209,7 @@ impl Default for SolverConfig {
             offset_scaling: 5.0,         // Scale offset 5x with imbalance
             skew_factor: 1.0,            // Moderate size skew based on delta
             min_offset: 0.01,            // Min offset = tick_size to prevent spread crossing
+            max_position: 0.0,           // 0 = unlimited (set in config for testing)
         }
     }
 }

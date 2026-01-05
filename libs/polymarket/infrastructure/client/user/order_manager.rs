@@ -1576,46 +1576,48 @@ impl OrderStateStore {
             // Look up which asset this order belongs to
             if let Some(asset_id) = self.order_to_asset.get(order_id).cloned() {
                 if let Some(book) = self.assets.get_mut(&asset_id) {
-                    // Check if order is in bids and is open
-                    let was_in_bids = if let Some(order) = book.bids.get(order_id) {
-                        order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled
+                    // Check if order exists in bids (any status)
+                    let in_bids = book.bids.contains_key(order_id);
+                    let in_asks = book.asks.contains_key(order_id);
+
+                    // Get current status for logging
+                    let order_status = if in_bids {
+                        book.bids.get(order_id).map(|o| o.status)
+                    } else if in_asks {
+                        book.asks.get(order_id).map(|o| o.status)
                     } else {
-                        false
+                        None
                     };
 
-                    // Check if order is in asks and is open
-                    let was_in_asks = if let Some(order) = book.asks.get(order_id) {
-                        order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled
-                    } else {
-                        false
-                    };
-
-                    // Remove from bids if it was open
-                    if was_in_bids {
+                    // Remove from bids if it exists (regardless of status)
+                    // CRITICAL FIX: Also remove Filled/Cancelled orders, not just Open ones
+                    // This fixes the race condition where WebSocket UPDATE changes status
+                    // to Filled between quoter reading OMS and executor calling cancel
+                    if in_bids {
                         book.bids.remove(order_id);
                         self.order_to_asset.remove(order_id);
                         removed += 1;
-                        // CRITICAL FIX: Add to pending_cancels so late WebSocket PLACEMENTs
-                        // don't re-add this order back to OMS
+                        // Add to pending_cancels so late WebSocket PLACEMENTs don't re-add
                         self.pending_cancels.insert(order_id.clone(), Instant::now());
                         self.pending_cancels_order.push_back(order_id.clone());
                         debug!(
-                            "[OrderState] REST-confirmed: REMOVED order {} from bids (added to pending_cancels)",
-                            &order_id[..16.min(order_id.len())]
+                            "[OrderState] REST-confirmed: REMOVED order {} from bids (status was {:?})",
+                            &order_id[..16.min(order_id.len())],
+                            order_status
                         );
                     }
-                    // Remove from asks if it was open
-                    else if was_in_asks {
+                    // Remove from asks if it exists (regardless of status)
+                    else if in_asks {
                         book.asks.remove(order_id);
                         self.order_to_asset.remove(order_id);
                         removed += 1;
-                        // CRITICAL FIX: Add to pending_cancels so late WebSocket PLACEMENTs
-                        // don't re-add this order back to OMS
+                        // Add to pending_cancels so late WebSocket PLACEMENTs don't re-add
                         self.pending_cancels.insert(order_id.clone(), Instant::now());
                         self.pending_cancels_order.push_back(order_id.clone());
                         debug!(
-                            "[OrderState] REST-confirmed: REMOVED order {} from asks (added to pending_cancels)",
-                            &order_id[..16.min(order_id.len())]
+                            "[OrderState] REST-confirmed: REMOVED order {} from asks (status was {:?})",
+                            &order_id[..16.min(order_id.len())],
+                            order_status
                         );
                     }
                 }

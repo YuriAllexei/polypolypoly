@@ -89,6 +89,9 @@ inventory_mm:
     max_imbalance: 0.8
     # Order size per level (tokens)
     order_size: 100.0
+    # Maximum position size per side (UP/DOWN) - stops quoting when reached
+    # Set to 0 for unlimited. This is a safety limit for testing.
+    max_position: 200.0
     # Spread adjustment per level (cents)
     spread_per_level: 1.0
     # Multiplier for offset scaling with imbalance

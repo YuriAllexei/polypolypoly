@@ -195,6 +195,7 @@ mod visual_tests {
             offset_scaling: 5.0,
             skew_factor: 2.0,
             min_offset: 0.01,
+            max_position: 0.0,
         }
     }
 
