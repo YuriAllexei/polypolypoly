@@ -357,23 +357,31 @@ impl Quoter {
                 self.market.short_desc(), total_orders, nuclear_threshold
             );
 
-            // Cancel all orders for both tokens
-            let mut all_cancellations: Vec<String> = Vec::with_capacity(total_orders);
-            for order in &input.up_orders.bids {
-                all_cancellations.push(order.order_id.clone());
-                self.in_flight_tracker.mark_cancel_pending(&order.order_id);
+            // FIX: Use CancelAllForToken which is processed immediately by executor
+            // instead of building a batch output that gets queued behind previous commands.
+            // This bypasses the queue and directly cancels all orders via REST API.
+            if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.up_token_id.clone()) {
+                error!("[Quoter:{}] Nuclear cancel UP failed: {}", self.market.short_desc(), e);
             }
-            for order in &input.down_orders.bids {
-                all_cancellations.push(order.order_id.clone());
-                self.in_flight_tracker.mark_cancel_pending(&order.order_id);
+            if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.down_token_id.clone()) {
+                error!("[Quoter:{}] Nuclear cancel DOWN failed: {}", self.market.short_desc(), e);
             }
 
-            // Return early with just cancellations, no new placements
-            let output = SolverOutput {
-                limit_orders: Vec::new(),
-                cancellations: all_cancellations,
-            };
-            return (Some(output), TickResult::Continue);
+            // Mark all orders as cancel pending so capacity checks don't count them
+            for order in &input.up_orders.bids {
+                self.in_flight_tracker.mark_cancel_pending(&order.order_id);
+                self.in_flight_tracker.placement_cancelled(&input.up_token_id, order.price);
+            }
+            for order in &input.down_orders.bids {
+                self.in_flight_tracker.mark_cancel_pending(&order.order_id);
+                self.in_flight_tracker.placement_cancelled(&input.down_token_id, order.price);
+            }
+
+            // Clear pending placements too - we just cancelled everything
+            self.in_flight_tracker.clear_all_pending();
+
+            // Return empty output - cancels already sent directly
+            return (Some(SolverOutput::empty()), TickResult::Continue);
         }
 
         let open_orders: Vec<OpenOrderInfo> = input.up_orders.bids.iter()
@@ -382,6 +390,51 @@ impl Quoter {
                 .map(|o| OpenOrderInfo::new(o.order_id.clone(), input.down_token_id.clone(), o.price)))
             .collect();
         self.in_flight_tracker.cleanup_from_orders(&open_orders);
+
+        // POSITION-BASED CANCELLATION: When approaching max_position, cancel orders on that side
+        // to stop the bleeding from fills. The solver only stops NEW placements but doesn't
+        // cancel existing orders that are being filled by takers.
+        let position_cancel_threshold = 0.80;  // Cancel at 80% of max
+        if self.config.max_position > 0.0 {
+            let up_ratio = input.inventory.up_size.abs() / self.config.max_position;
+            let down_ratio = input.inventory.down_size.abs() / self.config.max_position;
+
+            if up_ratio >= position_cancel_threshold && !input.up_orders.bids.is_empty() {
+                warn!(
+                    "[Quoter:{}] POSITION CANCEL: UP at {:.0}% of max ({:.1}/{:.1}), cancelling {} UP orders",
+                    self.market.short_desc(),
+                    up_ratio * 100.0,
+                    input.inventory.up_size.abs(),
+                    self.config.max_position,
+                    input.up_orders.bids.len()
+                );
+                if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.up_token_id.clone()) {
+                    error!("[Quoter:{}] Position cancel UP failed: {}", self.market.short_desc(), e);
+                }
+                for order in &input.up_orders.bids {
+                    self.in_flight_tracker.mark_cancel_pending(&order.order_id);
+                    self.in_flight_tracker.placement_cancelled(&input.up_token_id, order.price);
+                }
+            }
+
+            if down_ratio >= position_cancel_threshold && !input.down_orders.bids.is_empty() {
+                warn!(
+                    "[Quoter:{}] POSITION CANCEL: DOWN at {:.0}% of max ({:.1}/{:.1}), cancelling {} DOWN orders",
+                    self.market.short_desc(),
+                    down_ratio * 100.0,
+                    input.inventory.down_size.abs(),
+                    self.config.max_position,
+                    input.down_orders.bids.len()
+                );
+                if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.down_token_id.clone()) {
+                    error!("[Quoter:{}] Position cancel DOWN failed: {}", self.market.short_desc(), e);
+                }
+                for order in &input.down_orders.bids {
+                    self.in_flight_tracker.mark_cancel_pending(&order.order_id);
+                    self.in_flight_tracker.placement_cancelled(&input.down_token_id, order.price);
+                }
+            }
+        }
 
         // Count open orders + pending placements per side for capacity check
         // This prevents order accumulation from race conditions where placements
@@ -433,47 +486,74 @@ impl Quoter {
         // SAFETY CHECK: If we have excess PRICE LEVELS, cancel orders at extra levels.
         // This handles accumulation from previous bugs or race conditions.
         // We keep the `num_levels` price levels closest to best_ask (highest prices).
+        // CRITICAL: When excess levels exist, we STOP all new placements until cancels clear.
         let up_excess_levels = up_price_levels.saturating_sub(max_price_levels);
         let down_excess_levels = down_price_levels.saturating_sub(max_price_levels);
 
+        // Track if we should block new placements due to excess levels
+        let mut block_up_placements = false;
+        let mut block_down_placements = false;
+
         if up_excess_levels > 0 {
             warn!(
-                "[Quoter:{}] UP has {} excess price levels ({} levels, max {}), cancelling orders at lowest levels",
+                "[Quoter:{}] UP has {} excess price levels ({} levels, max {}), cancelling ALL via REST and blocking new placements",
                 self.market.short_desc(), up_excess_levels, up_price_levels, max_price_levels
             );
-            // Get price levels, sort descending (highest first = closest to best_ask)
-            let mut levels: Vec<i64> = get_price_levels(&input.up_orders.bids).into_iter().collect();
-            levels.sort_by(|a, b| b.cmp(a));  // Descending
-            // Keep top `max_price_levels`, cancel orders at the rest
-            let levels_to_cancel: std::collections::HashSet<i64> = levels.into_iter().skip(max_price_levels).collect();
-            for order in &input.up_orders.bids {
-                let price_key = price_to_key(order.price);
-                if levels_to_cancel.contains(&price_key) && !output.cancellations.contains(&order.order_id) {
-                    output.cancellations.push(order.order_id.clone());
-                    self.in_flight_tracker.mark_cancel_pending(&order.order_id);
-                    self.in_flight_tracker.placement_cancelled(&input.up_token_id, order.price);
-                }
+            // CRITICAL: Use cancel_token_orders() which calls REST API directly
+            // This bypasses the executor queue and cancels immediately
+            if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.up_token_id.clone()) {
+                error!("[Quoter:{}] Excess levels cancel UP failed: {}", self.market.short_desc(), e);
             }
+            // Mark all as cancel pending and clear pending placements
+            for order in &input.up_orders.bids {
+                self.in_flight_tracker.mark_cancel_pending(&order.order_id);
+                self.in_flight_tracker.placement_cancelled(&input.up_token_id, order.price);
+            }
+            // Block ALL new UP placements until cancels clear
+            block_up_placements = true;
         }
 
         if down_excess_levels > 0 {
             warn!(
-                "[Quoter:{}] DOWN has {} excess price levels ({} levels, max {}), cancelling orders at lowest levels",
+                "[Quoter:{}] DOWN has {} excess price levels ({} levels, max {}), cancelling ALL via REST and blocking new placements",
                 self.market.short_desc(), down_excess_levels, down_price_levels, max_price_levels
             );
-            // Get price levels, sort descending (highest first = closest to best_ask)
-            let mut levels: Vec<i64> = get_price_levels(&input.down_orders.bids).into_iter().collect();
-            levels.sort_by(|a, b| b.cmp(a));  // Descending
-            // Keep top `max_price_levels`, cancel orders at the rest
-            let levels_to_cancel: std::collections::HashSet<i64> = levels.into_iter().skip(max_price_levels).collect();
-            for order in &input.down_orders.bids {
-                let price_key = price_to_key(order.price);
-                if levels_to_cancel.contains(&price_key) && !output.cancellations.contains(&order.order_id) {
-                    output.cancellations.push(order.order_id.clone());
-                    self.in_flight_tracker.mark_cancel_pending(&order.order_id);
-                    self.in_flight_tracker.placement_cancelled(&input.down_token_id, order.price);
-                }
+            // CRITICAL: Use cancel_token_orders() which calls REST API directly
+            if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.down_token_id.clone()) {
+                error!("[Quoter:{}] Excess levels cancel DOWN failed: {}", self.market.short_desc(), e);
             }
+            // Mark all as cancel pending and clear pending placements
+            for order in &input.down_orders.bids {
+                self.in_flight_tracker.mark_cancel_pending(&order.order_id);
+                self.in_flight_tracker.placement_cancelled(&input.down_token_id, order.price);
+            }
+            // Block ALL new DOWN placements until cancels clear
+            block_down_placements = true;
+        }
+
+        // CRITICAL: When excess levels exist, STOP everything and just wait for cancels to clear
+        // Don't even try to place other orders - focus entirely on cleanup
+        if block_up_placements || block_down_placements {
+            // Remove ALL new placements (not just the blocked side) to give cancels time to clear
+            output.limit_orders.clear();
+
+            // Also clear any pending in InFlightTracker for the affected side
+            if block_down_placements {
+                self.in_flight_tracker.clear_pending_for_token(&input.down_token_id);
+            }
+            if block_up_placements {
+                self.in_flight_tracker.clear_pending_for_token(&input.up_token_id);
+            }
+
+            info!(
+                "[Quoter:{}] CLEANUP MODE: blocking ALL placements until excess levels clear (UP excess: {}, DOWN excess: {})",
+                self.market.short_desc(), up_excess_levels, down_excess_levels
+            );
+
+            // Return early - cleanup cancels already sent via cancel_token_orders()
+            // Clear the output since we handled cancels directly
+            output.cancellations.clear();
+            return (Some(output), TickResult::Continue);
         }
 
         // Filter placements: Block NEW price levels if at capacity.
@@ -590,15 +670,24 @@ impl Quoter {
 
                 // When merge is possible, only send CANCELLATIONS (no new placements).
                 // This prevents race between new orders and merge execution.
+                // Use synchronous execution to wait for cancels to complete before merge.
                 let cancel_only_output = SolverOutput {
                     cancellations: output.cancellations.clone(),
                     limit_orders: Vec::new(),
                 };
 
                 if cancel_only_output.has_actions() {
-                    if let Err(e) = self.ctx.executor.execute(cancel_only_output.clone()) {
-                        if matches!(e, ExecutorError::ChannelClosed) {
+                    match self.ctx.executor.execute_with_feedback(cancel_only_output.clone()) {
+                        Ok(result) => {
+                            for order_id in &result.cancelled_ids {
+                                self.in_flight_tracker.cancel_confirmed(order_id);
+                            }
+                        }
+                        Err(ExecutorError::ChannelClosed) => {
                             return (None, TickResult::ExecutorDead);
+                        }
+                        Err(e) => {
+                            warn!("[Quoter:{}] Pre-merge cancel failed: {}", self.market.short_desc(), e);
                         }
                     }
                 }
@@ -630,17 +719,40 @@ impl Quoter {
         }
 
         // Normal path: no merge opportunity, send full output
+        // CRITICAL FIX: Use synchronous execution - WAIT for batch to complete
+        // This prevents batch pileup where new ticks generate orders faster than executor can process
         if output.has_actions() {
-            if let Err(e) = self.ctx.executor.execute(output.clone()) {
-                if matches!(e, ExecutorError::ChannelClosed) {
-                    return (None, TickResult::ExecutorDead);
+            match self.ctx.executor.execute_with_feedback(output.clone()) {
+                Ok(result) => {
+                    // Execution completed - update InFlightTracker with actual results
+                    // Mark successfully placed orders
+                    for order_id in &result.placed_ids {
+                        debug!("[Quoter:{}] Confirmed placement: {}", self.market.short_desc(), &order_id[..16.min(order_id.len())]);
+                    }
+                    // Mark successfully cancelled orders
+                    for order_id in &result.cancelled_ids {
+                        self.in_flight_tracker.cancel_confirmed(order_id);
+                    }
+                    // Log execution summary
+                    if result.placed_count > 0 || result.cancelled_count > 0 {
+                        debug!(
+                            "[Quoter:{}] Execution complete: {} placed, {} cancelled",
+                            self.market.short_desc(), result.placed_count, result.cancelled_count
+                        );
+                    }
                 }
-                warn!("[Quoter:{}] Failed to send to executor: {}", self.market.short_desc(), e);
-                for oid in &output.cancellations {
-                    self.in_flight_tracker.cancel_failed(oid);
-                }
-                for order in &output.limit_orders {
-                    self.in_flight_tracker.placement_failed(&order.token_id, order.price);
+                Err(e) => {
+                    if matches!(e, ExecutorError::ChannelClosed) {
+                        return (None, TickResult::ExecutorDead);
+                    }
+                    warn!("[Quoter:{}] Execution failed: {}", self.market.short_desc(), e);
+                    // Mark operations as failed so they can be retried
+                    for oid in &output.cancellations {
+                        self.in_flight_tracker.cancel_failed(oid);
+                    }
+                    for order in &output.limit_orders {
+                        self.in_flight_tracker.placement_failed(&order.token_id, order.price);
+                    }
                 }
             }
         }

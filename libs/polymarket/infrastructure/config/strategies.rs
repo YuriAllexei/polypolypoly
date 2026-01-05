@@ -622,6 +622,24 @@ impl StrategiesConfig {
             "  Min profit margin: ${:.2}",
             self.market_merger.min_profit_margin
         );
+        info!("Inventory MM Strategy:");
+        info!("  Markets: {:?}", self.inventory_mm.markets);
+        info!(
+            "  Poll interval: {} seconds",
+            self.inventory_mm.poll_interval_secs
+        );
+        info!(
+            "  Tick interval: {} ms",
+            self.inventory_mm.tick_interval_ms
+        );
+        info!("  Solver config:");
+        info!("    Num levels: {}", self.inventory_mm.solver.num_levels);
+        info!("    Order size: {:.1}", self.inventory_mm.solver.order_size);
+        info!("    Base offset: {:.3}", self.inventory_mm.solver.base_offset);
+        info!("    Max imbalance: {:.1}%", self.inventory_mm.solver.max_imbalance * 100.0);
+        info!("    Max position: {:.1} (0=unlimited)", self.inventory_mm.solver.max_position);
+        info!("    Skew factor: {:.1}", self.inventory_mm.solver.skew_factor);
+        info!("    Offset scaling: {:.1}", self.inventory_mm.solver.offset_scaling);
     }
 }
 

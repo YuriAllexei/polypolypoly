@@ -21,6 +21,12 @@ impl SolverOutput {
         Self::default()
     }
 
+    /// Create an empty output (no actions).
+    /// Alias for new() for clarity when returning after handling actions directly.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
     /// Check if there are any actions to execute
     pub fn has_actions(&self) -> bool {
         !self.cancellations.is_empty() || !self.limit_orders.is_empty()

@@ -3,7 +3,7 @@
 //! Simple market-making: place bids below best_ask with offset based on imbalance.
 //! No profitability checks - that will be redesigned separately.
 
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::application::strategies::inventory_mm::types::{
     InventorySnapshot, OrderbookSnapshot, Quote, QuoteLadder, SolverConfig,
@@ -76,9 +76,17 @@ pub fn calculate_quotes(
     let mut skip_down = delta <= -config.max_imbalance && !is_building_down_from_scratch;
 
     // SAFETY LIMIT: Skip quoting if max_position is reached
-    // This prevents runaway inventory accumulation during testing
+    // Also reduce order size when approaching limit (soft limit at 80%)
+    let soft_limit_threshold = 0.80;  // Start reducing at 80% of max_position
+    let mut up_size_multiplier = 1.0;
+    let mut down_size_multiplier = 1.0;
+
     if config.max_position > 0.0 {
-        if inventory.up_size.abs() >= config.max_position {
+        let up_ratio = inventory.up_size.abs() / config.max_position;
+        let down_ratio = inventory.down_size.abs() / config.max_position;
+
+        // Hard limit: stop quoting completely
+        if up_ratio >= 1.0 {
             if !skip_up {
                 warn!(
                     "[Solver] MAX POSITION LIMIT: UP position {:.1} >= limit {:.1}, stopping UP quotes",
@@ -86,8 +94,16 @@ pub fn calculate_quotes(
                 );
             }
             skip_up = true;
+        } else if up_ratio >= soft_limit_threshold {
+            // Soft limit: reduce order size linearly from 80% to 0% as position approaches limit
+            up_size_multiplier = (1.0 - up_ratio) / (1.0 - soft_limit_threshold);
+            info!(
+                "[Solver] SOFT LIMIT: UP at {:.0}% of max, reducing size to {:.0}%",
+                up_ratio * 100.0, up_size_multiplier * 100.0
+            );
         }
-        if inventory.down_size.abs() >= config.max_position {
+
+        if down_ratio >= 1.0 {
             if !skip_down {
                 warn!(
                     "[Solver] MAX POSITION LIMIT: DOWN position {:.1} >= limit {:.1}, stopping DOWN quotes",
@@ -95,8 +111,19 @@ pub fn calculate_quotes(
                 );
             }
             skip_down = true;
+        } else if down_ratio >= soft_limit_threshold {
+            // Soft limit: reduce order size linearly from 80% to 0% as position approaches limit
+            down_size_multiplier = (1.0 - down_ratio) / (1.0 - soft_limit_threshold);
+            info!(
+                "[Solver] SOFT LIMIT: DOWN at {:.0}% of max, reducing size to {:.0}%",
+                down_ratio * 100.0, down_size_multiplier * 100.0
+            );
         }
     }
+
+    // Apply soft limit multipliers to sizes
+    let up_size = (up_size * up_size_multiplier).max(MIN_ORDER_SIZE);
+    let down_size = (down_size * down_size_multiplier).max(MIN_ORDER_SIZE);
 
     if skip_up || skip_down {
         debug!(
