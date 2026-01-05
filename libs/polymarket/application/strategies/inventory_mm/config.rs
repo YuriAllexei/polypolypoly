@@ -94,13 +94,6 @@ impl InventoryMMConfig {
         self
     }
 
-    pub fn with_min_profit_margin(mut self, margin: f64) -> Self {
-        self.solver.min_profit_margin = margin;
-        self.merger.min_profit_margin = margin;
-        self.merger.max_combined_cost = 1.0 - margin;
-        self
-    }
-
     pub fn with_max_imbalance(mut self, max_imbalance: f64) -> Self {
         self.solver.max_imbalance = max_imbalance;
         self

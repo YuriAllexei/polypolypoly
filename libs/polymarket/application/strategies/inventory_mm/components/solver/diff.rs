@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::application::strategies::inventory_mm::types::{LimitOrder, OpenOrder, Quote};
+use crate::application::strategies::inventory_mm::components::in_flight::price_to_key;
 
 /// Size tolerance: 1% of size OR 0.1, whichever is larger
 const SIZE_TOLERANCE_PCT: f64 = 0.01;
@@ -13,10 +14,6 @@ const SIZE_TOLERANCE_ABS: f64 = 0.1;
 
 /// Polymarket minimum order size (in shares)
 const MIN_ORDER_SIZE: f64 = 5.0;
-
-fn price_to_key(price: f64) -> i64 {
-    (price * 10000.0).round() as i64
-}
 
 /// Smart diff: preserves queue priority when adjusting order sizes.
 ///
@@ -105,7 +102,26 @@ fn group_orders_by_price(orders: &[OpenOrder]) -> HashMap<i64, Vec<&OpenOrder>> 
 }
 
 fn group_quotes_by_price(quotes: &[Quote]) -> HashMap<i64, &Quote> {
-    quotes.iter().map(|q| (price_to_key(q.price), q)).collect()
+    use tracing::warn;
+    let mut map: HashMap<i64, &Quote> = HashMap::new();
+    for q in quotes {
+        let key = price_to_key(q.price);
+        if let Some(existing) = map.get(&key) {
+            // CRITICAL: Duplicate price detected - log warning and keep the larger size
+            // This prevents silent data loss when solver generates duplicate prices
+            warn!(
+                "[diff] Duplicate price {:.4} detected! Existing size={:.1}, new size={:.1} - keeping larger",
+                q.price, existing.size, q.size
+            );
+            if q.size > existing.size {
+                map.insert(key, q);
+            }
+            // Keep existing if it's larger or equal
+        } else {
+            map.insert(key, q);
+        }
+    }
+    map
 }
 
 fn adjust_size_at_price(
@@ -125,7 +141,8 @@ fn adjust_size_at_price(
 
     // Need MORE - keep all, place additional (if above minimum)
     if current_total < desired_size {
-        let additional = desired_size - current_total;
+        // CRITICAL: Round to whole numbers - Polymarket rejects fractional sizes
+        let additional = (desired_size - current_total).round();
         // Only place if additional size meets minimum
         let place_order = if additional >= MIN_ORDER_SIZE {
             Some(LimitOrder::new(
@@ -162,7 +179,8 @@ fn adjust_size_at_price(
         .map(|o| o.order_id.clone())
         .collect();
 
-    let remainder = desired_size - kept_sum;
+    // CRITICAL: Round to whole numbers - Polymarket rejects fractional sizes
+    let remainder = (desired_size - kept_sum).round();
     // Only place if remainder meets minimum size requirement
     let new_order = if remainder >= MIN_ORDER_SIZE {
         Some(LimitOrder::new(

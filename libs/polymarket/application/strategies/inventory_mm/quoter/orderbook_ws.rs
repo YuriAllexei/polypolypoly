@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use anyhow::Result;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, trace};
 
 use hypersockets::core::*;
 use hypersockets::{MessageHandler, MessageRouter, TextPongDetector, WsMessage};
@@ -144,25 +144,49 @@ impl QuoterHandler {
             return;
         }
 
+        trace!(
+            "[QuoterWS {}] Received {} snapshots: {:?}",
+            self.market_id,
+            snapshots.len(),
+            snapshots.iter().map(|s| format!("{}...(bids={},asks={})", &s.asset_id[..8.min(s.asset_id.len())], s.bids.len(), s.asks.len())).collect::<Vec<_>>()
+        );
+
         let mut obs = self.orderbooks.write();
         for snapshot in snapshots {
             let orderbook = obs
                 .entry(snapshot.asset_id.clone())
                 .or_insert_with(|| Orderbook::new(snapshot.asset_id.clone()));
             orderbook.process_snapshot(&snapshot.bids, &snapshot.asks);
+
+            // Log orderbook state after processing
+            debug!(
+                "[QuoterWS {}] Orderbook for {}...: bid={:?}, ask={:?}",
+                self.market_id,
+                &snapshot.asset_id[..8.min(snapshot.asset_id.len())],
+                orderbook.best_bid(),
+                orderbook.best_ask()
+            );
         }
 
         self.first_snapshot_received.store(true, Ordering::Release);
     }
 
     /// Process price change events.
+    /// CRITICAL: Uses best_bid/best_ask from exchange instead of computing ourselves
     fn handle_price_change(&mut self, event: &PriceChangeEvent) {
         let mut obs = self.orderbooks.write();
         for change in &event.price_changes {
             let orderbook = obs
                 .entry(change.asset_id.clone())
                 .or_insert_with(|| Orderbook::new(change.asset_id.clone()));
-            orderbook.process_update(&change.side, &change.price, &change.size);
+            // Use authoritative best_bid/best_ask from exchange - prevents stale data
+            orderbook.process_update_with_best(
+                &change.side,
+                &change.price,
+                &change.size,
+                &change.best_bid,
+                &change.best_ask,
+            );
         }
     }
 }
@@ -229,7 +253,15 @@ pub async fn build_quoter_ws_client(
         Arc::clone(&first_snapshot_received),
     );
 
-    let subscription = MarketSubscription::new(config.token_ids());
+    let token_ids = config.token_ids();
+    info!(
+        "[QuoterWS {}] Subscribing to tokens: UP={}..., DOWN={}...",
+        config.market_id,
+        &token_ids[0][..16.min(token_ids[0].len())],
+        &token_ids[1][..16.min(token_ids[1].len())]
+    );
+
+    let subscription = MarketSubscription::new(token_ids);
     let subscription_json = serde_json::to_string(&subscription)?;
 
     let pong_detector = Arc::new(TextPongDetector::new("PONG".to_string()));

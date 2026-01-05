@@ -11,7 +11,7 @@ use super::context::{QuoterContext, MarketInfo};
 use super::orderbook_ws::{QuoterWsConfig, QuoterWsClient, build_quoter_ws_client, wait_for_snapshot};
 use crate::application::strategies::inventory_mm::components::{
     solve, Merger, MergerConfig, InFlightTracker, OpenOrderInfo, ExecutorError,
-    TakerTask, TakerConfig,
+    TakerTask, TakerConfig, price_to_key,
 };
 use crate::application::strategies::inventory_mm::types::{
     SolverInput, SolverOutput, SolverConfig, InventorySnapshot, OrderbookSnapshot, OrderSnapshot, OpenOrder,
@@ -21,6 +21,25 @@ use crate::infrastructure::{parse_timestamp_to_i64, SharedOrderbooks, UserOrderS
 enum TickResult {
     Continue,
     ExecutorDead,
+}
+
+/// Count distinct price levels from a list of orders.
+/// Uses price_to_key (price * 10000 rounded) to group by price level.
+fn count_distinct_price_levels(orders: &[OpenOrder]) -> usize {
+    use std::collections::HashSet;
+    let price_keys: HashSet<i64> = orders
+        .iter()
+        .map(|o| price_to_key(o.price))
+        .collect();
+    price_keys.len()
+}
+
+/// Get distinct price levels from a list of orders.
+fn get_price_levels(orders: &[OpenOrder]) -> std::collections::HashSet<i64> {
+    orders
+        .iter()
+        .map(|o| price_to_key(o.price))
+        .collect()
 }
 
 pub struct Quoter {
@@ -255,8 +274,19 @@ impl Quoter {
         // 3. Extract orderbook snapshots
         let (up_orderbook, down_orderbook) = {
             let obs = self.orderbooks.read();
+            let market_desc = self.market.short_desc();
 
-            let extract_ob = |token_id: &str, our_orders: &OrderSnapshot| -> OrderbookSnapshot {
+            // Debug: Log what keys exist in the orderbooks map
+            if obs.len() != 2 {
+                warn!(
+                    "[Quoter:{}] Orderbooks map has {} entries (expected 2). Keys: {:?}",
+                    market_desc,
+                    obs.len(),
+                    obs.keys().map(|k| format!("{}...", &k[..16.min(k.len())])).collect::<Vec<_>>()
+                );
+            }
+
+            let extract_ob = |token_id: &str, our_orders: &OrderSnapshot, side: &str| -> OrderbookSnapshot {
                 match obs.get(token_id) {
                     Some(ob) => {
                         let best_bid = ob.best_bid();
@@ -270,15 +300,33 @@ impl Quoter {
                             .map(|(price, _)| our_orders.asks.iter().any(|o| (o.price - price).abs() < 1e-6))
                             .unwrap_or(false);
 
+                        // Log if no ask data - this prevents quote generation!
+                        if best_ask.is_none() {
+                            warn!(
+                                "[Quoter:{}] {} orderbook has NO ASK data (bid={:?}) - cannot generate quotes!",
+                                market_desc, side, best_bid
+                            );
+                        }
+
                         OrderbookSnapshot { best_bid, best_ask, best_bid_is_ours, best_ask_is_ours }
                     }
-                    None => OrderbookSnapshot::default(),
+                    None => {
+                        // CRITICAL: Orderbook not found - this will prevent all quotes for this side!
+                        warn!(
+                            "[Quoter:{}] {} orderbook NOT FOUND (looking for {}..., have {:?}) - cannot generate quotes!",
+                            market_desc,
+                            side,
+                            &token_id[..16.min(token_id.len())],
+                            obs.keys().map(|k| format!("{}...", &k[..16.min(k.len())])).collect::<Vec<_>>()
+                        );
+                        OrderbookSnapshot::default()
+                    }
                 }
             };
 
             (
-                extract_ob(&self.market.up_token_id, &up_orders),
-                extract_ob(&self.market.down_token_id, &down_orders),
+                extract_ob(&self.market.up_token_id, &up_orders, "UP"),
+                extract_ob(&self.market.down_token_id, &down_orders, "DOWN"),
             )
         };
 
@@ -295,6 +343,39 @@ impl Quoter {
     }
 
     fn tick(&mut self, input: &SolverInput) -> (Option<SolverOutput>, TickResult) {
+        // NUCLEAR CANCEL: If orders are severely out of sync, cancel ALL for the token.
+        // This handles cases where individual cancellations aren't keeping up.
+        // Note: We cap PRICE LEVELS to num_levels, but allow multiple orders per level.
+        // Nuclear threshold is still based on total orders as a safety fallback.
+        let total_orders = input.up_orders.bids.len() + input.down_orders.bids.len();
+        let max_levels_total = self.config.num_levels * 2;  // 3 UP levels + 3 DOWN levels = 6
+        let nuclear_threshold = max_levels_total * 3;  // 18 orders = something is very wrong
+
+        if total_orders >= nuclear_threshold {
+            error!(
+                "[Quoter:{}] NUCLEAR CANCEL: {} orders detected (threshold {}), cancelling ALL",
+                self.market.short_desc(), total_orders, nuclear_threshold
+            );
+
+            // Cancel all orders for both tokens
+            let mut all_cancellations: Vec<String> = Vec::with_capacity(total_orders);
+            for order in &input.up_orders.bids {
+                all_cancellations.push(order.order_id.clone());
+                self.in_flight_tracker.mark_cancel_pending(&order.order_id);
+            }
+            for order in &input.down_orders.bids {
+                all_cancellations.push(order.order_id.clone());
+                self.in_flight_tracker.mark_cancel_pending(&order.order_id);
+            }
+
+            // Return early with just cancellations, no new placements
+            let output = SolverOutput {
+                limit_orders: Vec::new(),
+                cancellations: all_cancellations,
+            };
+            return (Some(output), TickResult::Continue);
+        }
+
         let open_orders: Vec<OpenOrderInfo> = input.up_orders.bids.iter()
             .map(|o| OpenOrderInfo::new(o.order_id.clone(), input.up_token_id.clone(), o.price))
             .chain(input.down_orders.bids.iter()
@@ -319,10 +400,11 @@ impl Quoter {
             .filter(|o| self.in_flight_tracker.is_cancel_pending(&o.order_id))
             .count();
 
-        // Effective total = open + pending_placements - pending_cancels
-        let up_total = (up_open + up_pending).saturating_sub(up_pending_cancels);
-        let down_total = (down_open + down_pending).saturating_sub(down_pending_cancels);
-        let max_orders_per_side = self.config.num_levels;
+        // Count distinct PRICE LEVELS (not total orders) for capacity checks
+        // This allows multiple orders at the same price for FIFO preservation
+        let up_price_levels = count_distinct_price_levels(&input.up_orders.bids);
+        let down_price_levels = count_distinct_price_levels(&input.down_orders.bids);
+        let max_price_levels = self.config.num_levels;
 
         let mut output = solve(input);
 
@@ -330,89 +412,118 @@ impl Quoter {
         // The exchange will just return "order already cancelled" if we send twice.
         // Blocking cancels causes massive order accumulation when OMS confirmation is slow.
         // We still track them so is_cancel_pending() returns true for capacity calculations.
+        //
+        // CRITICAL FIX: Also clear pending placements for cancelled orders' price levels.
+        // Without this, cancelled orders still count toward capacity until TTL expires,
+        // blocking new placements at different (better) prices.
         for oid in &output.cancellations {
             // Mark as pending for tracking - this makes is_cancel_pending() return true
             // which reduces effective_open count and prevents repeated "excess orders" warnings
             self.in_flight_tracker.mark_cancel_pending(oid);
+
+            // Clear pending placement for this order's price level
+            // Look up the order in UP orders first, then DOWN orders
+            if let Some(order) = input.up_orders.bids.iter().find(|o| &o.order_id == oid) {
+                self.in_flight_tracker.placement_cancelled(&input.up_token_id, order.price);
+            } else if let Some(order) = input.down_orders.bids.iter().find(|o| &o.order_id == oid) {
+                self.in_flight_tracker.placement_cancelled(&input.down_token_id, order.price);
+            }
         }
 
-        // EMERGENCY FIX: If we have WAY more orders than max_orders_per_side,
-        // cancel ALL excess orders immediately (not just price mismatches).
+        // SAFETY CHECK: If we have excess PRICE LEVELS, cancel orders at extra levels.
         // This handles accumulation from previous bugs or race conditions.
-        // Use effective open count (excluding orders with pending cancellations)
-        let up_effective_open = up_open.saturating_sub(up_pending_cancels);
-        let down_effective_open = down_open.saturating_sub(down_pending_cancels);
-        let up_excess = up_effective_open.saturating_sub(max_orders_per_side);
-        let down_excess = down_effective_open.saturating_sub(max_orders_per_side);
+        // We keep the `num_levels` price levels closest to best_ask (highest prices).
+        let up_excess_levels = up_price_levels.saturating_sub(max_price_levels);
+        let down_excess_levels = down_price_levels.saturating_sub(max_price_levels);
 
-        if up_excess > 0 {
+        if up_excess_levels > 0 {
             warn!(
-                "[Quoter:{}] UP has {} excess orders ({} effective, {} pending_cancels, max {}), cancelling oldest",
-                self.market.short_desc(), up_excess, up_effective_open, up_pending_cancels, max_orders_per_side
+                "[Quoter:{}] UP has {} excess price levels ({} levels, max {}), cancelling orders at lowest levels",
+                self.market.short_desc(), up_excess_levels, up_price_levels, max_price_levels
             );
-            // Sort by created_at DESCENDING (newest first) - keep newest, cancel oldest
-            let mut up_orders: Vec<_> = input.up_orders.bids.iter().collect();
-            up_orders.sort_by_key(|o| std::cmp::Reverse(o.created_at));
-            for order in up_orders.iter().skip(max_orders_per_side) {
-                if !output.cancellations.contains(&order.order_id) {
+            // Get price levels, sort descending (highest first = closest to best_ask)
+            let mut levels: Vec<i64> = get_price_levels(&input.up_orders.bids).into_iter().collect();
+            levels.sort_by(|a, b| b.cmp(a));  // Descending
+            // Keep top `max_price_levels`, cancel orders at the rest
+            let levels_to_cancel: std::collections::HashSet<i64> = levels.into_iter().skip(max_price_levels).collect();
+            for order in &input.up_orders.bids {
+                let price_key = price_to_key(order.price);
+                if levels_to_cancel.contains(&price_key) && !output.cancellations.contains(&order.order_id) {
                     output.cancellations.push(order.order_id.clone());
-                    // CRITICAL: Mark excess cancellations as pending too!
                     self.in_flight_tracker.mark_cancel_pending(&order.order_id);
+                    self.in_flight_tracker.placement_cancelled(&input.up_token_id, order.price);
                 }
             }
         }
 
-        if down_excess > 0 {
+        if down_excess_levels > 0 {
             warn!(
-                "[Quoter:{}] DOWN has {} excess orders ({} effective, {} pending_cancels, max {}), cancelling oldest",
-                self.market.short_desc(), down_excess, down_effective_open, down_pending_cancels, max_orders_per_side
+                "[Quoter:{}] DOWN has {} excess price levels ({} levels, max {}), cancelling orders at lowest levels",
+                self.market.short_desc(), down_excess_levels, down_price_levels, max_price_levels
             );
-            // Sort by created_at DESCENDING (newest first) - keep newest, cancel oldest
-            let mut down_orders: Vec<_> = input.down_orders.bids.iter().collect();
-            down_orders.sort_by_key(|o| std::cmp::Reverse(o.created_at));
-            for order in down_orders.iter().skip(max_orders_per_side) {
-                if !output.cancellations.contains(&order.order_id) {
+            // Get price levels, sort descending (highest first = closest to best_ask)
+            let mut levels: Vec<i64> = get_price_levels(&input.down_orders.bids).into_iter().collect();
+            levels.sort_by(|a, b| b.cmp(a));  // Descending
+            // Keep top `max_price_levels`, cancel orders at the rest
+            let levels_to_cancel: std::collections::HashSet<i64> = levels.into_iter().skip(max_price_levels).collect();
+            for order in &input.down_orders.bids {
+                let price_key = price_to_key(order.price);
+                if levels_to_cancel.contains(&price_key) && !output.cancellations.contains(&order.order_id) {
                     output.cancellations.push(order.order_id.clone());
-                    // CRITICAL: Mark excess cancellations as pending too!
                     self.in_flight_tracker.mark_cancel_pending(&order.order_id);
+                    self.in_flight_tracker.placement_cancelled(&input.down_token_id, order.price);
                 }
             }
         }
 
-        // Filter placements with TWO checks:
-        // 1. Block if already at capacity for this side (open + pending >= max)
-        // 2. Block if there's already an OPEN order at this price level
+        // Filter placements: Block NEW price levels if at capacity.
+        // CRITICAL FIX: Combine OMS levels with PENDING levels from InFlightTracker.
+        // Previous bug: Only counted OMS levels, so when OMS was slow to update,
+        // we'd place orders at new levels thinking we had capacity. This caused
+        // 13+ price levels instead of max 3.
+        let up_oms_levels = get_price_levels(&input.up_orders.bids);
+        let down_oms_levels = get_price_levels(&input.down_orders.bids);
+        let up_pending_levels = self.in_flight_tracker.pending_price_levels_for_token(&input.up_token_id);
+        let down_pending_levels = self.in_flight_tracker.pending_price_levels_for_token(&input.down_token_id);
+
+        // Combined levels = OMS + pending (union)
+        let up_all_levels: std::collections::HashSet<i64> = up_oms_levels.union(&up_pending_levels).copied().collect();
+        let down_all_levels: std::collections::HashSet<i64> = down_oms_levels.union(&down_pending_levels).copied().collect();
+
+        let up_total_levels = up_all_levels.len();
+        let down_total_levels = down_all_levels.len();
+
+        // Count orders before filtering
+        let up_orders_before = output.limit_orders.iter()
+            .filter(|o| o.token_id == input.up_token_id).count();
+        let down_orders_before = output.limit_orders.iter()
+            .filter(|o| o.token_id == input.down_token_id).count();
+        let down_ob_ask = input.down_orderbook.best_ask_price();
+        let down_ob_bid = input.down_orderbook.best_bid_price();
+        let delta_snapshot = input.inventory.imbalance();
+
         output.limit_orders.retain(|o| {
-            // Check 1: Total order cap per side (open + pending placements)
-            // This prevents accumulation from race conditions
-            let current_total = if o.token_id == input.up_token_id {
-                up_total
+            let price_key = price_to_key(o.price);
+
+            let (all_levels, total_level_count) = if o.token_id == input.up_token_id {
+                (&up_all_levels, up_total_levels)
             } else {
-                down_total
+                (&down_all_levels, down_total_levels)
             };
 
-            if current_total >= max_orders_per_side {
-                debug!(
-                    "[Quoter] BLOCKED placement at {:.2} for {} - at capacity ({}/{})",
+            // If price level already exists (OMS or pending), allow for FIFO preservation
+            let is_existing_level = all_levels.contains(&price_key);
+
+            // If it's a NEW price level, only allow if under capacity
+            if !is_existing_level && total_level_count >= max_price_levels {
+                warn!(
+                    "[Quoter] BLOCKED placement at {:.2} for {} - would exceed price level capacity ({}/{}) [OMS:{}, pending:{}]",
                     o.price,
                     &o.token_id[..8.min(o.token_id.len())],
-                    current_total,
-                    max_orders_per_side
-                );
-                return false;
-            }
-
-            // Check 2: Same-price duplicate check
-            let has_open_order = open_orders.iter().any(|existing| {
-                existing.token_id == o.token_id &&
-                (existing.price - o.price).abs() < 1e-4
-            });
-
-            if has_open_order {
-                debug!(
-                    "[Quoter] BLOCKED placement at {:.2} for {} - order already exists at this price",
-                    o.price,
-                    &o.token_id[..8.min(o.token_id.len())]
+                    total_level_count,
+                    max_price_levels,
+                    if o.token_id == input.up_token_id { up_oms_levels.len() } else { down_oms_levels.len() },
+                    if o.token_id == input.up_token_id { up_pending_levels.len() } else { down_pending_levels.len() }
                 );
                 return false;
             }
@@ -420,21 +531,35 @@ impl Quoter {
             self.in_flight_tracker.should_place(&o.token_id, o.price)
         });
 
-        if output.has_actions() {
-            if let Err(e) = self.ctx.executor.execute(output.clone()) {
-                if matches!(e, ExecutorError::ChannelClosed) {
-                    return (None, TickResult::ExecutorDead);
-                }
-                warn!("[Quoter:{}] Failed to send to executor: {}", self.market.short_desc(), e);
-                for oid in &output.cancellations {
-                    self.in_flight_tracker.cancel_failed(oid);
-                }
-                for order in &output.limit_orders {
-                    self.in_flight_tracker.placement_failed(&order.token_id, order.price);
-                }
-            }
+        // Log if DOWN orders were filtered out
+        let up_orders_after = output.limit_orders.iter()
+            .filter(|o| o.token_id == input.up_token_id).count();
+        let down_orders_after = output.limit_orders.iter()
+            .filter(|o| o.token_id == input.down_token_id).count();
+
+        if down_orders_before != down_orders_after || up_orders_before != up_orders_after {
+            info!(
+                "[Quoter:{}] Filtered: UP {}->{}, DOWN {}->{}",
+                self.market.short_desc(),
+                up_orders_before, up_orders_after,
+                down_orders_before, down_orders_after
+            );
         }
 
+        // Log if solver generated 0 DOWN orders
+        if down_orders_before == 0 && delta_snapshot > 0.1 {
+            warn!(
+                "[Quoter:{}] Solver generated 0 DOWN orders with delta={:.2}! DOWN_ob: ask={:?}, bid={:?}",
+                self.market.short_desc(),
+                delta_snapshot,
+                down_ob_ask,
+                down_ob_bid
+            );
+        }
+
+        // CRITICAL FIX: Check merge BEFORE sending orders to executor.
+        // Previous bug: Merge was checked AFTER orders sent, causing race condition
+        // where merge quantities could become stale during order execution.
         let decision = self.merger.check_merge(&input.inventory);
         if decision.should_merge {
             let now = Instant::now();
@@ -444,9 +569,26 @@ impl Quoter {
 
             if merge_allowed {
                 info!(
-                    "[Quoter:{}] Merge opportunity: {} pairs for ${:.4} profit",
+                    "[Quoter:{}] Merge opportunity: {} pairs for ${:.4} profit - deferring orders",
                     self.market.short_desc(), decision.pairs_to_merge, decision.expected_profit
                 );
+
+                // When merge is possible, only send CANCELLATIONS (no new placements).
+                // This prevents race between new orders and merge execution.
+                let cancel_only_output = SolverOutput {
+                    cancellations: output.cancellations.clone(),
+                    limit_orders: Vec::new(),
+                };
+
+                if cancel_only_output.has_actions() {
+                    if let Err(e) = self.ctx.executor.execute(cancel_only_output.clone()) {
+                        if matches!(e, ExecutorError::ChannelClosed) {
+                            return (None, TickResult::ExecutorDead);
+                        }
+                    }
+                }
+
+                // Execute the merge
                 match self.ctx.executor.merge(
                     self.market.condition_id.clone(),
                     decision.pairs_to_merge,
@@ -461,11 +603,30 @@ impl Quoter {
                         warn!("[Quoter:{}] Merge failed: {}", self.market.short_desc(), e);
                     }
                 }
+
+                // Return cancel-only output (placements deferred to next tick after merge settles)
+                return (Some(cancel_only_output), TickResult::Continue);
             } else {
                 debug!(
                     "[Quoter:{}] Merge skipped, cooldown active: {} pairs",
                     self.market.short_desc(), decision.pairs_to_merge
                 );
+            }
+        }
+
+        // Normal path: no merge opportunity, send full output
+        if output.has_actions() {
+            if let Err(e) = self.ctx.executor.execute(output.clone()) {
+                if matches!(e, ExecutorError::ChannelClosed) {
+                    return (None, TickResult::ExecutorDead);
+                }
+                warn!("[Quoter:{}] Failed to send to executor: {}", self.market.short_desc(), e);
+                for oid in &output.cancellations {
+                    self.in_flight_tracker.cancel_failed(oid);
+                }
+                for order in &output.limit_orders {
+                    self.in_flight_tracker.placement_failed(&order.token_id, order.price);
+                }
             }
         }
 

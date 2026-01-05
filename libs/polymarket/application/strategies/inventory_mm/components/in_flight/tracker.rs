@@ -1,6 +1,6 @@
 //! In-flight order tracker to prevent duplicate commands.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
@@ -157,6 +157,27 @@ impl InFlightTracker {
         self.pending_placements.remove(&key);
     }
 
+    /// Call when an order at this price is cancelled - clears pending placement.
+    /// CRITICAL FIX: Without this, cancelled orders would still count toward
+    /// capacity until TTL expires, blocking new placements at different prices.
+    pub fn placement_cancelled(&mut self, token_id: &str, price: f64) {
+        let key = (token_id.to_string(), price_to_key(price));
+        if self.pending_placements.remove(&key).is_some() {
+            debug!(
+                "[InFlight] Placement cleared (cancelled): token={}, price={:.2}",
+                &token_id[..8.min(token_id.len())],
+                price
+            );
+        }
+    }
+
+    /// Batch version - clear pending placements for multiple cancelled orders.
+    pub fn placements_cancelled(&mut self, orders: &[(String, f64)]) {
+        for (token_id, price) in orders {
+            self.placement_cancelled(token_id, *price);
+        }
+    }
+
     /// Check if a price level is currently pending placement.
     pub fn is_placement_pending(&self, token_id: &str, price: f64) -> bool {
         let key = (token_id.to_string(), price_to_key(price));
@@ -169,65 +190,54 @@ impl InFlightTracker {
     // Cleanup
     // =========================================================================
 
-    /// Cleanup based on current OMS state. Call this each tick.
+    /// Cleanup expired pending entries. Call this each tick.
     ///
-    /// Parameters:
-    /// - `open_order_ids`: Set of order IDs that are currently OPEN in OMS
-    /// - `open_price_levels`: Set of (token_id, price_key) for OPEN orders in OMS
-    pub fn cleanup(
-        &mut self,
-        open_order_ids: &HashSet<String>,
-        open_price_levels: &HashSet<(String, i64)>,
-    ) {
+    /// Both cancels and placements now use TTL-only cleanup (no OMS state checking).
+    /// This prevents the race condition where clearing based on OMS state would
+    /// allow immediate duplicate operations.
+    pub fn cleanup(&mut self) {
         let now = Instant::now();
         let before_cancels = self.pending_cancels.len();
         let before_placements = self.pending_placements.len();
 
-        // Remove cancels if:
-        // - Order no longer in OMS (cancel succeeded), OR
-        // - Entry expired (allows retry)
-        self.pending_cancels.retain(|oid, sent_at| {
-            let still_in_oms = open_order_ids.contains(oid);
+        // CRITICAL: Only clear pending cancels based on TTL, not OMS state.
+        // The OMS removes orders immediately on REST cancel confirmation, so
+        // if we cleared based on "order not in OMS", we'd clear too early.
+        // This would make is_cancel_pending() return false, causing quoter to
+        // think it has capacity and place more orders (feedback loop).
+        self.pending_cancels.retain(|_oid, sent_at| {
             let expired = now.duration_since(*sent_at) >= self.ttl;
-
-            // Keep only if: still in OMS AND not expired
-            still_in_oms && !expired
+            !expired // Keep only if not expired
         });
 
-        // Remove placements if:
-        // - Price level IS in OMS (placement succeeded), OR
-        // - Entry expired (allows retry)
-        self.pending_placements.retain(|key, sent_at| {
-            let in_oms = open_price_levels.contains(key);
+        // CRITICAL FIX: Only clear placements based on TTL, NOT OMS state.
+        // Previous logic cleared pending placements when price was in OMS, which
+        // allowed placing another order at the same price on the NEXT TICK.
+        // This caused catastrophic order accumulation (80+ orders in seconds).
+        //
+        // Now we use TTL only - after placing at a price, must wait full TTL
+        // before placing another at the same price. This throttles to 1 order
+        // per price level per TTL period (default 5 seconds).
+        self.pending_placements.retain(|_key, sent_at| {
             let expired = now.duration_since(*sent_at) >= self.ttl;
-
-            // Keep only if: NOT in OMS AND not expired
-            !in_oms && !expired
+            !expired // Keep only if not expired
         });
 
         let removed_cancels = before_cancels - self.pending_cancels.len();
         let removed_placements = before_placements - self.pending_placements.len();
         if removed_cancels > 0 || removed_placements > 0 {
             debug!(
-                "[InFlight] Cleanup: removed {} cancels, {} placements (OMS has {} price levels)",
+                "[InFlight] Cleanup: removed {} cancels (TTL), {} placements (TTL)",
                 removed_cancels,
                 removed_placements,
-                open_price_levels.len()
             );
         }
     }
 
-    /// Convenience method: Build cleanup sets from list of open orders.
-    pub fn cleanup_from_orders(&mut self, open_orders: &[OpenOrderInfo]) {
-        let open_order_ids: HashSet<String> = open_orders.iter()
-            .map(|o| o.order_id.clone())
-            .collect();
-
-        let open_price_levels: HashSet<(String, i64)> = open_orders.iter()
-            .map(|o| (o.token_id.clone(), price_to_key(o.price)))
-            .collect();
-
-        self.cleanup(&open_order_ids, &open_price_levels);
+    /// Convenience method: Run cleanup (TTL-only, no OMS state needed).
+    /// Parameter kept for API compatibility but open_orders is no longer used.
+    pub fn cleanup_from_orders(&mut self, _open_orders: &[OpenOrderInfo]) {
+        self.cleanup();
     }
 
     // =========================================================================
@@ -251,6 +261,19 @@ impl InFlightTracker {
                 tid == token_id && now.duration_since(**sent_at) < self.ttl
             })
             .count()
+    }
+
+    /// Get pending price levels (as price keys) for a specific token (not expired).
+    /// Used for capacity checking - these levels should count toward the max level cap
+    /// even if they haven't appeared in OMS yet.
+    pub fn pending_price_levels_for_token(&self, token_id: &str) -> std::collections::HashSet<i64> {
+        let now = Instant::now();
+        self.pending_placements.iter()
+            .filter(|((tid, _), sent_at)| {
+                tid == token_id && now.duration_since(**sent_at) < self.ttl
+            })
+            .map(|((_, price_key), _)| *price_key)
+            .collect()
     }
 }
 
@@ -334,37 +357,48 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_removes_cancelled_orders() {
-        let mut tracker = InFlightTracker::new(Duration::from_secs(10));
+    fn test_cleanup_removes_cancelled_orders_by_ttl() {
+        // Use short TTL for this test
+        let mut tracker = InFlightTracker::new(short_ttl());
 
         // Register a pending cancel
         tracker.should_cancel("order-123");
         assert!(tracker.is_cancel_pending("order-123"));
 
-        // Cleanup with order-123 NOT in OMS (cancel succeeded)
-        let open_ids: HashSet<String> = HashSet::new();
-        let open_levels: HashSet<(String, i64)> = HashSet::new();
-        tracker.cleanup(&open_ids, &open_levels);
+        // Cleanup immediately - should NOT clear (TTL not expired)
+        tracker.cleanup();
 
-        // Should no longer be pending
+        // Should STILL be pending (TTL not expired)
+        assert!(tracker.is_cancel_pending("order-123"));
+
+        // Wait for TTL to expire
+        sleep(Duration::from_millis(60));
+
+        // Now cleanup should clear it
+        tracker.cleanup();
         assert!(!tracker.is_cancel_pending("order-123"));
     }
 
     #[test]
-    fn test_cleanup_removes_placed_orders() {
-        let mut tracker = InFlightTracker::new(Duration::from_secs(10));
+    fn test_cleanup_removes_placements_by_ttl() {
+        // Use short TTL for this test
+        let mut tracker = InFlightTracker::new(short_ttl());
 
         // Register a pending placement
         tracker.should_place("up_token", 0.55);
         assert!(tracker.is_placement_pending("up_token", 0.55));
 
-        // Cleanup with this price level IN OMS (placement succeeded)
-        let open_ids: HashSet<String> = HashSet::new();
-        let mut open_levels: HashSet<(String, i64)> = HashSet::new();
-        open_levels.insert(("up_token".to_string(), price_to_key(0.55)));
-        tracker.cleanup(&open_ids, &open_levels);
+        // Cleanup immediately - should NOT clear (TTL not expired)
+        tracker.cleanup();
 
-        // Should no longer be pending
+        // Should STILL be pending (TTL not expired)
+        assert!(tracker.is_placement_pending("up_token", 0.55));
+
+        // Wait for TTL to expire
+        sleep(Duration::from_millis(60));
+
+        // Now cleanup should clear it
+        tracker.cleanup();
         assert!(!tracker.is_placement_pending("up_token", 0.55));
     }
 
@@ -443,24 +477,30 @@ mod tests {
 
     #[test]
     fn test_cleanup_from_orders() {
-        let mut tracker = InFlightTracker::new(Duration::from_secs(10));
+        // Use short TTL for this test
+        let mut tracker = InFlightTracker::new(short_ttl());
 
         // Register pending operations
         tracker.should_cancel("order-123");
         tracker.should_place("up_token", 0.55);
 
-        // Simulate: order-123 still exists, but placement at 0.55 succeeded
+        // cleanup_from_orders is now TTL-only, parameter not used
         let open_orders = vec![
             OpenOrderInfo::new("order-123".to_string(), "up_token".to_string(), 0.60),
-            OpenOrderInfo::new("order-456".to_string(), "up_token".to_string(), 0.55),
         ];
 
         tracker.cleanup_from_orders(&open_orders);
 
-        // Cancel should still be pending (order still in OMS)
+        // Both should still be pending (TTL not expired)
         assert!(tracker.is_cancel_pending("order-123"));
+        assert!(tracker.is_placement_pending("up_token", 0.55));
 
-        // Placement should be cleared (price level now in OMS)
+        // Wait for TTL to expire
+        sleep(Duration::from_millis(60));
+
+        // Now cleanup should clear them
+        tracker.cleanup_from_orders(&open_orders);
+        assert!(!tracker.is_cancel_pending("order-123"));
         assert!(!tracker.is_placement_pending("up_token", 0.55));
     }
 

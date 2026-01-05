@@ -1,25 +1,26 @@
 //! Quote ladder calculation.
+//!
+//! Simple market-making: place bids below best_ask with offset based on imbalance.
+//! No profitability checks - that will be redesigned separately.
 
 use tracing::debug;
 
 use crate::application::strategies::inventory_mm::types::{
     InventorySnapshot, OrderbookSnapshot, Quote, QuoteLadder, SolverConfig,
 };
-use super::profitability::{calculate_max_bids, check_recovery_status};
 
 /// Polymarket minimum order size (in shares)
 const MIN_ORDER_SIZE: f64 = 5.0;
 
 /// Calculate quote ladder for both Up and Down tokens.
 ///
-/// Quotes are market-based with profitability caps:
-/// - Price = best_ask - offset - level_spread (market-based)
-/// - Capped at max_bid = 1.0 - other_side_avg - margin (profitability cap)
+/// Simple market-based quoting:
+/// - Price = best_ask - offset - level_spread
+/// - Offset increases on overweight side (passive), decreases on needed side (aggressive)
 ///
 /// Risk is managed via:
-/// - Offset mechanism: increases when imbalanced, making bids less aggressive
-/// - Profitability cap: prevents bids that would lead to losses
-/// - Max imbalance threshold: stops quoting entirely when too imbalanced
+/// - Offset mechanism: increases when imbalanced, making bids less aggressive on overweight side
+/// - Max imbalance threshold: stops quoting overweight side when too imbalanced
 /// - Skew sizing: reduces size on overweight side
 pub fn calculate_quotes(
     delta: f64,
@@ -32,21 +33,6 @@ pub fn calculate_quotes(
 ) -> QuoteLadder {
     let mut ladder = QuoteLadder::new();
 
-    // Check recovery status - if stuck, cancel all quotes
-    let recovery = check_recovery_status(
-        inventory,
-        config.recovery_threshold,
-        config.stuck_threshold,
-    );
-
-    if recovery.is_stuck {
-        debug!(
-            "[Solver] STUCK MODE: combined_avg={:.4} >= {:.4}, cancelling all quotes",
-            recovery.combined_avg, config.stuck_threshold
-        );
-        return ladder; // Empty ladder = cancel all existing orders
-    }
-
     // Calculate offsets based on imbalance (price adjustment)
     // When heavy on UP (delta > 0): UP offset increases (passive), DOWN offset decreases (aggressive)
     // When heavy on DOWN (delta < 0): DOWN offset increases (passive), UP offset decreases (aggressive)
@@ -55,24 +41,6 @@ pub fn calculate_quotes(
 
     let up_offset = (config.base_offset * (1.0 + delta * config.offset_scaling)).max(config.min_offset);
     let down_offset = (config.base_offset * (1.0 - delta * config.offset_scaling)).max(config.min_offset);
-
-    // Calculate recovery relaxation - only apply if in recovery mode
-    let recovery_relaxation = if recovery.in_recovery {
-        config.recovery_relaxation
-    } else {
-        0.0
-    };
-
-    // Calculate max profitable bids (profitability cap)
-    // In recovery mode, margin is relaxed on the needed side
-    let (max_up_bid, max_down_bid) = calculate_max_bids(
-        inventory,
-        up_ob,
-        down_ob,
-        config.min_profit_margin,
-        recovery_relaxation,
-        delta,
-    );
 
     // Calculate skew-adjusted sizes (size adjustment)
     // delta > 0 = heavy UP → reduce UP size, increase DOWN size
@@ -89,15 +57,34 @@ pub fn calculate_quotes(
         .round();
 
     debug!(
-        "[Solver] delta={:.2}, recovery={} → offsets=(UP:{:.3}, DOWN:{:.3}), max_bids=(UP:{:.3?}, DOWN:{:.3?}), sizes=(UP:{:.1}, DOWN:{:.1})",
-        delta, recovery.in_recovery, up_offset, down_offset, max_up_bid, max_down_bid, up_size, down_size
+        "[Solver] delta={:.2} → offsets=(UP:{:.3}, DOWN:{:.3}), sizes=(UP:{:.1}, DOWN:{:.1})",
+        delta, up_offset, down_offset, up_size, down_size
     );
 
+    // Skip logic for rebalancing:
+    // - Skip overweight side to let the other side catch up
+    // - EXCEPTION: Don't skip if we're truly one-sided (building from scratch)
+    //
+    // "Significant" inventory = at least order_size worth
+    // "Building from scratch" = less than order_size on that side
+    let is_building_up_from_scratch = inventory.up_size.abs() < config.order_size;
+    let is_building_down_from_scratch = inventory.down_size.abs() < config.order_size;
+
+    // Skip UP if heavily long UP AND we have significant UP to rebalance from
+    let skip_up = delta >= config.max_imbalance && !is_building_up_from_scratch;
+    // Skip DOWN if heavily long DOWN AND we have significant DOWN to rebalance from
+    let skip_down = delta <= -config.max_imbalance && !is_building_down_from_scratch;
+
+    if skip_up || skip_down {
+        debug!(
+            "[Solver] Skip decisions: UP={} (delta>={:.1} && UP>={:.0}), DOWN={} (delta<=-{:.1} && DOWN>={:.0})",
+            skip_up, config.max_imbalance, config.order_size,
+            skip_down, config.max_imbalance, config.order_size
+        );
+    }
+
     // Build Up quotes
-    // Skip if TOO imbalanced on UP side, UNLESS we have no DOWN inventory (one-sided)
-    // One-sided positions need to keep quoting to allow profit-taking if market recovers
-    // FIX: Use >= to include boundary (delta=0.8 should skip, not just delta>0.8)
-    let skip_up = delta >= config.max_imbalance && inventory.down_size > 0.0;
+    // Cross-spread validation DISABLED - was too restrictive and blocked rebalancing
     if !skip_up {
         if let Some(best_ask) = up_ob.best_ask_price() {
             ladder.up_quotes = build_ladder(
@@ -105,17 +92,18 @@ pub fn calculate_quotes(
                 best_ask,
                 up_offset,
                 up_size,
-                max_up_bid,
                 config,
-                config.capped_size_factor,
+                None,  // No cross-spread validation
             );
+        } else {
+            debug!("[Solver] UP quotes skipped: no best_ask in UP orderbook");
         }
+    } else {
+        debug!("[Solver] UP quotes skipped: skip_up=true (delta={:.2} >= max_imbalance={:.2})", delta, config.max_imbalance);
     }
 
     // Build Down quotes
-    // Skip if TOO imbalanced on DOWN side, UNLESS we have no UP inventory (one-sided)
-    // FIX: Use <= to include boundary (delta=-0.8 should skip, not just delta<-0.8)
-    let skip_down = delta <= -config.max_imbalance && inventory.up_size > 0.0;
+    // Cross-spread validation DISABLED - was too restrictive and blocked rebalancing
     if !skip_down {
         if let Some(best_ask) = down_ob.best_ask_price() {
             ladder.down_quotes = build_ladder(
@@ -123,83 +111,132 @@ pub fn calculate_quotes(
                 best_ask,
                 down_offset,
                 down_size,
-                max_down_bid,
                 config,
-                config.capped_size_factor,
+                None,  // No cross-spread validation
+            );
+
+            // Log if DOWN quotes are empty (helps debug why no orders are placed)
+            if ladder.down_quotes.is_empty() {
+                tracing::warn!(
+                    "[Solver] DOWN ladder EMPTY! best_ask={:.3}, offset={:.3}, delta={:.2}",
+                    best_ask, down_offset, delta
+                );
+            }
+        } else {
+            tracing::warn!(
+                "[Solver] DOWN quotes skipped: no best_ask in DOWN orderbook (down_bid={:?}, up_bid={:?}, up_ask={:?})",
+                down_ob.best_bid_price(),
+                up_ob.best_bid_price(),
+                up_ob.best_ask_price()
             );
         }
+    } else {
+        debug!("[Solver] DOWN quotes skipped: skip_down=true (delta={:.2} <= -{:.2})", delta, config.max_imbalance);
     }
 
     ladder
 }
 
-/// Build a ladder of bids for a single token
+/// Build a ladder of bids for a single token.
+///
+/// Cross-spread validation prevents spread-crossing when orderbook data is stale.
+///
+/// Example: If our orderbook shows UP best_ask = $0.65 but is stale,
+/// and DOWN best_bid = $0.37, we can infer UP is worth ~$0.63 (1 - 0.37).
+/// Any UP bid > $0.63 would cross the effective spread!
 fn build_ladder(
     token_id: &str,
     best_ask: f64,
     base_offset: f64,
     order_size: f64,
-    max_bid: Option<f64>,
     config: &SolverConfig,
-    capped_size_factor: f64,
+    opposite_best_bid: Option<f64>,  // For cross-spread validation
 ) -> Vec<Quote> {
     let mut quotes = Vec::with_capacity(config.num_levels);
     let mut last_price: Option<f64> = None;
+    let mut skipped_reasons: Vec<String> = Vec::new();
+
+    // CROSS-SPREAD SAFETY: Derive max safe bid from opposite side
+    // If DOWN bid = 0.37, then UP is worth ~0.63, so UP bid must be < 0.63
+    // This catches stale orderbook data that could cause spread crossing
+    //
+    // IMPORTANT: We use NO safety margin now. The previous 0.01 margin was too conservative
+    // and prevented quoting at competitive prices. The `price < best_ask` check already
+    // prevents crossing our own side's spread. This validation is just to catch stale data
+    // where the opposite side's orderbook is more up-to-date than ours.
+    let cross_spread_max = opposite_best_bid.map(|opp_bid| {
+        // Opposite bid tells us this side's value: 1.0 - opposite_bid
+        // No safety margin - let us quote at the true implied value
+        1.0 - opp_bid
+    });
 
     for level in 0..config.num_levels {
         // Calculate spread for this level (widens with each level)
         let level_spread = (level as f64) * (config.spread_per_level / 100.0);
 
         // Price = best_ask - base_offset - level_spread
-        let market_price = best_ask - base_offset - level_spread;
+        let mut price = best_ask - base_offset - level_spread;
 
-        // Cap at profitability limit (prevents bids that would lead to losses)
-        let (price, was_capped) = if let Some(max) = max_bid {
-            if market_price > max {
-                (max, true)
-            } else {
-                (market_price, false)
+        // Cap at cross-spread max to prevent TAKER fills
+        // This catches cases where our orderbook is stale but opposite side is fresh
+        if let Some(cross_max) = cross_spread_max {
+            if price > cross_max {
+                debug!(
+                    "[Solver] Cross-spread cap: {:.3} → {:.3} (opposite_bid={:.3})",
+                    price, cross_max, opposite_best_bid.unwrap_or(0.0)
+                );
+                price = cross_max;
             }
-        } else {
-            (market_price, false)
-        };
+        }
 
         // Round to tick size
         let price = round_to_tick(price, config.tick_size);
 
         // Skip if bid would cross or match the spread (prevents immediate TAKER fills)
         if price >= best_ask {
-            debug!(
-                "[Solver] BLOCKED bid at {:.3} - would cross best_ask {:.3}",
-                price, best_ask
-            );
+            skipped_reasons.push(format!("L{}: price {:.3} >= best_ask {:.3}", level, price, best_ask));
             continue;
         }
 
         // Skip if price too low (not worth quoting)
         if price < 0.01 {
+            skipped_reasons.push(format!("L{}: price {:.3} < 0.01", level, price));
             continue;
         }
 
-        // Skip if same as previous level (can happen when capped at max_bid)
-        if last_price.map_or(false, |lp| (lp - price).abs() < 1e-9) {
-            continue;
-        }
-        last_price = Some(price);
-
-        // Reduce size when capped at profitability limit (limits exposure on marginal trades)
-        let final_size = if was_capped {
-            (order_size * capped_size_factor).round().max(MIN_ORDER_SIZE)
+        // Ensure prices are monotonically decreasing (ladder structure)
+        // When resulting in same/higher price as previous, spread out
+        let price = if let Some(lp) = last_price {
+            if price >= lp - 1e-9 {
+                // Would be same or higher than previous - move down by one tick
+                let adjusted = round_to_tick(lp - config.tick_size, config.tick_size);
+                if adjusted < 0.01 {
+                    continue;  // Can't go lower
+                }
+                adjusted
+            } else {
+                price
+            }
         } else {
-            order_size
+            price
         };
+        last_price = Some(price);
 
         quotes.push(Quote::new_bid(
             token_id.to_string(),
             price,
-            final_size,
+            order_size,
             level,
         ));
+    }
+
+    // Log if all quotes were skipped
+    if quotes.is_empty() && !skipped_reasons.is_empty() {
+        tracing::warn!(
+            "[Solver] build_ladder({}) ALL SKIPPED: {}",
+            &token_id[..8.min(token_id.len())],
+            skipped_reasons.join(", ")
+        );
     }
 
     quotes
@@ -221,16 +258,11 @@ mod tests {
             num_levels: 3,
             tick_size: 0.01,
             base_offset: 0.01,
-            min_profit_margin: 0.01,
             max_imbalance: 0.8,
             order_size: 100.0,
             spread_per_level: 1.0,
             offset_scaling: 5.0,
             skew_factor: 1.0,
-            recovery_threshold: 0.99,
-            recovery_relaxation: 0.005,
-            capped_size_factor: 0.5,
-            stuck_threshold: 1.02,
             min_offset: 0.01,
         }
     }
@@ -255,8 +287,8 @@ mod tests {
     #[test]
     fn test_build_ladder_basic() {
         let config = default_config();
-        // No cap - pass None for max_bid, capped_size_factor = 1.0 (no reduction)
-        let quotes = build_ladder("token", 0.55, 0.01, 100.0, None, &config, 1.0);
+        // No cross-spread validation (None for opposite_best_bid)
+        let quotes = build_ladder("token", 0.55, 0.01, 100.0, &config, None);
 
         assert_eq!(quotes.len(), 3);
         // Level 0: 0.55 - 0.01 - 0 = 0.54
@@ -265,42 +297,24 @@ mod tests {
         assert!((quotes[1].price - 0.53).abs() < 0.001);
         // Level 2: 0.55 - 0.01 - 0.02 = 0.52
         assert!((quotes[2].price - 0.52).abs() < 0.001);
-        // All quotes should have the passed size (not capped)
+        // All quotes should have full size
         assert!((quotes[0].size - 100.0).abs() < 0.001);
     }
 
     #[test]
-    fn test_build_ladder_with_cap() {
+    fn test_build_ladder_cross_spread_validation() {
         let config = default_config();
-        // Cap at 0.52 - only first level should be generated (others would be same price)
-        // capped_size_factor = 0.5 means capped quotes get half size
-        let quotes = build_ladder("token", 0.55, 0.01, 100.0, Some(0.52), &config, 0.5);
+        // Test cross-spread validation:
+        // best_ask = 0.65, but opposite_best_bid = 0.37
+        // Cross-spread max = 1.0 - 0.37 = 0.63 (no safety margin anymore)
+        // Our bid at 0.64 (0.65 - 0.01) should be capped to 0.63
+        let quotes = build_ladder("token", 0.65, 0.01, 100.0, &config, Some(0.37));
 
-        // Level 0: min(0.54, 0.52) = 0.52 (capped!)
-        // Level 1: min(0.53, 0.52) = 0.52 -> skip (same as previous)
-        // Level 2: min(0.52, 0.52) = 0.52 -> skip (same as previous)
-        assert_eq!(quotes.len(), 1);
-        assert!((quotes[0].price - 0.52).abs() < 0.001);
-        // Capped size = 100 * 0.5 = 50
-        assert!((quotes[0].size - 50.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_build_ladder_partial_cap() {
-        let config = default_config();
-        // Cap at 0.53 - first level is capped (0.54 > 0.53)
-        let quotes = build_ladder("token", 0.55, 0.01, 100.0, Some(0.53), &config, 0.5);
-
-        // Level 0: 0.54 > 0.53 → capped at 0.53, reduced size
-        // Level 1: 0.53 not > 0.53 → not capped, but same price as level 0, SKIPPED
-        // Level 2: 0.52 not > 0.53 → not capped, full size
-        assert_eq!(quotes.len(), 2);
-        // First quote is capped → half size
-        assert!((quotes[0].price - 0.53).abs() < 0.001);
-        assert!((quotes[0].size - 50.0).abs() < 0.001);
-        // Second quote is not capped → full size
-        assert!((quotes[1].price - 0.52).abs() < 0.001);
-        assert!((quotes[1].size - 100.0).abs() < 0.001);
+        assert!(!quotes.is_empty());
+        // All prices should be <= 0.63 (cross-spread max, no safety margin)
+        for q in &quotes {
+            assert!(q.price <= 0.63, "Price {} exceeds cross-spread max 0.63", q.price);
+        }
     }
 
     #[test]
@@ -365,16 +379,23 @@ mod tests {
             "down_token",
         );
 
-        // Should have quotes on Down (need more), none/fewer on Up
+        // Should have quotes on Down (need more)
         assert!(!ladder.down_quotes.is_empty());
-        // At exactly 0.8, Up quotes should still be generated (< not <=)
     }
 
     #[test]
     fn test_calculate_quotes_extreme_imbalance() {
         let mut config = default_config();
         config.max_imbalance = 0.7;
-        let inventory = default_inventory();
+        config.order_size = 10.0; // Use smaller order_size so inventory is "significant"
+
+        // Inventory with significant UP position (should be skipped when heavy UP)
+        let inventory = InventorySnapshot {
+            up_size: 50.0,  // >= order_size (10), so significant
+            up_avg_price: 0.52,
+            down_size: 50.0,
+            down_avg_price: 0.46,
+        };
 
         let up_ob = OrderbookSnapshot {
             best_ask: Some((0.55, 100.0)),
@@ -390,6 +411,7 @@ mod tests {
         };
 
         // delta = 0.9, above max_imbalance of 0.7
+        // With 50 UP >= 10 order_size, UP should be skipped
         let delta = 0.9;
 
         let ladder = calculate_quotes(
@@ -402,7 +424,7 @@ mod tests {
             "down_token",
         );
 
-        // Should have NO Up quotes (too imbalanced), only Down
+        // Should have NO Up quotes (too imbalanced AND significant UP), only Down
         assert!(ladder.up_quotes.is_empty());
         assert!(!ladder.down_quotes.is_empty());
     }
@@ -412,9 +434,6 @@ mod tests {
         let mut config = default_config();
         config.skew_factor = 2.0;
         config.order_size = 100.0;
-        // Use profitable inventory that won't trigger profitability caps at these market prices
-        // max_up_bid = 1.0 - 0.40 - 0.01 = 0.59 (well above 0.54 bid)
-        // max_down_bid = 1.0 - 0.50 - 0.01 = 0.49 (well above 0.44 bid)
         let inventory = InventorySnapshot {
             up_size: 50.0,
             up_avg_price: 0.50,
@@ -451,7 +470,6 @@ mod tests {
         let mut config = default_config();
         config.skew_factor = 2.0;
         config.order_size = 100.0;
-        // Use profitable inventory that won't trigger profitability caps
         let inventory = InventorySnapshot {
             up_size: 50.0,
             up_avg_price: 0.50,
@@ -488,7 +506,6 @@ mod tests {
         let mut config = default_config();
         config.skew_factor = 2.0;
         config.order_size = 100.0;
-        // Use profitable inventory that won't trigger profitability caps
         let inventory = InventorySnapshot {
             up_size: 50.0,
             up_avg_price: 0.50,
@@ -496,22 +513,22 @@ mod tests {
             down_avg_price: 0.40,
         };
 
+        // MARKET-BASED: Need proper bids for profitability calc
+        // UP+DOWN market = 0.53 + 0.43 = 0.96 < 1.0 (profitable)
         let up_ob = OrderbookSnapshot {
             best_ask: Some((0.55, 100.0)),
-            best_bid: None,
+            best_bid: Some((0.53, 50.0)),  // Market bid for UP
             best_bid_is_ours: false,
             best_ask_is_ours: false,
         };
         let down_ob = OrderbookSnapshot {
             best_ask: Some((0.45, 100.0)),
-            best_bid: None,
+            best_bid: Some((0.43, 50.0)),  // Market bid for DOWN
             best_bid_is_ours: false,
             best_ask_is_ours: false,
         };
 
         // Balanced (delta = 0)
-        // up_size = 100 * (1 - 0 * 2.0) = 100
-        // down_size = 100 * (1 + 0 * 2.0) = 100
         let ladder = calculate_quotes(0.0, &up_ob, &down_ob, &inventory, &config, "up", "down");
 
         assert!((ladder.up_quotes[0].size - 100.0).abs() < 0.01);
@@ -525,27 +542,27 @@ mod tests {
         config.order_size = 100.0;
         let inventory = default_inventory();
 
+        // MARKET-BASED: Need proper bids for profitability calc
         let up_ob = OrderbookSnapshot {
             best_ask: Some((0.55, 100.0)),
-            best_bid: None,
+            best_bid: Some((0.53, 50.0)),
             best_bid_is_ours: false,
             best_ask_is_ours: false,
         };
         let down_ob = OrderbookSnapshot {
             best_ask: Some((0.45, 100.0)),
-            best_bid: None,
+            best_bid: Some((0.43, 50.0)),
             best_bid_is_ours: false,
             best_ask_is_ours: false,
         };
 
         // Heavy UP (delta = 0.5)
-        // up_size = 100 * (1 - 0.5 * 5.0) = 100 * (-1.5) = -150 → clamped to MIN_ORDER_SIZE (5.0)
-        // down_size = 100 * (1 + 0.5 * 5.0) = 100 * 3.5 = 350 → clamped to 300
+        // up_size = 100 * (1 - 0.5 * 5.0) = -150 → clamped to MIN_ORDER_SIZE (5.0)
+        // down_size = 100 * (1 + 0.5 * 5.0) = 350 → clamped to 300
         let ladder = calculate_quotes(0.5, &up_ob, &down_ob, &inventory, &config, "up", "down");
 
         assert!(!ladder.up_quotes.is_empty());
         assert!(!ladder.down_quotes.is_empty());
-        // Now clamped to MIN_ORDER_SIZE instead of 0
         assert!((ladder.up_quotes[0].size - MIN_ORDER_SIZE).abs() < 0.01);
         assert!((ladder.down_quotes[0].size - 300.0).abs() < 0.01);
     }
@@ -557,15 +574,16 @@ mod tests {
         config.order_size = 100.0;
         let inventory = default_inventory();
 
+        // MARKET-BASED: Need proper bids for profitability calc
         let up_ob = OrderbookSnapshot {
             best_ask: Some((0.55, 100.0)),
-            best_bid: None,
+            best_bid: Some((0.53, 50.0)),
             best_bid_is_ours: false,
             best_ask_is_ours: false,
         };
         let down_ob = OrderbookSnapshot {
             best_ask: Some((0.45, 100.0)),
-            best_bid: None,
+            best_bid: Some((0.43, 50.0)),
             best_bid_is_ours: false,
             best_ask_is_ours: false,
         };
@@ -575,82 +593,6 @@ mod tests {
 
         assert!((ladder.up_quotes[0].size - 100.0).abs() < 0.01);
         assert!((ladder.down_quotes[0].size - 100.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_profitability_cap() {
-        let config = default_config();
-        // Inventory with combined avg 0.98 (profitable)
-        // max_up_bid = 1.0 - 0.46 - 0.01 = 0.53
-        // max_down_bid = 1.0 - 0.52 - 0.01 = 0.47
-        let inventory = InventorySnapshot {
-            up_size: 50.0,
-            up_avg_price: 0.52,
-            down_size: 50.0,
-            down_avg_price: 0.46,
-        };
-
-        let up_ob = OrderbookSnapshot {
-            best_ask: Some((0.55, 100.0)),
-            best_bid: None,
-            best_bid_is_ours: false,
-            best_ask_is_ours: false,
-        };
-        let down_ob = OrderbookSnapshot {
-            best_ask: Some((0.50, 100.0)), // High ask - would bid at 0.49
-            best_bid: None,
-            best_bid_is_ours: false,
-            best_ask_is_ours: false,
-        };
-
-        let ladder = calculate_quotes(0.0, &up_ob, &down_ob, &inventory, &config, "up", "down");
-
-        // UP quotes: best_ask 0.55 - 0.01 = 0.54, but max is 0.53 -> capped to 0.53
-        assert!(!ladder.up_quotes.is_empty());
-        assert!((ladder.up_quotes[0].price - 0.53).abs() < 0.001);
-
-        // DOWN quotes: best_ask 0.50 - 0.01 = 0.49, but max is 0.47 -> capped to 0.47
-        assert!(!ladder.down_quotes.is_empty());
-        assert!((ladder.down_quotes[0].price - 0.47).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_profitability_cap_unprofitable_inventory() {
-        let config = default_config();
-        // Inventory already unprofitable: combined = 0.52 + 0.49 = 1.01
-        // max_up_bid = 1.0 - 0.49 - 0.01 = 0.50
-        // max_down_bid = 1.0 - 0.52 - 0.01 = 0.47
-        let inventory = InventorySnapshot {
-            up_size: 50.0,
-            up_avg_price: 0.52,
-            down_size: 50.0,
-            down_avg_price: 0.49,  // Already unprofitable
-        };
-
-        let up_ob = OrderbookSnapshot {
-            best_ask: Some((0.55, 100.0)),
-            best_bid: None,
-            best_bid_is_ours: false,
-            best_ask_is_ours: false,
-        };
-        let down_ob = OrderbookSnapshot {
-            best_ask: Some((0.50, 100.0)),
-            best_bid: None,
-            best_bid_is_ours: false,
-            best_ask_is_ours: false,
-        };
-
-        let ladder = calculate_quotes(0.0, &up_ob, &down_ob, &inventory, &config, "up", "down");
-
-        // UP quotes capped at max_up_bid = 0.50
-        // Market bid would be 0.54, but cap is 0.50
-        assert!(!ladder.up_quotes.is_empty());
-        assert!((ladder.up_quotes[0].price - 0.50).abs() < 0.001);
-
-        // DOWN quotes capped at max_down_bid = 0.47
-        // Market bid would be 0.49, but cap is 0.47
-        assert!(!ladder.down_quotes.is_empty());
-        assert!((ladder.down_quotes[0].price - 0.47).abs() < 0.001);
     }
 
     #[test]
@@ -680,72 +622,6 @@ mod tests {
         assert!(up_offset < config.base_offset, "UP offset should be < base when need UP");
         // DOWN offset should INCREASE (passive) because we're heavy DOWN
         assert!(down_offset > config.base_offset, "DOWN offset should be > base when heavy DOWN");
-    }
-
-    #[test]
-    fn test_stuck_mode_cancels_all() {
-        let config = default_config();
-        // Stuck inventory: combined = 0.52 + 0.51 = 1.03 >= 1.02
-        let stuck_inventory = InventorySnapshot {
-            up_size: 50.0,
-            up_avg_price: 0.52,
-            down_size: 50.0,
-            down_avg_price: 0.51,
-        };
-
-        let up_ob = OrderbookSnapshot {
-            best_ask: Some((0.55, 100.0)),
-            best_bid: None,
-            best_bid_is_ours: false,
-            best_ask_is_ours: false,
-        };
-        let down_ob = OrderbookSnapshot {
-            best_ask: Some((0.45, 100.0)),
-            best_bid: None,
-            best_bid_is_ours: false,
-            best_ask_is_ours: false,
-        };
-
-        let ladder = calculate_quotes(0.0, &up_ob, &down_ob, &stuck_inventory, &config, "up", "down");
-
-        // Should return empty ladder - cancel all quotes
-        assert!(ladder.up_quotes.is_empty(), "Stuck mode should have no UP quotes");
-        assert!(ladder.down_quotes.is_empty(), "Stuck mode should have no DOWN quotes");
-    }
-
-    #[test]
-    fn test_recovery_mode_relaxes_margin() {
-        let mut config = default_config();
-        config.recovery_relaxation = 0.01; // Relax by full margin
-
-        // Recovery inventory: combined = 0.52 + 0.48 = 1.00 >= 0.99
-        let recovery_inventory = InventorySnapshot {
-            up_size: 50.0,
-            up_avg_price: 0.52,
-            down_size: 50.0,
-            down_avg_price: 0.48,
-        };
-
-        // Heavy UP (delta > 0) - need DOWN, relax DOWN margin
-        let up_ob = OrderbookSnapshot {
-            best_ask: Some((0.55, 100.0)),
-            best_bid: None,
-            best_bid_is_ours: false,
-            best_ask_is_ours: false,
-        };
-        let down_ob = OrderbookSnapshot {
-            best_ask: Some((0.50, 100.0)),
-            best_bid: None,
-            best_bid_is_ours: false,
-            best_ask_is_ours: false,
-        };
-
-        // delta = 0 for balanced inventory
-        let ladder = calculate_quotes(0.0, &up_ob, &down_ob, &recovery_inventory, &config, "up", "down");
-
-        // Should still generate quotes (not stuck)
-        assert!(!ladder.up_quotes.is_empty(), "Recovery mode should still quote UP");
-        assert!(!ladder.down_quotes.is_empty(), "Recovery mode should still quote DOWN");
     }
 
     #[test]
@@ -840,16 +716,17 @@ mod tests {
 
     #[test]
     fn test_extreme_imbalance_with_both_sides_still_skips() {
-        // Verify that when we have BOTH sides with inventory, the max_imbalance
-        // check still works as before (skips overweight side)
+        // Verify that when we have BOTH sides with SIGNIFICANT inventory, the max_imbalance
+        // check still works (skips overweight side)
         let mut config = default_config();
         config.max_imbalance = 0.7;
+        config.order_size = 10.0; // Smaller order_size so 90 and 10 are both "significant"
 
-        // Two-sided inventory (both sides have inventory)
+        // Two-sided inventory (both sides have significant inventory >= order_size)
         let inventory = InventorySnapshot {
-            up_size: 90.0,
+            up_size: 90.0,  // >= order_size (10), significant
             up_avg_price: 0.50,
-            down_size: 10.0,
+            down_size: 10.0, // >= order_size (10), significant (just barely)
             down_avg_price: 0.40,
         };
 

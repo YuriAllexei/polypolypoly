@@ -79,7 +79,6 @@ mod visual_tests {
         println!("  num_levels: {}", input.config.num_levels);
         println!("  base_offset: ${:.2}", input.config.base_offset);
         println!("  spread_per_level: {} cents", input.config.spread_per_level);
-        println!("  min_profit_margin: ${:.2}", input.config.min_profit_margin);
         println!("  max_imbalance: {:.0}%", input.config.max_imbalance * 100.0);
         println!("  order_size: {}", input.config.order_size);
         println!("  offset_scaling: {:.1}", input.config.offset_scaling);
@@ -190,16 +189,11 @@ mod visual_tests {
             num_levels: 3,
             tick_size: 0.01,
             base_offset: 0.01,
-            min_profit_margin: 0.01,
             max_imbalance: 0.8,
             order_size: 100.0,
             spread_per_level: 1.0,
             offset_scaling: 5.0,
             skew_factor: 2.0,
-            recovery_threshold: 0.99,
-            recovery_relaxation: 0.005,
-            capped_size_factor: 0.5,
-            stuck_threshold: 1.02,
             min_offset: 0.01,
         }
     }

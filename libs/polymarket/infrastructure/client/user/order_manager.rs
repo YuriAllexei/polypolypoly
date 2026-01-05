@@ -903,30 +903,28 @@ impl OrderStateStore {
             MessageType::Cancellation => OrderEvent::Cancelled(order.clone()),
         };
 
-        self.order_to_asset
-            .insert(msg.id.clone(), msg.asset_id.clone());
-
         // Check if this order should be immediately cancelled due to pending REST cancellation.
         // This handles the race condition where REST cancellation confirms before WebSocket PLACEMENT.
         let should_cancel = self.pending_cancels.remove(&msg.id).is_some();
 
+        if should_cancel {
+            // Order was REST-confirmed as cancelled before WebSocket PLACEMENT arrived.
+            // DON'T insert it into OMS at all - it's already cancelled on the exchange.
+            // This is consistent with mark_orders_cancelled() which removes orders from OMS.
+            debug!(
+                "[OrderState] Skipping PLACEMENT for {} - already REST-cancelled (was in pending_cancels)",
+                &msg.id[..16.min(msg.id.len())]
+            );
+            // Return Cancelled event so callbacks are notified
+            return Some(OrderEvent::Cancelled(order));
+        }
+
+        // Only insert into tracking maps if we're actually keeping the order
+        self.order_to_asset
+            .insert(msg.id.clone(), msg.asset_id.clone());
+
         let book = self.get_or_create_asset(&msg.asset_id);
         book.upsert_order(order);
-
-        if should_cancel {
-            // Order was in pending_cancels - mark it as CANCELLED immediately
-            if let Some(inserted_order) = book.bids.get_mut(&msg.id)
-                .or_else(|| book.asks.get_mut(&msg.id))
-            {
-                inserted_order.status = OrderStatus::Cancelled;
-                debug!(
-                    "[OrderState] Auto-cancelled order {} from pending_cancels",
-                    &msg.id[..16.min(msg.id.len())]
-                );
-                // Return Cancelled event instead of original event
-                return Some(OrderEvent::Cancelled(inserted_order.clone()));
-            }
-        }
 
         Some(event)
     }
@@ -1478,16 +1476,74 @@ impl OrderStateStore {
     // Pre-registration (for race condition prevention)
     // =========================================================================
 
-    /// Pre-register an order_id that was just placed via REST API.
-    /// This allows trades to be matched even if they arrive before the WebSocket PLACEMENT message.
-    /// Call this immediately after receiving the order_id from REST placement response.
+    /// Pre-register an order that was just placed via REST API.
+    /// This allows trades to be matched AND cancellations to succeed even if WebSocket
+    /// PLACEMENT message is delayed or dropped.
+    ///
+    /// CRITICAL: Must add the order to both order_to_asset AND bids.
+    /// Previous bug: Only adding to order_to_asset meant mark_orders_cancelled() couldn't
+    /// find the order in bids, resulting in "0 updated in OMS, X pending" errors.
     pub fn pre_register_order(&mut self, order_id: &str, asset_id: &str) {
+        // Delegate to the full version with default values
+        self.pre_register_order_with_details(order_id, asset_id, 0.0, 0.0, Side::Buy);
+    }
+
+    /// Pre-register an order with full details (price, size, side).
+    /// This should be called immediately after REST API confirms order placement,
+    /// BEFORE WebSocket PLACEMENT message arrives.
+    ///
+    /// CRITICAL: Using actual price and size (instead of 0.0 placeholders) ensures
+    /// that capacity calculations and order tracking work correctly even if WebSocket
+    /// is delayed or dropped.
+    pub fn pre_register_order_with_details(
+        &mut self,
+        order_id: &str,
+        asset_id: &str,
+        price: f64,
+        size: f64,
+        side: Side,
+    ) {
         if !self.order_to_asset.contains_key(order_id) {
+            // 1. Add to order_id -> asset_id mapping
             self.order_to_asset.insert(order_id.to_string(), asset_id.to_string());
+
+            // 2. Ensure asset book exists
+            let book = self.assets.entry(asset_id.to_string())
+                .or_insert_with(|| AssetOrderBook::new(asset_id.to_string()));
+
+            // 3. Add Order with actual details so capacity calculations work correctly
+            let order = Order {
+                order_id: order_id.to_string(),
+                asset_id: asset_id.to_string(),
+                market: String::new(),
+                side,
+                outcome: String::new(),
+                price,
+                original_size: size,
+                size_matched: 0.0,
+                status: OrderStatus::Open,
+                order_type: OrderType::GTC,
+                maker_address: String::new(),
+                owner: String::new(),
+                associate_trades: Vec::new(),
+                created_at: String::new(),
+                expiration: String::new(),
+                timestamp: String::new(),
+            };
+
+            // Insert into appropriate side
+            match side {
+                Side::Buy => book.bids.insert(order_id.to_string(), order),
+                Side::Sell => book.asks.insert(order_id.to_string(), order),
+            };
+
             debug!(
-                "[OrderState] Pre-registered order {} for asset {}",
+                "[OrderState] Pre-registered order {} for asset {} @ ${:.2} x {:.1} ({:?})",
                 &order_id[..16.min(order_id.len())],
-                &asset_id[..16.min(asset_id.len())]
+                &asset_id[..16.min(asset_id.len())],
+                price,
+                size,
+                side
             );
         }
     }
@@ -1539,8 +1595,12 @@ impl OrderStateStore {
                         book.bids.remove(order_id);
                         self.order_to_asset.remove(order_id);
                         removed += 1;
+                        // CRITICAL FIX: Add to pending_cancels so late WebSocket PLACEMENTs
+                        // don't re-add this order back to OMS
+                        self.pending_cancels.insert(order_id.clone(), Instant::now());
+                        self.pending_cancels_order.push_back(order_id.clone());
                         debug!(
-                            "[OrderState] REST-confirmed: REMOVED order {} from bids",
+                            "[OrderState] REST-confirmed: REMOVED order {} from bids (added to pending_cancels)",
                             &order_id[..16.min(order_id.len())]
                         );
                     }
@@ -1549,8 +1609,12 @@ impl OrderStateStore {
                         book.asks.remove(order_id);
                         self.order_to_asset.remove(order_id);
                         removed += 1;
+                        // CRITICAL FIX: Add to pending_cancels so late WebSocket PLACEMENTs
+                        // don't re-add this order back to OMS
+                        self.pending_cancels.insert(order_id.clone(), Instant::now());
+                        self.pending_cancels_order.push_back(order_id.clone());
                         debug!(
-                            "[OrderState] REST-confirmed: REMOVED order {} from asks",
+                            "[OrderState] REST-confirmed: REMOVED order {} from asks (added to pending_cancels)",
                             &order_id[..16.min(order_id.len())]
                         );
                     }

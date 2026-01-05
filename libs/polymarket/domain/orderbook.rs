@@ -156,6 +156,11 @@ pub struct Orderbook {
     pub asks: OrderbookSide,
     /// Last time the orderbook was updated (for staleness detection)
     last_updated: Instant,
+    /// Authoritative best_bid from exchange (updated via price_change events)
+    /// More reliable than computing from internal levels which can drift
+    authoritative_best_bid: Option<f64>,
+    /// Authoritative best_ask from exchange (updated via price_change events)
+    authoritative_best_ask: Option<f64>,
 }
 
 impl Orderbook {
@@ -166,6 +171,8 @@ impl Orderbook {
             bids: OrderbookSide::new(true),
             asks: OrderbookSide::new(false),
             last_updated: Instant::now(),
+            authoritative_best_bid: None,
+            authoritative_best_ask: None,
         }
     }
 
@@ -190,6 +197,33 @@ impl Orderbook {
         self.last_updated = Instant::now();
     }
 
+    /// Process a price update WITH authoritative best_bid/best_ask from exchange
+    /// This is the preferred method - the exchange tells us the true best prices
+    /// which prevents drift from our internal bookkeeping
+    pub fn process_update_with_best(
+        &mut self,
+        side: &str,
+        price: &str,
+        size: &str,
+        best_bid: &str,
+        best_ask: &str,
+    ) {
+        // Update internal levels
+        self.process_update(side, price, size);
+
+        // Store authoritative best prices from exchange
+        if let Ok(bid) = best_bid.parse::<f64>() {
+            if bid > 0.0 {
+                self.authoritative_best_bid = Some(bid);
+            }
+        }
+        if let Ok(ask) = best_ask.parse::<f64>() {
+            if ask > 0.0 {
+                self.authoritative_best_ask = Some(ask);
+            }
+        }
+    }
+
     /// Get seconds since last update
     pub fn seconds_since_update(&self) -> f64 {
         self.last_updated.elapsed().as_secs_f64()
@@ -201,14 +235,38 @@ impl Orderbook {
     }
 
     /// Get best bid (highest buy price)
+    /// Uses authoritative value from exchange if available, falls back to computed
     #[inline]
     pub fn best_bid(&self) -> Option<(f64, f64)> {
+        // Prefer authoritative value from exchange (more reliable)
+        if let Some(auth_bid) = self.authoritative_best_bid {
+            // Try to get size from internal levels, default to 0.0 if not found
+            let size = self.bids.levels()
+                .iter()
+                .find(|(p, _)| (*p - auth_bid).abs() < 1e-6)
+                .map(|(_, s)| *s)
+                .unwrap_or(0.0);
+            return Some((auth_bid, size));
+        }
+        // Fall back to computed value from internal levels
         self.bids.best()
     }
 
     /// Get best ask (lowest sell price)
+    /// Uses authoritative value from exchange if available, falls back to computed
     #[inline]
     pub fn best_ask(&self) -> Option<(f64, f64)> {
+        // Prefer authoritative value from exchange (more reliable)
+        if let Some(auth_ask) = self.authoritative_best_ask {
+            // Try to get size from internal levels, default to 0.0 if not found
+            let size = self.asks.levels()
+                .iter()
+                .find(|(p, _)| (*p - auth_ask).abs() < 1e-6)
+                .map(|(_, s)| *s)
+                .unwrap_or(0.0);
+            return Some((auth_ask, size));
+        }
+        // Fall back to computed value from internal levels
         self.asks.best()
     }
 

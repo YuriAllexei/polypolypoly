@@ -310,13 +310,19 @@ impl SniperHandler {
             }
         }
 
-        // Then update the orderbooks
+        // Then update the orderbooks using authoritative best_bid/best_ask from exchange
         let mut obs = self.orderbooks.write();
         for change in &event.price_changes {
             let orderbook = obs
                 .entry(change.asset_id.clone())
                 .or_insert_with(|| Orderbook::new(change.asset_id.clone()));
-            orderbook.process_update(&change.side, &change.price, &change.size);
+            orderbook.process_update_with_best(
+                &change.side,
+                &change.price,
+                &change.size,
+                &change.best_bid,
+                &change.best_ask,
+            );
         }
     }
 

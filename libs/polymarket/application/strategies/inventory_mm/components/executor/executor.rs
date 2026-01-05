@@ -33,8 +33,28 @@ impl QuoterExecutorHandle {
             return Ok(());
         }
         self.command_tx
-            .send(ExecutorCommand::ExecuteBatch(output))
+            .send(ExecutorCommand::ExecuteBatch(output, None))
             .map_err(|_| ExecutorError::ChannelClosed)
+    }
+
+    /// Execute a solver output and wait for the result (blocking).
+    /// Returns the ExecutorResult with placed/cancelled order IDs and any errors.
+    pub fn execute_with_feedback(&self, output: SolverOutput) -> Result<ExecutorResult, ExecutorError> {
+        use crossbeam_channel::bounded;
+        use super::commands::ExecutorResult;
+
+        if !output.has_actions() {
+            return Ok(ExecutorResult::new());
+        }
+
+        let (tx, rx) = bounded(1);
+        self.command_tx
+            .send(ExecutorCommand::ExecuteBatch(output, Some(tx)))
+            .map_err(|_| ExecutorError::ChannelClosed)?;
+
+        // Wait for result with timeout (30 seconds max for order execution)
+        rx.recv_timeout(std::time::Duration::from_secs(30))
+            .map_err(|_| ExecutorError::TradingError("Timeout waiting for executor result".to_string()))
     }
 
     /// Cancel specific orders.
@@ -92,7 +112,7 @@ impl ExecutorHandle {
         if !output.has_actions() {
             return Ok(()); // Nothing to do
         }
-        self.send(ExecutorCommand::ExecuteBatch(output))
+        self.send(ExecutorCommand::ExecuteBatch(output, None))
     }
 
     /// Cancel specific orders
@@ -250,7 +270,7 @@ impl Executor {
         let mut result = ExecutorResult::new();
 
         match command {
-            ExecutorCommand::ExecuteBatch(output) => {
+            ExecutorCommand::ExecuteBatch(output, response_tx) => {
                 // 1. Cancellations first
                 if !output.cancellations.is_empty() {
                     result.merge(self.execute_cancellations(&output.cancellations));
@@ -259,6 +279,11 @@ impl Executor {
                 // 2. Limits (batch)
                 if !output.limit_orders.is_empty() {
                     result.merge(self.execute_limits(&output.limit_orders));
+                }
+
+                // 3. Send result back if response channel provided
+                if let Some(tx) = response_tx {
+                    let _ = tx.send(result.clone());
                 }
             }
 
@@ -425,6 +450,26 @@ impl Executor {
                         result.placed_count += 1;
                         if let Some(ref order_id) = response.order_id {
                             result.placed_ids.push(order_id.clone());
+
+                            // FIX: Pre-register order in OMS immediately after REST confirms.
+                            // This ensures mark_orders_cancelled() can find the order later,
+                            // even if WebSocket PLACEMENT message is delayed or dropped.
+                            // CRITICAL: Include actual price, size, and side so capacity
+                            // calculations work correctly even when WebSocket is slow.
+                            if let Some(ref order_state) = self.order_state {
+                                use crate::infrastructure::client::user::Side as OmsSide;
+                                let oms_side = match order.side {
+                                    Side::Buy => OmsSide::Buy,
+                                    Side::Sell => OmsSide::Sell,
+                                };
+                                order_state.write().pre_register_order_with_details(
+                                    order_id,
+                                    &order.token_id,
+                                    order.price,
+                                    order.size,
+                                    oms_side,
+                                );
+                            }
                         }
                         info!(
                             "[Executor] ✓ Placed {} @ ${:.2} → {:?}",

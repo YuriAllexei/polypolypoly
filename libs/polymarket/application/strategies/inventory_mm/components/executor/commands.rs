@@ -1,5 +1,7 @@
 //! Command types for the Executor.
 
+use crossbeam_channel::Sender;
+
 use crate::application::strategies::inventory_mm::types::{
     SolverOutput, LimitOrder,
 };
@@ -9,7 +11,8 @@ use crate::application::strategies::inventory_mm::types::{
 pub enum ExecutorCommand {
     /// Execute a full solver output (batch of actions)
     /// This is the primary command - contains cancellations and limit orders
-    ExecuteBatch(SolverOutput),
+    /// Optional response channel for feedback to caller
+    ExecuteBatch(SolverOutput, Option<Sender<ExecutorResult>>),
 
     /// Cancel specific orders by ID
     CancelOrders(Vec<String>),
@@ -39,7 +42,7 @@ impl ExecutorCommand {
     /// Get description for logging
     pub fn description(&self) -> &'static str {
         match self {
-            ExecutorCommand::ExecuteBatch(_) => "ExecuteBatch",
+            ExecutorCommand::ExecuteBatch(..) => "ExecuteBatch",
             ExecutorCommand::CancelOrders(_) => "CancelOrders",
             ExecutorCommand::CancelAllForToken(_) => "CancelAllForToken",
             ExecutorCommand::CancelAll => "CancelAll",
