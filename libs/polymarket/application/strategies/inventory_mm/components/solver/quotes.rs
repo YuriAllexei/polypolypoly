@@ -122,8 +122,9 @@ pub fn calculate_quotes(
     }
 
     // Apply soft limit multipliers to sizes
-    let up_size = (up_size * up_size_multiplier).max(MIN_ORDER_SIZE);
-    let down_size = (down_size * down_size_multiplier).max(MIN_ORDER_SIZE);
+    // CRITICAL: Round to whole numbers - Polymarket rejects fractional sizes
+    let up_size = round_size((up_size * up_size_multiplier).max(MIN_ORDER_SIZE));
+    let down_size = round_size((down_size * down_size_multiplier).max(MIN_ORDER_SIZE));
 
     if skip_up || skip_down {
         debug!(
@@ -292,11 +293,20 @@ fn build_ladder(
     quotes
 }
 
-/// Round price down to tick size
+/// Round price down to tick size, ensuring exactly 2 decimal places
 fn round_to_tick(price: f64, tick_size: f64) -> f64 {
     // Add small epsilon to handle floating point precision errors
     // e.g., 0.47/0.01 = 46.9999... should floor to 47, not 46
-    ((price / tick_size) + 1e-9).floor() * tick_size
+    let ticks = ((price / tick_size) + 1e-9).floor();
+    // CRITICAL: Round to 2 decimal places to avoid floating-point representation issues
+    // e.g., 52 * 0.01 = 0.5200000000000001 in floating point
+    // Polymarket API requires exactly 2 decimal places
+    (ticks * tick_size * 100.0).round() / 100.0
+}
+
+/// Round size to whole number (Polymarket requires integer sizes)
+fn round_size(size: f64) -> f64 {
+    size.round()
 }
 
 #[cfg(test)]
@@ -324,6 +334,20 @@ mod tests {
         assert_eq!(round_to_tick(0.459, 0.01), 0.45);
         assert_eq!(round_to_tick(0.45, 0.01), 0.45);
         assert_eq!(round_to_tick(0.999, 0.01), 0.99);
+        // Verify exact 2 decimal places (no floating-point precision issues)
+        let price = round_to_tick(0.52, 0.01);
+        assert_eq!(format!("{:.2}", price), "0.52");
+        let price = round_to_tick(0.47, 0.01);
+        assert_eq!(format!("{:.2}", price), "0.47");
+    }
+
+    #[test]
+    fn test_round_size() {
+        assert_eq!(round_size(41.0), 41.0);
+        assert_eq!(round_size(41.4), 41.0);
+        assert_eq!(round_size(41.5), 42.0);
+        assert_eq!(round_size(41.9), 42.0);
+        assert_eq!(round_size(5.1), 5.0);
     }
 
     fn default_inventory() -> InventorySnapshot {

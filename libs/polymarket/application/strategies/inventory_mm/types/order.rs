@@ -37,11 +37,16 @@ pub struct Quote {
 }
 
 impl Quote {
+    /// Create a new bid quote with proper rounding
+    /// - Price is rounded to 2 decimal places (Polymarket tick size)
+    /// - Size is rounded to whole number (Polymarket requires integer sizes)
     pub fn new_bid(token_id: String, price: f64, size: f64, level: usize) -> Self {
         Self {
             token_id,
-            price,
-            size,
+            // CRITICAL: Round price to exactly 2 decimal places for Polymarket API
+            price: (price * 100.0).round() / 100.0,
+            // CRITICAL: Round size to whole number for Polymarket API
+            size: size.round(),
             side: Side::Buy,
             level,
         }
@@ -58,11 +63,16 @@ pub struct LimitOrder {
 }
 
 impl LimitOrder {
+    /// Create a new limit order with proper rounding
+    /// - Price is rounded to 2 decimal places (Polymarket tick size)
+    /// - Size is rounded to whole number (Polymarket requires integer sizes)
     pub fn new(token_id: String, price: f64, size: f64, side: Side) -> Self {
         Self {
             token_id,
-            price,
-            size,
+            // CRITICAL: Round price to exactly 2 decimal places for Polymarket API
+            price: (price * 100.0).round() / 100.0,
+            // CRITICAL: Round size to whole number for Polymarket API
+            size: size.round(),
             side,
         }
     }
