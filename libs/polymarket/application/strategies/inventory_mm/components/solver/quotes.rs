@@ -75,56 +75,114 @@ pub fn calculate_quotes(
     // Skip DOWN if heavily long DOWN AND we have significant DOWN to rebalance from
     let mut skip_down = delta <= -config.max_imbalance && !is_building_down_from_scratch;
 
-    // SAFETY LIMIT: Skip quoting if max_position is reached
-    // Also reduce order size when approaching limit (soft limit at 80%)
-    let soft_limit_threshold = 0.80;  // Start reducing at 80% of max_position
+    // POSITION LIMITS with IMBALANCE-AWARE logic
+    //
+    // Key insight: For inventory MM, the goal is BALANCED inventory (UP ≈ DOWN).
+    // When imbalanced, we must let the lagging side catch up.
+    //
+    // Rules:
+    // 1. Hard limit at 90% - stop quoting the AHEAD side (buffer for in-flight fills)
+    // 2. Soft limit at 60% - start reducing size for the AHEAD side
+    // 3. EXCEPTION: The lagging side is NOT limited when trying to catch up
+    // 4. If reduced size < MIN_ORDER_SIZE (5), skip quoting entirely
+    let soft_limit_threshold = 0.60;
+    let hard_limit_threshold = 0.90;
     let mut up_size_multiplier = 1.0;
     let mut down_size_multiplier = 1.0;
 
     if config.max_position > 0.0 {
-        let up_ratio = inventory.up_size.abs() / config.max_position;
-        let down_ratio = inventory.down_size.abs() / config.max_position;
+        let up_pos = inventory.up_size.abs();
+        let down_pos = inventory.down_size.abs();
+        let up_ratio = up_pos / config.max_position;
+        let down_ratio = down_pos / config.max_position;
 
-        // Hard limit: stop quoting completely
-        if up_ratio >= 1.0 {
-            if !skip_up {
+        // Determine which side is ahead (for imbalance-aware limiting)
+        let imbalance = up_pos - down_pos;  // positive = UP ahead, negative = DOWN ahead
+        let imbalance_threshold = config.order_size;  // significant if diff > one order size
+        let up_is_ahead = imbalance > imbalance_threshold;
+        let down_is_ahead = imbalance < -imbalance_threshold;
+
+        // Apply limits only to the AHEAD side (or both if balanced)
+        // The lagging side can quote freely to catch up
+        let apply_up_limit = !down_is_ahead;  // limit UP unless DOWN is ahead
+        let apply_down_limit = !up_is_ahead;  // limit DOWN unless UP is ahead
+
+        if apply_up_limit {
+            if up_ratio >= hard_limit_threshold {
                 warn!(
-                    "[Solver] MAX POSITION LIMIT: UP position {:.1} >= limit {:.1}, stopping UP quotes",
-                    inventory.up_size.abs(), config.max_position
+                    "[Solver] UP HARD LIMIT: {:.0} >= {:.0}% of {:.0}, stopping UP quotes",
+                    up_pos, hard_limit_threshold * 100.0, config.max_position
+                );
+                skip_up = true;
+            } else if up_ratio >= soft_limit_threshold {
+                up_size_multiplier = (hard_limit_threshold - up_ratio) / (hard_limit_threshold - soft_limit_threshold);
+                debug!(
+                    "[Solver] UP SOFT LIMIT: {:.0}% of max, size multiplier {:.0}%",
+                    up_ratio * 100.0, up_size_multiplier * 100.0
                 );
             }
-            skip_up = true;
-        } else if up_ratio >= soft_limit_threshold {
-            // Soft limit: reduce order size linearly from 80% to 0% as position approaches limit
-            up_size_multiplier = (1.0 - up_ratio) / (1.0 - soft_limit_threshold);
-            info!(
-                "[Solver] SOFT LIMIT: UP at {:.0}% of max, reducing size to {:.0}%",
-                up_ratio * 100.0, up_size_multiplier * 100.0
+        } else {
+            debug!(
+                "[Solver] UP limit BYPASSED: DOWN is ahead by {:.0}, letting UP catch up",
+                -imbalance
             );
         }
 
-        if down_ratio >= 1.0 {
-            if !skip_down {
+        if apply_down_limit {
+            if down_ratio >= hard_limit_threshold {
                 warn!(
-                    "[Solver] MAX POSITION LIMIT: DOWN position {:.1} >= limit {:.1}, stopping DOWN quotes",
-                    inventory.down_size.abs(), config.max_position
+                    "[Solver] DOWN HARD LIMIT: {:.0} >= {:.0}% of {:.0}, stopping DOWN quotes",
+                    down_pos, hard_limit_threshold * 100.0, config.max_position
+                );
+                skip_down = true;
+            } else if down_ratio >= soft_limit_threshold {
+                down_size_multiplier = (hard_limit_threshold - down_ratio) / (hard_limit_threshold - soft_limit_threshold);
+                debug!(
+                    "[Solver] DOWN SOFT LIMIT: {:.0}% of max, size multiplier {:.0}%",
+                    down_ratio * 100.0, down_size_multiplier * 100.0
                 );
             }
-            skip_down = true;
-        } else if down_ratio >= soft_limit_threshold {
-            // Soft limit: reduce order size linearly from 80% to 0% as position approaches limit
-            down_size_multiplier = (1.0 - down_ratio) / (1.0 - soft_limit_threshold);
+        } else {
+            debug!(
+                "[Solver] DOWN limit BYPASSED: UP is ahead by {:.0}, letting DOWN catch up",
+                imbalance
+            );
+        }
+
+        // Log imbalance status
+        if up_is_ahead || down_is_ahead {
             info!(
-                "[Solver] SOFT LIMIT: DOWN at {:.0}% of max, reducing size to {:.0}%",
-                down_ratio * 100.0, down_size_multiplier * 100.0
+                "[Solver] IMBALANCE: UP={:.0}, DOWN={:.0}, diff={:.0} → {} catching up",
+                up_pos, down_pos, imbalance.abs(),
+                if up_is_ahead { "DOWN" } else { "UP" }
             );
         }
     }
 
-    // Apply soft limit multipliers to sizes
-    // CRITICAL: Round to whole numbers - Polymarket rejects fractional sizes
-    let up_size = round_size((up_size * up_size_multiplier).max(MIN_ORDER_SIZE));
-    let down_size = round_size((down_size * down_size_multiplier).max(MIN_ORDER_SIZE));
+    // Apply multipliers to sizes
+    let up_size_adjusted = up_size * up_size_multiplier;
+    let down_size_adjusted = down_size * down_size_multiplier;
+
+    // If reduced size is below minimum, skip quoting entirely (don't clamp to 5)
+    // This prevents placing tiny orders that don't help with rebalancing
+    if up_size_adjusted < MIN_ORDER_SIZE && !skip_up {
+        debug!(
+            "[Solver] UP size {:.1} < min {:.0} after multiplier, skipping UP quotes",
+            up_size_adjusted, MIN_ORDER_SIZE
+        );
+        skip_up = true;
+    }
+    if down_size_adjusted < MIN_ORDER_SIZE && !skip_down {
+        debug!(
+            "[Solver] DOWN size {:.1} < min {:.0} after multiplier, skipping DOWN quotes",
+            down_size_adjusted, MIN_ORDER_SIZE
+        );
+        skip_down = true;
+    }
+
+    // Round to whole numbers - Polymarket requires integer sizes
+    let up_size = round_size(up_size_adjusted.max(MIN_ORDER_SIZE));
+    let down_size = round_size(down_size_adjusted.max(MIN_ORDER_SIZE));
 
     if skip_up || skip_down {
         debug!(
