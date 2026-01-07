@@ -1,4 +1,7 @@
 //! Inventory MM Strategy - multi-market orchestration.
+//!
+//! Each quoter spawns its own executor thread for order execution,
+//! ensuring markets are independent and don't block each other.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -8,7 +11,6 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn, debug};
 
 use super::config::InventoryMMConfig;
-use super::components::{Executor, ExecutorHandle};
 use super::quoter::{Quoter, QuoterContext, MarketInfo};
 use super::types::{
     SolverInput, InventorySnapshot, OrderbookSnapshot, OrderSnapshot, OpenOrder,
@@ -23,11 +25,11 @@ const MAX_MARKETS_PER_CATEGORY: i64 = 5;
 
 /// Main strategy - implements Strategy trait.
 /// Manages multiple quoters, one per market.
+///
+/// Each quoter has its own executor thread for order execution.
+/// This ensures markets are independent and don't block each other.
 pub struct InventoryMMStrategy {
     config: InventoryMMConfig,
-
-    // Owned by strategy (for shutdown)
-    executor_handle: Option<ExecutorHandle>,
 
     // Per-quoter task management
     quoter_tasks: HashMap<String, JoinHandle<()>>,  // market_id -> task
@@ -39,7 +41,6 @@ impl InventoryMMStrategy {
     pub fn new(config: InventoryMMConfig) -> Self {
         Self {
             config,
-            executor_handle: None,
             quoter_tasks: HashMap::new(),
             tracked_markets: HashSet::new(),
         }
@@ -248,15 +249,8 @@ impl Strategy for InventoryMMStrategy {
     async fn initialize(&mut self, ctx: &StrategyContext) -> StrategyResult<()> {
         info!("[InventoryMM] Initializing strategy");
 
-        // Spawn executor with TradingClient AND SharedOrderState.
-        // The order_state allows the executor to update OMS directly after REST API
-        // confirms cancellations, fixing the issue where WebSocket CANCELLATION messages
-        // are delayed/dropped causing stale "Open" order status in OMS.
-        let executor = Executor::spawn_with_order_state(
-            ctx.trading.clone(),
-            Some(ctx.order_state.clone()),
-        );
-        self.executor_handle = Some(executor);
+        // NOTE: Each quoter now spawns its own executor thread for order execution.
+        // This ensures markets are independent and don't block each other.
 
         // Fetch and hydrate existing positions from REST API
         info!("[InventoryMM] Fetching initial positions from REST API...");
@@ -291,11 +285,8 @@ impl Strategy for InventoryMMStrategy {
         info!("[InventoryMM] Starting strategy");
 
         // Build shared context for quoters
-        let executor_handle = self.executor_handle.as_ref()
-            .ok_or_else(|| StrategyError::Config("Executor not initialized".to_string()))?;
-
+        // NOTE: Each quoter will spawn its own executor thread
         let quoter_ctx = QuoterContext::new(
-            executor_handle.quoter_handle(),
             ctx.trading.clone(),
             ctx.order_state.clone(),
             ctx.position_tracker.clone(),
@@ -339,7 +330,8 @@ impl Strategy for InventoryMMStrategy {
     async fn stop(&mut self) -> StrategyResult<()> {
         info!("[InventoryMM] Stopping strategy");
 
-        // 1. Wait for all quoter tasks to finish (they check shutdown flag)
+        // Wait for all quoter tasks to finish (they check shutdown flag)
+        // Each quoter will shutdown its own executor during cleanup
         for (market_id, handle) in self.quoter_tasks.drain() {
             info!("[InventoryMM] Waiting for quoter {} to finish", market_id);
             if let Err(e) = handle.await {
@@ -347,13 +339,6 @@ impl Strategy for InventoryMMStrategy {
             }
         }
         self.tracked_markets.clear();
-
-        // 2. Shutdown executor
-        if let Some(executor) = self.executor_handle.take() {
-            if let Err(e) = executor.shutdown() {
-                warn!("[InventoryMM] Error shutting down executor: {}", e);
-            }
-        }
 
         info!("[InventoryMM] Strategy stopped");
         Ok(())

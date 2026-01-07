@@ -1,4 +1,7 @@
 //! Per-market Quoter that runs its own tick loop.
+//!
+//! Each Quoter spawns its own Executor thread for order execution.
+//! This ensures markets are independent and don't block each other.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,6 +15,7 @@ use super::orderbook_ws::{QuoterWsConfig, QuoterWsClient, build_quoter_ws_client
 use crate::application::strategies::inventory_mm::components::{
     solve, Merger, MergerConfig, InFlightTracker, OpenOrderInfo, ExecutorError,
     TakerTask, TakerConfig, price_to_key,
+    Executor, ExecutorHandle, QuoterExecutorHandle,
 };
 use crate::application::strategies::inventory_mm::types::{
     SolverInput, SolverOutput, SolverConfig, InventorySnapshot, OrderbookSnapshot, OrderSnapshot, OpenOrder,
@@ -56,6 +60,10 @@ pub struct Quoter {
     ctx: QuoterContext,
     /// Last logged delta (to reduce log spam)
     last_logged_delta: Option<f64>,
+    /// Per-market executor handle (for shutdown) - spawned in run()
+    executor_handle: Option<ExecutorHandle>,
+    /// Per-market executor (for operations) - spawned in run()
+    executor: Option<QuoterExecutorHandle>,
 }
 
 impl Quoter {
@@ -82,6 +90,8 @@ impl Quoter {
             merge_pending_until: None,
             ctx,
             last_logged_delta: None,
+            executor_handle: None,  // Spawned in run()
+            executor: None,         // Spawned in run()
         }
     }
 
@@ -95,11 +105,26 @@ impl Quoter {
         &self.orderbooks
     }
 
+    /// Get the executor handle. Panics if called before run().
+    fn executor(&self) -> &QuoterExecutorHandle {
+        self.executor.as_ref().expect("Executor not initialized - run() must be called first")
+    }
+
     /// Main run loop - call from spawned task.
     /// Runs until shutdown or market expired.
     pub async fn run(mut self) {
         let market_desc = self.market.short_desc();
         info!("[Quoter:{}] Starting with {}ms tick interval", market_desc, self.tick_interval_ms);
+
+        // 0. Spawn per-market executor (own thread for order execution)
+        // This ensures markets don't block each other during execution
+        let executor_handle = Executor::spawn_with_order_state(
+            Arc::clone(&self.ctx.trading),
+            Some(self.ctx.order_state.clone()),
+        );
+        self.executor = Some(executor_handle.quoter_handle());
+        self.executor_handle = Some(executor_handle);
+        info!("[Quoter:{}] Spawned per-market executor", market_desc);
 
         // 1. Start orderbook WebSocket for (up_token_id, down_token_id)
         let ws_config = QuoterWsConfig::new(
@@ -157,10 +182,10 @@ impl Quoter {
                 warn!("[Quoter:{}] WebSocket disconnected, cancelling all orders", market_desc);
 
                 // Cancel all orders on both sides (defensive)
-                if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.up_token_id.clone()) {
+                if let Err(e) = self.executor().cancel_token_orders(self.market.up_token_id.clone()) {
                     warn!("[Quoter:{}] Failed to cancel UP orders: {}", market_desc, e);
                 }
-                if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.down_token_id.clone()) {
+                if let Err(e) = self.executor().cancel_token_orders(self.market.down_token_id.clone()) {
                     warn!("[Quoter:{}] Failed to cancel DOWN orders: {}", market_desc, e);
                 }
 
@@ -360,10 +385,10 @@ impl Quoter {
             // FIX: Use CancelAllForToken which is processed immediately by executor
             // instead of building a batch output that gets queued behind previous commands.
             // This bypasses the queue and directly cancels all orders via REST API.
-            if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.up_token_id.clone()) {
+            if let Err(e) = self.executor().cancel_token_orders(self.market.up_token_id.clone()) {
                 error!("[Quoter:{}] Nuclear cancel UP failed: {}", self.market.short_desc(), e);
             }
-            if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.down_token_id.clone()) {
+            if let Err(e) = self.executor().cancel_token_orders(self.market.down_token_id.clone()) {
                 error!("[Quoter:{}] Nuclear cancel DOWN failed: {}", self.market.short_desc(), e);
             }
 
@@ -408,7 +433,7 @@ impl Quoter {
                     self.config.max_position,
                     input.up_orders.bids.len()
                 );
-                if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.up_token_id.clone()) {
+                if let Err(e) = self.executor().cancel_token_orders(self.market.up_token_id.clone()) {
                     error!("[Quoter:{}] Position cancel UP failed: {}", self.market.short_desc(), e);
                 }
                 for order in &input.up_orders.bids {
@@ -426,7 +451,7 @@ impl Quoter {
                     self.config.max_position,
                     input.down_orders.bids.len()
                 );
-                if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.down_token_id.clone()) {
+                if let Err(e) = self.executor().cancel_token_orders(self.market.down_token_id.clone()) {
                     error!("[Quoter:{}] Position cancel DOWN failed: {}", self.market.short_desc(), e);
                 }
                 for order in &input.down_orders.bids {
@@ -501,7 +526,7 @@ impl Quoter {
             );
             // CRITICAL: Use cancel_token_orders() which calls REST API directly
             // This bypasses the executor queue and cancels immediately
-            if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.up_token_id.clone()) {
+            if let Err(e) = self.executor().cancel_token_orders(self.market.up_token_id.clone()) {
                 error!("[Quoter:{}] Excess levels cancel UP failed: {}", self.market.short_desc(), e);
             }
             // Mark all as cancel pending and clear pending placements
@@ -519,7 +544,7 @@ impl Quoter {
                 self.market.short_desc(), down_excess_levels, down_price_levels, max_price_levels
             );
             // CRITICAL: Use cancel_token_orders() which calls REST API directly
-            if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.down_token_id.clone()) {
+            if let Err(e) = self.executor().cancel_token_orders(self.market.down_token_id.clone()) {
                 error!("[Quoter:{}] Excess levels cancel DOWN failed: {}", self.market.short_desc(), e);
             }
             // Mark all as cancel pending and clear pending placements
@@ -677,7 +702,7 @@ impl Quoter {
                 };
 
                 if cancel_only_output.has_actions() {
-                    match self.ctx.executor.execute_with_feedback(cancel_only_output.clone()) {
+                    match self.executor().execute_with_feedback(cancel_only_output.clone()) {
                         Ok(result) => {
                             for order_id in &result.cancelled_ids {
                                 self.in_flight_tracker.cancel_confirmed(order_id);
@@ -693,7 +718,7 @@ impl Quoter {
                 }
 
                 // Execute the merge
-                match self.ctx.executor.merge(
+                match self.executor().merge(
                     self.market.condition_id.clone(),
                     decision.pairs_to_merge,
                 ) {
@@ -722,7 +747,7 @@ impl Quoter {
         // CRITICAL FIX: Use synchronous execution - WAIT for batch to complete
         // This prevents batch pileup where new ticks generate orders faster than executor can process
         if output.has_actions() {
-            match self.ctx.executor.execute_with_feedback(output.clone()) {
+            match self.executor().execute_with_feedback(output.clone()) {
                 Ok(result) => {
                     // Execution completed - update InFlightTracker with actual results
                     // Mark successfully placed orders
@@ -774,10 +799,10 @@ impl Quoter {
             info!("[Quoter:{}] Aborted TakerTask", market_desc);
         }
 
-        if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.up_token_id.clone()) {
+        if let Err(e) = self.executor().cancel_token_orders(self.market.up_token_id.clone()) {
             warn!("[Quoter:{}] Failed to cancel UP orders: {}", market_desc, e);
         }
-        if let Err(e) = self.ctx.executor.cancel_token_orders(self.market.down_token_id.clone()) {
+        if let Err(e) = self.executor().cancel_token_orders(self.market.down_token_id.clone()) {
             warn!("[Quoter:{}] Failed to cancel DOWN orders: {}", market_desc, e);
         }
 
@@ -788,7 +813,7 @@ impl Quoter {
                 "[Quoter:{}] Final merge: {} pairs for ${:.4} profit",
                 market_desc, decision.pairs_to_merge, decision.expected_profit
             );
-            if let Err(e) = self.ctx.executor.merge(
+            if let Err(e) = self.executor().merge(
                 self.market.condition_id.clone(),
                 decision.pairs_to_merge,
             ) {
@@ -799,6 +824,16 @@ impl Quoter {
         if let Some(client) = ws_client {
             if let Err(e) = client.shutdown().await {
                 warn!("[Quoter:{}] Failed to shutdown WebSocket: {}", market_desc, e);
+            }
+        }
+
+        // Shutdown per-market executor (gracefully waits for pending commands)
+        if let Some(executor_handle) = self.executor_handle.take() {
+            info!("[Quoter:{}] Shutting down executor", market_desc);
+            if let Err(e) = executor_handle.shutdown() {
+                warn!("[Quoter:{}] Executor shutdown error: {}", market_desc, e);
+            } else {
+                info!("[Quoter:{}] Executor shutdown complete", market_desc);
             }
         }
     }

@@ -4,7 +4,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
-use crate::application::strategies::inventory_mm::components::QuoterExecutorHandle;
 use crate::infrastructure::{SharedOrderState, SharedPositionTracker};
 use crate::infrastructure::client::clob::TradingClient;
 
@@ -61,11 +60,12 @@ impl MarketInfo {
 
 /// Shared state passed to each quoter (all Clone-able).
 /// This bundles all the shared infrastructure that quoters need.
+///
+/// NOTE: Each quoter spawns its own Executor thread for order execution.
+/// This ensures markets are independent and don't block each other.
 #[derive(Clone)]
 pub struct QuoterContext {
-    /// Executor handle for sending order commands
-    pub executor: QuoterExecutorHandle,
-    /// Trading client for direct FOK execution (used by TakerTask)
+    /// Trading client for order execution (shared, has connection pooling)
     pub trading: Arc<TradingClient>,
     /// Shared order state from user WebSocket
     pub order_state: SharedOrderState,
@@ -77,14 +77,12 @@ pub struct QuoterContext {
 
 impl QuoterContext {
     pub fn new(
-        executor: QuoterExecutorHandle,
         trading: Arc<TradingClient>,
         order_state: SharedOrderState,
         position_tracker: SharedPositionTracker,
         shutdown_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
-            executor,
             trading,
             order_state,
             position_tracker,
