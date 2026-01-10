@@ -106,6 +106,19 @@ inventory_mm:
     # Must be >= tick_size (0.01) to ensure bid is at least 1 tick below ask.
     min_offset: 0.01
 
+    # === Profitability Cap (Weighted Bid) ===
+    # Caps bid prices to maintain avg_cost_up + avg_cost_down < 1.0 for merge profit
+    # generated_bid = (prof_bid * prof_weight + market_bid * imbalance_weight) / total_weight
+    # Profitability weight (default 0.3 = 30%)
+    prof_weight: 0.3
+    # Market competitiveness weight (default 0.7 = 70%)
+    imbalance_weight: 0.7
+    # Max |delta| to apply profitability cap (default 0.15 = only when |delta| <= 15%)
+    # When imbalanced beyond this threshold, cap is DISABLED to allow aggressive rebalancing.
+    # The offset/skew mechanisms handle imbalance instead - cap should not interfere.
+    # Set to 1.0 to always apply cap, 0.0 to never apply cap.
+    prof_cap_delta_threshold: 0.15
+
   # === Merger (Merge Conditions) ===
   merger:
     # Minimum pairs before considering a merge

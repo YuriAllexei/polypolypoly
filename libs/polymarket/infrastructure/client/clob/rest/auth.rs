@@ -1,5 +1,6 @@
 //! API key management methods for RestClient
 
+use ethers::types::Address;
 use super::super::super::auth::PolymarketAuth;
 use super::super::helpers::{extract_api_error, parse_json, with_headers};
 use super::super::types::*;
@@ -81,18 +82,16 @@ impl RestClient {
 
     /// Get user positions from the Data API
     /// Note: This uses the Data API (data-api.polymarket.com), not the CLOB API
-    pub async fn get_positions(&self, auth: &PolymarketAuth) -> Result<Vec<Position>> {
-        // Get the wallet address from auth
-        let address = auth.address()
-            .ok_or_else(|| RestError::ApiError("No wallet address available for positions query".to_string()))?;
-
-        // Use Data API endpoint (not CLOB API)
+    /// Use maker_address (proxy wallet) not signer address - positions are held by proxy
+    pub async fn get_positions(&self, address: Address) -> Result<Vec<Position>> {
+        // Format address as lowercase hex with 0x prefix
+        let address_str = format!("{:?}", address);
         let url = format!(
-            "https://data-api.polymarket.com/positions?user={:?}",
-            address
+            "https://data-api.polymarket.com/positions?user={}",
+            address_str
         );
 
-        debug!("Fetching user positions from Data API for {:?}", address);
+        debug!("Fetching positions from: {}", url);
 
         // Data API doesn't require authentication - just GET with address
         let response = self.client().get(&url).send().await?;

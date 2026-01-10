@@ -10,6 +10,7 @@
 //! - Trade deduplication
 
 use super::types::{MessageType, OrderMessage, TradeMessage};
+use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -310,6 +311,30 @@ impl StpCheckResult {
             complement_token_id: Some(complement_token_id),
             cross_price: Some(cross_price),
         }
+    }
+}
+
+// =============================================================================
+// Order Reconciliation Result
+// =============================================================================
+
+/// Result of order reconciliation with REST API
+#[derive(Debug, Clone)]
+pub struct OrderReconciliationResult {
+    /// When reconciliation occurred
+    pub reconciled_at: DateTime<Utc>,
+    /// Number of orders in REST response
+    pub orders_checked: usize,
+    /// Number of stale orders removed from OMS
+    pub stale_orders_removed: usize,
+    /// Order IDs that were removed
+    pub removed_order_ids: Vec<String>,
+}
+
+impl OrderReconciliationResult {
+    /// Check if any discrepancies were found and corrected
+    pub fn has_discrepancies(&self) -> bool {
+        self.stale_orders_removed > 0
     }
 }
 
@@ -939,31 +964,48 @@ impl OrderStateStore {
 
         // Determine the correct size based on trader_side:
         // - TAKER: msg.size is YOUR fill size
-        // - MAKER: msg.size is the taker's TOTAL, filter maker_orders by OUR order_ids
+        // - MAKER: When we receive a trade as MAKER, ALL entries in maker_orders are ours
+        //          (Polymarket only sends us trades where we're involved)
         let size: f64 = match msg.trader_side.as_deref() {
             Some("MAKER") => {
-                // Sum matched_amount ONLY from maker_orders where we own the order
-                // Filter by checking if order_id exists in our order_to_asset map
-                let our_orders: Vec<_> = msg.maker_orders
+                // First, try to match against our known orders for accurate tracking
+                let known_orders: Vec<_> = msg.maker_orders
                     .iter()
                     .filter(|m| self.order_to_asset.contains_key(&m.order_id))
                     .collect();
 
-                if our_orders.is_empty() && !msg.maker_orders.is_empty() {
-                    // We're supposedly a MAKER but none of the maker_orders match our known orders
-                    // This is likely a race condition: order placed but PLACEMENT not processed yet
-                    warn!(
-                        "[OrderState] MAKER trade but no matching orders! Possible race condition. \
-                        maker_order_ids: {:?}, known_order_count: {}",
-                        msg.maker_orders.iter().map(|m| &m.order_id[..16.min(m.order_id.len())]).collect::<Vec<_>>(),
-                        self.order_to_asset.len()
-                    );
-                }
-
-                our_orders
+                let known_size: f64 = known_orders
                     .iter()
                     .filter_map(|m| m.matched_amount.parse::<f64>().ok())
-                    .sum()
+                    .sum();
+
+                if known_size > 0.0 {
+                    // We found matching orders, use their size
+                    known_size
+                } else if !msg.maker_orders.is_empty() {
+                    // CRITICAL FIX: Race condition - we're MAKER but order not in our map yet
+                    // Trust the maker_orders data since Polymarket only sends us OUR trades
+                    // This ensures position tracking doesn't miss fills due to race conditions
+                    let total_maker_size: f64 = msg.maker_orders
+                        .iter()
+                        .filter_map(|m| m.matched_amount.parse::<f64>().ok())
+                        .sum();
+
+                    if total_maker_size > 0.0 {
+                        warn!(
+                            "[OrderState] MAKER trade with untracked orders (race condition). \
+                            Using maker_orders data for position tracking. \
+                            trade_id: {}, maker_order_ids: {:?}, size: {:.2}",
+                            &msg.id[..16.min(msg.id.len())],
+                            msg.maker_orders.iter().map(|m| &m.order_id[..16.min(m.order_id.len())]).collect::<Vec<_>>(),
+                            total_maker_size
+                        );
+                    }
+
+                    total_maker_size
+                } else {
+                    0.0
+                }
             }
             _ => {
                 // TAKER or unknown: use the trade size directly
@@ -972,10 +1014,10 @@ impl OrderStateStore {
         };
 
         if size <= 0.0 {
-            // Only warn if we're supposedly MAKER with maker_orders (likely race condition)
+            // Only log at debug level since this might be expected for some edge cases
             if msg.trader_side.as_deref() == Some("MAKER") && !msg.maker_orders.is_empty() {
-                warn!(
-                    "[OrderState] Skipping MAKER trade {} - no matching orders found (race condition?)",
+                debug!(
+                    "[OrderState] MAKER trade {} has no valid matched_amount in maker_orders",
                     &msg.id[..16.min(msg.id.len())]
                 );
             }
@@ -1047,12 +1089,43 @@ impl OrderStateStore {
                         )
                     }
                     None => {
-                        // Fallback: use taker's perspective with side flipped
-                        (
-                            msg.asset_id.clone(),
-                            msg.price.parse().unwrap_or(0.0),
-                            Side::from_str_or_default(&msg.side).opposite(),
-                        )
+                        // CRITICAL FIX: Race condition - order not in order_to_asset yet
+                        // Don't use msg.side - Polymarket docs note it's "ambiguous" for MAKER trades
+                        // (June 2025: MakerOrder.side was added "to clarify trade events where the
+                        // maker side was previously ambiguous")
+                        // Use the first maker_order's side field directly instead
+                        let first_maker = msg.maker_orders.first();
+                        match first_maker {
+                            Some(maker) => {
+                                let maker_side = maker.side.as_ref()
+                                    .map(|s| Side::from_str_or_default(s))
+                                    .unwrap_or(Side::Buy);  // Default to BUY - our MM only places BUY orders
+                                warn!(
+                                    "[OrderState] Using maker_orders[0].side for race condition trade: \
+                                    side={:?}, order_id={}, asset_id={}",
+                                    maker_side,
+                                    &maker.order_id[..16.min(maker.order_id.len())],
+                                    &maker.asset_id[..8.min(maker.asset_id.len())]
+                                );
+                                (
+                                    maker.asset_id.clone(),
+                                    maker.price.parse().unwrap_or(0.0),
+                                    maker_side,
+                                )
+                            }
+                            None => {
+                                // No maker orders - shouldn't happen for MAKER trades, fallback to msg.side
+                                warn!(
+                                    "[OrderState] MAKER trade with no maker_orders! Using msg.side={} (flipped)",
+                                    msg.side
+                                );
+                                (
+                                    msg.asset_id.clone(),
+                                    msg.price.parse().unwrap_or(0.0),
+                                    Side::from_str_or_default(&msg.side).opposite(),
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -1148,6 +1221,104 @@ impl OrderStateStore {
                 let book = self.get_or_create_asset(&order.asset_id);
                 book.upsert_order(order);
             }
+        }
+    }
+
+    /// Reconcile orders with authoritative REST API data.
+    ///
+    /// Removes stale orders (orders in OMS but not in REST response).
+    /// REST API is treated as the source of truth.
+    ///
+    /// Also adds removed orders to `pending_cancels` to prevent late WebSocket
+    /// PLACEMENT messages from re-adding them (race condition protection).
+    ///
+    /// # Arguments
+    /// * `rest_orders` - Orders from REST API (serde_json::Value with "id" field)
+    ///
+    /// # Returns
+    /// * `OrderReconciliationResult` with reconciliation details
+    pub fn reconcile_orders(&mut self, rest_orders: &[serde_json::Value]) -> OrderReconciliationResult {
+        let reconciled_at = Utc::now();
+
+        // Extract order IDs from REST response, tracking anomalies
+        let mut rest_order_ids: HashSet<String> = HashSet::with_capacity(rest_orders.len());
+        let mut missing_id_count = 0;
+        let mut duplicate_id_count = 0;
+
+        for order in rest_orders {
+            match order.get("id").and_then(|v| v.as_str()) {
+                Some(id) if !id.is_empty() => {
+                    if !rest_order_ids.insert(id.to_string()) {
+                        duplicate_id_count += 1;
+                    }
+                }
+                _ => {
+                    missing_id_count += 1;
+                }
+            }
+        }
+
+        // Log anomalies in REST response
+        if missing_id_count > 0 {
+            warn!(
+                "[OrderState] REST reconciliation: {} orders missing 'id' field",
+                missing_id_count
+            );
+        }
+        if duplicate_id_count > 0 {
+            warn!(
+                "[OrderState] REST reconciliation: {} duplicate order IDs",
+                duplicate_id_count
+            );
+        }
+
+        // Find stale orders using set difference (more efficient than iteration)
+        let tracked_order_ids: HashSet<String> = self.order_to_asset.keys().cloned().collect();
+        let stale_order_ids: Vec<String> = tracked_order_ids
+            .difference(&rest_order_ids)
+            .cloned()
+            .collect();
+
+        let mut removed_order_ids = Vec::with_capacity(stale_order_ids.len());
+
+        for order_id in stale_order_ids {
+            // Remove from order_to_asset mapping first (always do this)
+            if let Some(asset_id) = self.order_to_asset.remove(&order_id) {
+                // Remove from asset book if it exists
+                if let Some(book) = self.assets.get_mut(&asset_id) {
+                    book.bids.remove(&order_id);
+                    book.asks.remove(&order_id);
+                } else {
+                    // Asset book doesn't exist - log warning for visibility
+                    debug!(
+                        "[OrderState] Reconciliation: order {} had orphan mapping to non-existent asset {}",
+                        &order_id[..16.min(order_id.len())],
+                        &asset_id[..8.min(asset_id.len())]
+                    );
+                }
+
+                // Add to pending_cancels to prevent late WebSocket PLACEMENTs from re-adding
+                // This handles the race condition where WebSocket message arrives after
+                // REST fetch but before reconciliation processes
+                self.pending_cancels.insert(order_id.clone(), Instant::now());
+                self.pending_cancels_order.push_back(order_id.clone());
+
+                removed_order_ids.push(order_id);
+            }
+        }
+
+        // Cleanup old pending_cancels entries (apply cap)
+        while self.pending_cancels_order.len() > MAX_PENDING_CANCELS {
+            if let Some(oldest) = self.pending_cancels_order.pop_front() {
+                self.pending_cancels.remove(&oldest);
+            }
+        }
+
+        OrderReconciliationResult {
+            reconciled_at,
+            orders_checked: rest_order_ids.len(),
+            stale_orders_removed: removed_order_ids.len(),
+            removed_order_ids,
         }
     }
 
@@ -2374,5 +2545,429 @@ mod tests {
 
         let result = store.check_self_trade("yes-token", Side::Buy, 0.40);
         assert!(result.would_self_trade);
+    }
+
+    // =========================================================================
+    // Order Reconciliation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_reconcile_orders_removes_stale() {
+        let mut store = OrderStateStore::new();
+
+        // Hydrate with a test order
+        let order_json = serde_json::json!({
+            "id": "order_1",
+            "asset_id": "asset_1",
+            "side": "BUY",
+            "price": "0.50",
+            "original_size": "100",
+            "size_matched": "0",
+            "status": "LIVE"
+        });
+        store.hydrate_orders(&[order_json]);
+
+        assert!(store.order_to_asset.contains_key("order_1"));
+        assert_eq!(store.order_count(), 1);
+
+        // REST returns empty (order was cancelled externally)
+        let result = store.reconcile_orders(&[]);
+
+        assert_eq!(result.stale_orders_removed, 1);
+        assert!(result.has_discrepancies());
+        assert!(!store.order_to_asset.contains_key("order_1"));
+        assert_eq!(store.order_count(), 0);
+    }
+
+    #[test]
+    fn test_reconcile_orders_keeps_valid() {
+        let mut store = OrderStateStore::new();
+
+        let order_json = serde_json::json!({
+            "id": "order_1",
+            "asset_id": "asset_1",
+            "side": "BUY",
+            "price": "0.50",
+            "original_size": "100",
+            "size_matched": "0",
+            "status": "LIVE"
+        });
+        store.hydrate_orders(&[order_json.clone()]);
+
+        assert_eq!(store.order_count(), 1);
+
+        // REST returns the same order
+        let result = store.reconcile_orders(&[order_json]);
+
+        assert_eq!(result.stale_orders_removed, 0);
+        assert!(!result.has_discrepancies());
+        assert!(store.order_to_asset.contains_key("order_1"));
+        assert_eq!(store.order_count(), 1);
+    }
+
+    #[test]
+    fn test_reconcile_orders_partial_removal() {
+        let mut store = OrderStateStore::new();
+
+        // Hydrate with two orders
+        let order1 = serde_json::json!({
+            "id": "order_1",
+            "asset_id": "asset_1",
+            "side": "BUY",
+            "price": "0.50",
+            "original_size": "100",
+            "size_matched": "0"
+        });
+        let order2 = serde_json::json!({
+            "id": "order_2",
+            "asset_id": "asset_1",
+            "side": "SELL",
+            "price": "0.60",
+            "original_size": "50",
+            "size_matched": "0"
+        });
+        store.hydrate_orders(&[order1, order2.clone()]);
+
+        assert_eq!(store.order_count(), 2);
+
+        // REST only returns order_2 (order_1 was filled/cancelled)
+        let result = store.reconcile_orders(&[order2]);
+
+        assert_eq!(result.stale_orders_removed, 1);
+        assert_eq!(result.orders_checked, 1);
+        assert!(result.removed_order_ids.contains(&"order_1".to_string()));
+        assert!(!store.order_to_asset.contains_key("order_1"));
+        assert!(store.order_to_asset.contains_key("order_2"));
+        assert_eq!(store.order_count(), 1);
+    }
+
+    #[test]
+    fn test_reconcile_orders_empty_store() {
+        let mut store = OrderStateStore::new();
+
+        // Store is empty, REST has orders - should not add anything (reconcile only removes)
+        let order_json = serde_json::json!({
+            "id": "order_1",
+            "asset_id": "asset_1",
+            "side": "BUY",
+            "price": "0.50",
+            "original_size": "100",
+            "size_matched": "0"
+        });
+        let result = store.reconcile_orders(&[order_json]);
+
+        assert_eq!(result.stale_orders_removed, 0);
+        assert_eq!(result.orders_checked, 1);
+        assert!(!result.has_discrepancies());
+        // reconcile_orders doesn't add new orders, only removes stale ones
+        assert_eq!(store.order_count(), 0);
+    }
+
+    #[test]
+    fn test_reconcile_orders_adds_to_pending_cancels() {
+        let mut store = OrderStateStore::new();
+
+        // Hydrate with a test order
+        let order_json = serde_json::json!({
+            "id": "order_1",
+            "asset_id": "asset_1",
+            "side": "BUY",
+            "price": "0.50",
+            "original_size": "100",
+            "size_matched": "0"
+        });
+        store.hydrate_orders(&[order_json]);
+
+        // Verify pending_cancels is empty before reconciliation
+        assert!(!store.pending_cancels.contains_key("order_1"));
+
+        // REST returns empty (order was cancelled externally)
+        let result = store.reconcile_orders(&[]);
+
+        // Verify order was removed and added to pending_cancels
+        assert_eq!(result.stale_orders_removed, 1);
+        assert!(store.pending_cancels.contains_key("order_1"));
+        assert!(store.pending_cancels_order.contains(&"order_1".to_string()));
+    }
+
+    #[test]
+    fn test_reconcile_orders_prevents_late_websocket_readd() {
+        let mut store = OrderStateStore::new();
+
+        // Hydrate with a test order
+        let order_json = serde_json::json!({
+            "id": "order_1",
+            "asset_id": "asset_1",
+            "side": "BUY",
+            "price": "0.50",
+            "original_size": "100",
+            "size_matched": "0"
+        });
+        store.hydrate_orders(&[order_json]);
+        assert_eq!(store.order_count(), 1);
+
+        // Reconcile removes the order (REST says it doesn't exist)
+        store.reconcile_orders(&[]);
+        assert_eq!(store.order_count(), 0);
+        assert!(store.pending_cancels.contains_key("order_1"));
+
+        // Now simulate a late WebSocket PLACEMENT message for the same order
+        let ws_msg = make_order_msg("order_1", "asset_1", "PLACEMENT", "BUY", "0");
+        let event = store.process_order(&ws_msg);
+
+        // The order should be rejected because it's in pending_cancels
+        // Event should be Cancelled (not Placed)
+        assert!(matches!(event, Some(OrderEvent::Cancelled(_))));
+        // Order should NOT be re-added
+        assert_eq!(store.order_count(), 0);
+    }
+
+    #[test]
+    fn test_reconcile_orders_handles_missing_id() {
+        let mut store = OrderStateStore::new();
+
+        // Hydrate with a test order
+        let order_json = serde_json::json!({
+            "id": "order_1",
+            "asset_id": "asset_1",
+            "side": "BUY",
+            "price": "0.50",
+            "original_size": "100",
+            "size_matched": "0"
+        });
+        store.hydrate_orders(&[order_json]);
+
+        // REST returns order with missing id - should be skipped
+        let malformed_order = serde_json::json!({
+            "asset_id": "asset_1",
+            "side": "BUY",
+            "price": "0.50"
+        });
+        let result = store.reconcile_orders(&[malformed_order]);
+
+        // Order should be removed because REST effectively returns empty valid orders
+        assert_eq!(result.orders_checked, 0);  // No valid orders counted
+        assert_eq!(result.stale_orders_removed, 1);
+    }
+
+    #[test]
+    fn test_reconcile_orders_handles_empty_id() {
+        let mut store = OrderStateStore::new();
+
+        // Hydrate with a test order
+        let order_json = serde_json::json!({
+            "id": "order_1",
+            "asset_id": "asset_1",
+            "side": "BUY",
+            "price": "0.50",
+            "original_size": "100",
+            "size_matched": "0"
+        });
+        store.hydrate_orders(&[order_json]);
+
+        // REST returns order with empty id - should be skipped
+        let empty_id_order = serde_json::json!({
+            "id": "",
+            "asset_id": "asset_1",
+            "side": "BUY",
+            "price": "0.50"
+        });
+        let result = store.reconcile_orders(&[empty_id_order]);
+
+        // Order should be removed because REST effectively returns empty valid orders
+        assert_eq!(result.orders_checked, 0);  // Empty IDs not counted
+        assert_eq!(result.stale_orders_removed, 1);
+    }
+
+    #[test]
+    fn test_reconcile_orders_handles_duplicate_ids() {
+        let mut store = OrderStateStore::new();
+
+        // Hydrate with a test order
+        let order_json = serde_json::json!({
+            "id": "order_1",
+            "asset_id": "asset_1",
+            "side": "BUY",
+            "price": "0.50",
+            "original_size": "100",
+            "size_matched": "0"
+        });
+        store.hydrate_orders(&[order_json.clone()]);
+
+        // REST returns the same order twice (duplicate)
+        let result = store.reconcile_orders(&[order_json.clone(), order_json]);
+
+        // Should count only 1 unique order
+        assert_eq!(result.orders_checked, 1);
+        assert_eq!(result.stale_orders_removed, 0);
+    }
+
+    #[test]
+    fn test_reconcile_orders_enforces_pending_cancels_cap() {
+        let mut store = OrderStateStore::new();
+
+        // Create more orders than MAX_PENDING_CANCELS (1000)
+        let num_orders = MAX_PENDING_CANCELS + 100; // 1100 orders
+
+        // Hydrate with many orders
+        let orders: Vec<serde_json::Value> = (0..num_orders)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("order_{}", i),
+                    "asset_id": "asset_1",
+                    "side": "BUY",
+                    "price": "0.50",
+                    "original_size": "100",
+                    "size_matched": "0"
+                })
+            })
+            .collect();
+        store.hydrate_orders(&orders);
+
+        assert_eq!(store.order_count(), num_orders);
+
+        // Reconcile with empty REST (all orders removed)
+        let result = store.reconcile_orders(&[]);
+
+        // All orders should be removed from OMS
+        assert_eq!(result.stale_orders_removed, num_orders);
+        assert_eq!(store.order_count(), 0);
+
+        // pending_cancels should be capped at MAX_PENDING_CANCELS
+        // (HashMap iteration order is not guaranteed, so we can't predict which orders are kept)
+        assert_eq!(store.pending_cancels.len(), MAX_PENDING_CANCELS);
+        assert_eq!(store.pending_cancels_order.len(), MAX_PENDING_CANCELS);
+
+        // Verify HashMap and VecDeque are synchronized
+        for order_id in &store.pending_cancels_order {
+            assert!(
+                store.pending_cancels.contains_key(order_id),
+                "VecDeque contains {} but HashMap does not",
+                order_id
+            );
+        }
+
+        // Verify exactly 100 orders were evicted (1100 - 1000 = 100)
+        let evicted_count = num_orders - store.pending_cancels.len();
+        assert_eq!(evicted_count, 100);
+    }
+
+    #[test]
+    fn test_reconcile_orders_handles_orphan_asset_mapping() {
+        let mut store = OrderStateStore::new();
+
+        // Manually insert an orphan mapping - order_to_asset entry without corresponding asset book
+        store
+            .order_to_asset
+            .insert("orphan_order".to_string(), "nonexistent_asset".to_string());
+
+        // Verify the orphan exists
+        assert!(store.order_to_asset.contains_key("orphan_order"));
+        assert!(!store.assets.contains_key("nonexistent_asset"));
+
+        // Reconcile with empty REST (orphan should be removed)
+        let result = store.reconcile_orders(&[]);
+
+        // Orphan should be removed from order_to_asset
+        assert_eq!(result.stale_orders_removed, 1);
+        assert!(!store.order_to_asset.contains_key("orphan_order"));
+
+        // Should be added to pending_cancels to prevent WebSocket race
+        assert!(store.pending_cancels.contains_key("orphan_order"));
+    }
+
+    #[test]
+    fn test_reconcile_orders_large_volume() {
+        let mut store = OrderStateStore::new();
+
+        // Create 500 orders across multiple assets
+        let num_orders = 500;
+        let orders: Vec<serde_json::Value> = (0..num_orders)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("order_{}", i),
+                    "asset_id": format!("asset_{}", i % 10), // 10 different assets
+                    "side": if i % 2 == 0 { "BUY" } else { "SELL" },
+                    "price": format!("{:.2}", 0.10 + (i as f64 * 0.001)),
+                    "original_size": "100",
+                    "size_matched": "0"
+                })
+            })
+            .collect();
+        store.hydrate_orders(&orders);
+
+        assert_eq!(store.order_count(), num_orders);
+
+        // Keep only even-numbered orders in REST (remove 250 orders)
+        let remaining_orders: Vec<serde_json::Value> = orders
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 2 == 0)
+            .map(|(_, o)| o.clone())
+            .collect();
+
+        let result = store.reconcile_orders(&remaining_orders);
+
+        // Half should be removed
+        assert_eq!(result.stale_orders_removed, num_orders / 2);
+        assert_eq!(result.orders_checked, num_orders / 2);
+        assert_eq!(store.order_count(), num_orders / 2);
+
+        // Verify specific orders
+        assert!(store.order_to_asset.contains_key("order_0")); // Even - kept
+        assert!(!store.order_to_asset.contains_key("order_1")); // Odd - removed
+        assert!(store.order_to_asset.contains_key("order_100")); // Even - kept
+        assert!(!store.order_to_asset.contains_key("order_101")); // Odd - removed
+
+        // Removed orders should be in pending_cancels
+        assert!(store.pending_cancels.contains_key("order_1"));
+        assert!(store.pending_cancels.contains_key("order_101"));
+    }
+
+    #[test]
+    fn test_reconcile_orders_mixed_valid_invalid_rest_response() {
+        let mut store = OrderStateStore::new();
+
+        // Hydrate with orders
+        let order1 = serde_json::json!({
+            "id": "order_1",
+            "asset_id": "asset_1",
+            "side": "BUY",
+            "price": "0.50",
+            "original_size": "100",
+            "size_matched": "0"
+        });
+        let order2 = serde_json::json!({
+            "id": "order_2",
+            "asset_id": "asset_1",
+            "side": "SELL",
+            "price": "0.60",
+            "original_size": "50",
+            "size_matched": "0"
+        });
+        store.hydrate_orders(&[order1.clone(), order2]);
+
+        assert_eq!(store.order_count(), 2);
+
+        // REST returns mix of valid, missing ID, empty ID, and duplicate
+        let rest_response = vec![
+            order1.clone(),                                    // Valid - keeps order_1
+            serde_json::json!({"asset_id": "x"}),              // Missing ID - skipped
+            serde_json::json!({"id": "", "asset_id": "y"}),    // Empty ID - skipped
+            order1.clone(),                                    // Duplicate - deduplicated
+            serde_json::json!({"id": null, "asset_id": "z"}),  // Null ID - skipped
+        ];
+
+        let result = store.reconcile_orders(&rest_response);
+
+        // Only order_1 should be counted (1 unique valid ID)
+        assert_eq!(result.orders_checked, 1);
+        // order_2 should be removed (not in valid REST IDs)
+        assert_eq!(result.stale_orders_removed, 1);
+
+        // Verify final state
+        assert!(store.order_to_asset.contains_key("order_1"));
+        assert!(!store.order_to_asset.contains_key("order_2"));
+        assert!(store.pending_cancels.contains_key("order_2"));
     }
 }

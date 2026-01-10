@@ -17,6 +17,7 @@ use super::types::{
 };
 use crate::application::strategies::traits::{Strategy, StrategyContext, StrategyResult, StrategyError};
 use crate::infrastructure::{
+    spawn_order_reconciliation_task, spawn_position_reconciliation_task, ReconciliationConfig,
     SharedOrderbooks, SharedOrderState, SharedPositionTracker, UserOrderStatus as OrderStatus,
 };
 
@@ -34,6 +35,10 @@ pub struct InventoryMMStrategy {
     // Per-quoter task management
     quoter_tasks: HashMap<String, JoinHandle<()>>,  // market_id -> task
     tracked_markets: HashSet<String>,                // avoid duplicate spawns
+
+    // Reconciliation task handles
+    reconciliation_handle: Option<JoinHandle<()>>,
+    order_reconciliation_handle: Option<JoinHandle<()>>,
 }
 
 impl InventoryMMStrategy {
@@ -43,6 +48,8 @@ impl InventoryMMStrategy {
             config,
             quoter_tasks: HashMap::new(),
             tracked_markets: HashSet::new(),
+            reconciliation_handle: None,
+            order_reconciliation_handle: None,
         }
     }
 
@@ -253,8 +260,9 @@ impl Strategy for InventoryMMStrategy {
         // This ensures markets are independent and don't block each other.
 
         // Fetch and hydrate existing positions from REST API
+        // Use maker_address (proxy wallet) - that's where positions are held
         info!("[InventoryMM] Fetching initial positions from REST API...");
-        match ctx.trading.rest().get_positions(ctx.trading.auth()).await {
+        match ctx.trading.rest().get_positions(ctx.trading.maker_address()).await {
             Ok(positions) => {
                 let mut tracker = ctx.position_tracker.write();
                 let mut hydrated = 0;
@@ -275,6 +283,33 @@ impl Strategy for InventoryMMStrategy {
             Err(e) => {
                 warn!("[InventoryMM] Failed to fetch initial positions: {}. Positions will build from fills.", e);
             }
+        }
+
+        // Spawn position reconciliation task (REST API as authoritative source)
+        // Guard against duplicate spawns if initialize() is called multiple times
+        if self.reconciliation_handle.is_none() {
+            let reconciliation_config = ReconciliationConfig::with_interval(1); // 1 second interval
+            self.reconciliation_handle = spawn_position_reconciliation_task(
+                ctx.shutdown_flag.clone(),
+                ctx.position_tracker.clone(),
+                ctx.trading.clone(),
+                reconciliation_config,
+            );
+        } else {
+            warn!("[InventoryMM] Reconciliation task already running, skipping spawn");
+        }
+
+        // Spawn order reconciliation task (REST API as authoritative source)
+        if self.order_reconciliation_handle.is_none() {
+            let order_reconciliation_config = ReconciliationConfig::with_interval(1); // 1 second interval
+            self.order_reconciliation_handle = spawn_order_reconciliation_task(
+                ctx.shutdown_flag.clone(),
+                ctx.order_state.clone(),
+                ctx.trading.clone(),
+                order_reconciliation_config,
+            );
+        } else {
+            warn!("[InventoryMM] Order reconciliation task already running, skipping spawn");
         }
 
         info!("[InventoryMM] Strategy initialized");
@@ -329,6 +364,16 @@ impl Strategy for InventoryMMStrategy {
 
     async fn stop(&mut self) -> StrategyResult<()> {
         info!("[InventoryMM] Stopping strategy");
+
+        // Abort the reconciliation tasks first
+        if let Some(handle) = self.reconciliation_handle.take() {
+            info!("[InventoryMM] Aborting position reconciliation task");
+            handle.abort();
+        }
+        if let Some(handle) = self.order_reconciliation_handle.take() {
+            info!("[InventoryMM] Aborting order reconciliation task");
+            handle.abort();
+        }
 
         // Wait for all quoter tasks to finish (they check shutdown flag)
         // Each quoter will shutdown its own executor during cleanup

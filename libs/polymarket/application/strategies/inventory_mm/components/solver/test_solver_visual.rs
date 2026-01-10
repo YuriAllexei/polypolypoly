@@ -196,6 +196,10 @@ mod visual_tests {
             skew_factor: 2.0,
             min_offset: 0.01,
             max_position: 0.0,
+            // Disable profitability cap for visual tests (tested separately in quotes.rs)
+            prof_weight: 0.0,
+            imbalance_weight: 1.0,
+            prof_cap_delta_threshold: 0.3,
         }
     }
 
@@ -1269,7 +1273,6 @@ mod visual_tests {
         // Current: 3 orders @ 0.54 totaling 300 (timestamps 1000, 1001, 1002)
         // Desired: 140 @ 0.54
         // Expected: Keep oldest (100), cancel middle and newest, place 40 for remainder
-        // NOTE: down_avg_price = 0.44 so max_up_bid = 1.0 - 0.44 - 0.01 = 0.55 (allows 0.54 bids)
         let input = SolverInput {
             up_token_id: "up_token".to_string(),
             down_token_id: "down_token".to_string(),
@@ -1286,7 +1289,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
+                down_avg_price: 0.44,
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),
@@ -1338,7 +1341,6 @@ mod visual_tests {
         // Current: 1 order @ 0.54 for 100
         // Desired: 250 @ 0.54
         // Expected: Keep existing 100, place new order for 150
-        // NOTE: down_avg_price = 0.44 so max_up_bid = 1.0 - 0.44 - 0.01 = 0.55 (allows 0.54 bids)
         let input = SolverInput {
             up_token_id: "up_token".to_string(),
             down_token_id: "down_token".to_string(),
@@ -1353,7 +1355,7 @@ mod visual_tests {
                 up_size: 50.0,
                 up_avg_price: 0.52,
                 down_size: 50.0,
-                down_avg_price: 0.44,  // max_up_bid = 1.0 - 0.44 - 0.01 = 0.55
+                down_avg_price: 0.44,
             },
             up_orderbook: OrderbookSnapshot {
                 best_ask: Some((0.55, 500.0)),

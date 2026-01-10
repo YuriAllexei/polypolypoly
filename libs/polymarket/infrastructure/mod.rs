@@ -66,6 +66,7 @@ pub use shutdown::ShutdownManager;
 
 // Re-export user state types for strategies (uses parking_lot::RwLock)
 pub use client::user::{
-    parse_timestamp_to_i64, OrderStateStore, SharedOrderState, OrderStatus as UserOrderStatus,
-    PositionTracker, SharedPositionTracker,
+    parse_timestamp_to_i64, OrderStateStore, ReconciliationConfig, SharedOrderState,
+    SharedPositionTracker, OrderStatus as UserOrderStatus, PositionTracker,
+    spawn_order_reconciliation_task, spawn_position_reconciliation_task,
 };

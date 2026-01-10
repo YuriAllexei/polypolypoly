@@ -195,6 +195,20 @@ pub struct SolverConfig {
     /// Maximum position size per side (UP/DOWN) - stops quoting when reached.
     /// Set to 0.0 for unlimited. This is a safety limit for testing.
     pub max_position: f64,
+
+    /// Weight for profitability bid in weighted average (default: 0.3)
+    /// Used to cap bid prices for maintaining avg_up + avg_down < 1.0
+    pub prof_weight: f64,
+
+    /// Weight for imbalance/market bid in weighted average (default: 0.7)
+    /// Higher weight means bids stay closer to market best_bid
+    pub imbalance_weight: f64,
+
+    /// Maximum |delta| at which profitability cap is applied (default: 0.3)
+    /// When |delta| > this threshold, the profitability cap is DISABLED to allow
+    /// aggressive rebalancing. The offset/skew mechanisms handle imbalance instead.
+    /// Set to 1.0 to always apply cap, 0.0 to never apply cap.
+    pub prof_cap_delta_threshold: f64,
 }
 
 impl Default for SolverConfig {
@@ -210,6 +224,9 @@ impl Default for SolverConfig {
             skew_factor: 1.0,            // Moderate size skew based on delta
             min_offset: 0.01,            // Min offset = tick_size to prevent spread crossing
             max_position: 0.0,           // 0 = unlimited (set in config for testing)
+            prof_weight: 0.3,            // 30% weight on profitability constraint
+            imbalance_weight: 0.7,       // 70% weight on market competitiveness
+            prof_cap_delta_threshold: 0.15, // Only apply cap when |delta| <= 0.15
         }
     }
 }

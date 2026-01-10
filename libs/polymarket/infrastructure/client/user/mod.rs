@@ -35,6 +35,7 @@
 
 mod order_manager;
 mod position_tracker;
+mod reconciliation;
 mod types;
 mod user_ws;
 
@@ -47,8 +48,8 @@ pub use types::{
 // Re-export order manager types
 pub use order_manager::{
     parse_timestamp_to_i64, AssetOrderBook, Fill, MakerOrderInfo, NoOpCallback, Order, OrderEvent,
-    OrderEventCallback, OrderStateStore, OrderStatus, OrderType, SharedOrderState, Side,
-    StpCheckResult, TokenPairRegistry, TradeStatus,
+    OrderEventCallback, OrderReconciliationResult, OrderStateStore, OrderStatus, OrderType,
+    SharedOrderState, Side, StpCheckResult, TokenPairRegistry, TradeStatus,
 };
 
 // Re-export WebSocket functions
@@ -59,6 +60,12 @@ pub use user_ws::{
 
 // Re-export position tracker types
 pub use position_tracker::{
-    MergeOpportunity, NoOpPositionCallback, Position, PositionEvent, PositionEventCallback,
-    PositionTracker, PositionTrackerBridge, SharedPositionTracker,
+    MergeOpportunity, NoOpPositionCallback, Position, PositionDiscrepancy, PositionEvent,
+    PositionEventCallback, PositionTracker, PositionTrackerBridge, ReconciliationResult,
+    SharedPositionTracker,
+};
+
+// Re-export reconciliation tasks
+pub use reconciliation::{
+    spawn_order_reconciliation_task, spawn_position_reconciliation_task, ReconciliationConfig,
 };

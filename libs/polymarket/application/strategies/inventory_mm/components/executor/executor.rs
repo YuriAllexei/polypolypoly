@@ -9,7 +9,7 @@ use tracing::{info, warn, error, debug};
 
 use super::commands::{ExecutorCommand, ExecutorResult};
 use crate::application::strategies::inventory_mm::types::{SolverOutput, LimitOrder, Side};
-use crate::infrastructure::client::clob::{TradingClient, Side as TradingSide, OrderType};
+use crate::infrastructure::client::clob::TradingClient;
 use crate::infrastructure::client::ctf::{merge as ctf_merge, usdc_to_raw};
 use crate::infrastructure::SharedOrderState;
 
@@ -435,14 +435,22 @@ impl Executor {
                 token_short, order.price, order.size
             );
 
-            let place_result = match order.side {
-                Side::Buy => self.runtime.block_on(
-                    self.trading.buy(&order.token_id, order.price, order.size)
-                ),
-                Side::Sell => self.runtime.block_on(
-                    self.trading.sell(&order.token_id, order.price, order.size)
-                ),
+            // Use place_order_with_fee with 1000 bps (10%) for 15-min crypto markets
+            // Polymarket requires feeRateBps in signed orders even for maker orders
+            let side = match order.side {
+                Side::Buy => crate::infrastructure::client::clob::Side::Buy,
+                Side::Sell => crate::infrastructure::client::clob::Side::Sell,
             };
+            let place_result = self.runtime.block_on(
+                self.trading.place_order_with_fee(
+                    &order.token_id,
+                    order.price,
+                    order.size,
+                    side,
+                    crate::infrastructure::client::clob::OrderType::GTC,
+                    Some(1000), // 10% fee for 15-min markets
+                )
+            );
 
             match place_result {
                 Ok(response) => {

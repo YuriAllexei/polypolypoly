@@ -242,23 +242,19 @@ pub struct Position {
     pub side: Option<Side>,
 }
 
-/// Deserialize size as string (handles both number and string from API)
+/// Deserialize size - accepts either string or number from API, returns String
 fn deserialize_size<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::Error;
+    // Try to deserialize as f64 first (most common from Data API)
+    // Fall back to string if that fails
+    let value: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
 
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StringOrNumber {
-        String(String),
-        Number(f64),
-    }
-
-    match StringOrNumber::deserialize(deserializer)? {
-        StringOrNumber::String(s) => Ok(s),
-        StringOrNumber::Number(n) => Ok(n.to_string()),
+    match value {
+        serde_json::Value::Number(n) => Ok(n.to_string()),
+        serde_json::Value::String(s) => Ok(s),
+        _ => Err(serde::de::Error::custom("expected string or number for size")),
     }
 }
 
@@ -441,5 +437,102 @@ impl OrderBook {
         self.asks.iter()
             .map(|ask| ask.price_f64() * ask.size_f64())
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_data_api_position_response() {
+        // Test with full API response format
+        let json = r#"[{"proxyWallet":"0x79bf6aa04182fae6098f5cde298051cb73d8cb4f","asset":"49676780810689444200318417088291763726636300097901733086536799145920190033679","conditionId":"0x2fc5c2a7fbe700ce96e945a22a27536c633a1fa0ca396b4bee37611d3eedff18","size":104.886789,"avgPrice":0.894118,"initialValue":93.781166007102,"currentValue":90.727072485,"cashPnl":-3.0540935221019985,"percentPnl":-3.256617135545866,"totalBought":156,"realizedPnl":-13.388357,"percentRealizedPnl":-34.95447892135401,"curPrice":0.865,"redeemable":false,"mergeable":true,"title":"Bitcoin Up or Down","outcome":"Down","outcomeIndex":1,"oppositeOutcome":"Up","oppositeAsset":"74500928740699287248693336296486952739964042785657855592532954908753339798970","endDate":"2026-01-08","negativeRisk":false}]"#;
+
+        let result: Result<Vec<Position>, _> = serde_json::from_str(json);
+        println!("Parse result: {:?}", result);
+
+        let positions = result.expect("Failed to parse positions");
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].asset_id, "49676780810689444200318417088291763726636300097901733086536799145920190033679");
+        assert_eq!(positions[0].size, "104.886789");
+        assert_eq!(positions[0].avg_price, Some(0.894118));
+        assert_eq!(positions[0].mergeable, Some(true));
+        assert_eq!(positions[0].outcome, Some("Down".to_string()));
+    }
+
+    #[test]
+    fn test_parse_open_order_response_for_reconciliation() {
+        // Test OpenOrder parsing and ID extraction for reconciliation
+        // OpenOrder is serde_json::Value, so we just need to verify ID extraction works
+        let json = r#"[
+            {
+                "id": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                "status": "LIVE",
+                "owner": "0xowner",
+                "maker_address": "0xmaker",
+                "market": "0xmarket123",
+                "asset_id": "12345678901234567890",
+                "side": "BUY",
+                "original_size": "100.5",
+                "size_matched": "0",
+                "price": "0.55"
+            },
+            {
+                "id": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+                "status": "LIVE",
+                "owner": "0xowner",
+                "maker_address": "0xmaker",
+                "market": "0xmarket123",
+                "asset_id": "12345678901234567890",
+                "side": "SELL",
+                "original_size": "50",
+                "size_matched": "25",
+                "price": "0.60"
+            }
+        ]"#;
+
+        let orders: Vec<OpenOrder> = serde_json::from_str(json).expect("Failed to parse orders");
+        assert_eq!(orders.len(), 2);
+
+        // Verify ID extraction works (same logic as reconcile_orders)
+        let order_ids: Vec<String> = orders
+            .iter()
+            .filter_map(|o| o.get("id").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+
+        assert_eq!(order_ids.len(), 2);
+        assert_eq!(order_ids[0], "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+        assert_eq!(order_ids[1], "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
+
+        // Verify other fields are accessible
+        assert_eq!(orders[0].get("side").and_then(|v| v.as_str()), Some("BUY"));
+        assert_eq!(orders[0].get("original_size").and_then(|v| v.as_str()), Some("100.5"));
+        assert_eq!(orders[1].get("size_matched").and_then(|v| v.as_str()), Some("25"));
+    }
+
+    #[test]
+    fn test_parse_open_order_with_numeric_fields() {
+        // Test that numeric fields (if API ever returns them) are handled
+        // Even if original_size comes as number, we don't parse it in reconciliation
+        let json = r#"[{
+            "id": "0x123abc",
+            "status": "LIVE",
+            "original_size": 100.5,
+            "price": 0.55
+        }]"#;
+
+        let orders: Vec<OpenOrder> = serde_json::from_str(json).expect("Failed to parse orders");
+        assert_eq!(orders.len(), 1);
+
+        // ID extraction still works
+        let id = orders[0].get("id").and_then(|v| v.as_str());
+        assert_eq!(id, Some("0x123abc"));
+
+        // Numeric original_size won't break anything - we just don't use it for reconciliation
+        // (reconciliation only cares about the "id" field)
+        let size = orders[0].get("original_size");
+        assert!(size.is_some());
+        assert!(size.unwrap().is_f64()); // It's a number, but that's OK
     }
 }

@@ -30,8 +30,9 @@
 //! ```
 
 use super::order_manager::{Fill, Order, OrderEventCallback, Side, TokenPairRegistry, TradeStatus};
+use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -177,6 +178,52 @@ pub enum PositionEvent {
     },
     /// A merge opportunity was detected
     MergeOpportunity(MergeOpportunity),
+    /// No operation (e.g., duplicate trade was ignored)
+    NoOp,
+}
+
+// =============================================================================
+// Reconciliation Types
+// =============================================================================
+
+/// Result of reconciling positions with REST API data
+#[derive(Debug, Clone)]
+pub struct ReconciliationResult {
+    /// Timestamp when reconciliation occurred
+    pub reconciled_at: DateTime<Utc>,
+    /// Number of positions checked from REST API
+    pub positions_checked: usize,
+    /// List of discrepancies found and corrected
+    pub discrepancies: Vec<PositionDiscrepancy>,
+}
+
+impl ReconciliationResult {
+    /// Returns true if any discrepancies were found
+    pub fn has_discrepancies(&self) -> bool {
+        !self.discrepancies.is_empty()
+    }
+}
+
+/// A discrepancy between tracked position and REST API position
+#[derive(Debug, Clone)]
+pub struct PositionDiscrepancy {
+    /// Token ID with discrepancy
+    pub token_id: String,
+    /// Size tracked locally (before correction)
+    pub tracked_size: f64,
+    /// Size from REST API (authoritative)
+    pub rest_size: f64,
+    /// Average price tracked locally
+    pub tracked_avg_price: f64,
+    /// Average price from REST API
+    pub rest_avg_price: f64,
+}
+
+impl PositionDiscrepancy {
+    /// Returns the size difference (tracked - rest)
+    pub fn size_diff(&self) -> f64 {
+        self.tracked_size - self.rest_size
+    }
 }
 
 // =============================================================================
@@ -205,6 +252,9 @@ impl PositionEventCallback for NoOpPositionCallback {
 // PositionTracker
 // =============================================================================
 
+/// Maximum seen trade IDs to track (prevents unbounded memory growth)
+const MAX_SEEN_TRADES: usize = 10_000;
+
 /// Real-time position tracker for market making
 pub struct PositionTracker {
     /// Positions by token_id
@@ -213,6 +263,10 @@ pub struct PositionTracker {
     token_pairs: TokenPairRegistry,
     /// Callback for position events
     callback: Arc<dyn PositionEventCallback>,
+    /// Seen trade IDs for deduplication (prevents double-counting)
+    seen_trades: HashSet<String>,
+    /// Order of seen trades for LRU eviction
+    seen_trades_order: VecDeque<String>,
 }
 
 /// Thread-safe shared position tracker
@@ -225,6 +279,8 @@ impl PositionTracker {
             positions: HashMap::new(),
             token_pairs: TokenPairRegistry::new(),
             callback: Arc::new(NoOpPositionCallback),
+            seen_trades: HashSet::new(),
+            seen_trades_order: VecDeque::new(),
         }
     }
 
@@ -234,6 +290,8 @@ impl PositionTracker {
             positions: HashMap::new(),
             token_pairs: TokenPairRegistry::new(),
             callback,
+            seen_trades: HashSet::new(),
+            seen_trades_order: VecDeque::new(),
         }
     }
 
@@ -241,18 +299,49 @@ impl PositionTracker {
     // Position Updates
     // =========================================================================
 
+    /// Check if a trade has already been processed (for deduplication)
+    pub fn has_seen_trade(&self, trade_id: &str) -> bool {
+        self.seen_trades.contains(trade_id)
+    }
+
+    /// Mark a trade as seen and handle LRU eviction
+    fn mark_trade_seen(&mut self, trade_id: String) {
+        if self.seen_trades.insert(trade_id.clone()) {
+            self.seen_trades_order.push_back(trade_id);
+
+            // LRU eviction when we exceed max size
+            while self.seen_trades_order.len() > MAX_SEEN_TRADES {
+                if let Some(old_id) = self.seen_trades_order.pop_front() {
+                    self.seen_trades.remove(&old_id);
+                }
+            }
+        }
+    }
+
     /// Apply a fill to update positions
     ///
     /// This is the main entry point for position updates. It:
-    /// 1. Updates position size and average price
-    /// 2. Calculates realized P&L on closes
-    /// 3. Tracks fees
-    /// 4. Checks for merge opportunities
+    /// 1. **Deduplicates by trade_id** (prevents double-counting)
+    /// 2. Updates position size and average price
+    /// 3. Calculates realized P&L on closes
+    /// 4. Tracks fees
+    /// 5. Checks for merge opportunities
     ///
     /// Returns a tuple of (PositionEvent, Option<MergeOpportunity>) for callback firing.
+    /// Returns None events if trade was already processed (deduplicated).
     /// **IMPORTANT**: Callbacks should be fired OUTSIDE the lock scope to prevent deadlocks.
     /// Use `fire_callback()` after releasing the write lock.
     pub fn apply_fill(&mut self, fill: &Fill) -> (PositionEvent, Option<MergeOpportunity>) {
+        // CRITICAL: Deduplicate by trade_id to prevent double-counting
+        if self.has_seen_trade(&fill.trade_id) {
+            debug!(
+                "[PositionTracker] DUPLICATE trade_id={} ignored (already processed)",
+                &fill.trade_id[..16.min(fill.trade_id.len())]
+            );
+            return (PositionEvent::NoOp, None);
+        }
+        self.mark_trade_seen(fill.trade_id.clone());
+
         let pos = self
             .positions
             .entry(fill.asset_id.clone())
@@ -534,6 +623,93 @@ impl PositionTracker {
         pos.size = size;
         pos.avg_entry_price = avg_price;
         pos.cost_basis = size.abs() * avg_price;
+    }
+
+    // =========================================================================
+    // Reconciliation
+    // =========================================================================
+
+    /// Reconcile positions with authoritative REST API data
+    ///
+    /// This method compares locally tracked positions with REST API positions
+    /// and corrects any discrepancies. REST API is treated as the source of truth.
+    ///
+    /// # Arguments
+    /// * `rest_positions` - Vector of (token_id, size, avg_price) from REST API
+    ///
+    /// # Returns
+    /// * `ReconciliationResult` containing discrepancies found and corrected
+    ///
+    /// # Side Effects
+    /// - Overwrites local positions with REST values when discrepancies found
+    /// - Zeros out positions not present in REST
+    /// - Clears the seen_trades deduplication cache
+    pub fn reconcile(&mut self, rest_positions: &[(String, f64, f64)]) -> ReconciliationResult {
+        const THRESHOLD: f64 = 0.01; // Ignore tiny floating point differences
+        let mut discrepancies = Vec::new();
+        let reconciled_at = Utc::now();
+
+        // Build REST position map for O(1) lookup
+        let rest_map: HashMap<&str, (f64, f64)> = rest_positions
+            .iter()
+            .map(|(id, size, price)| (id.as_str(), (*size, *price)))
+            .collect();
+
+        // Check REST positions against tracked positions
+        for (token_id, &(rest_size, rest_price)) in &rest_map {
+            let (tracked_size, tracked_price) = self
+                .positions
+                .get(*token_id)
+                .map(|p| (p.size, p.avg_entry_price))
+                .unwrap_or((0.0, 0.0));
+
+            if (tracked_size - rest_size).abs() > THRESHOLD {
+                discrepancies.push(PositionDiscrepancy {
+                    token_id: token_id.to_string(),
+                    tracked_size,
+                    rest_size,
+                    tracked_avg_price: tracked_price,
+                    rest_avg_price: rest_price,
+                });
+                // Overwrite with REST data (authoritative)
+                self.hydrate_position(token_id, rest_size, rest_price);
+            }
+        }
+
+        // Check for positions we have locally but REST doesn't have
+        // These should be zeroed out
+        let tracked_tokens: Vec<String> = self
+            .positions
+            .iter()
+            .filter(|(_, p)| p.size.abs() > THRESHOLD)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for token_id in tracked_tokens {
+            if !rest_map.contains_key(token_id.as_str()) {
+                let pos = self.positions.get(&token_id).unwrap();
+                discrepancies.push(PositionDiscrepancy {
+                    token_id: token_id.clone(),
+                    tracked_size: pos.size,
+                    rest_size: 0.0,
+                    tracked_avg_price: pos.avg_entry_price,
+                    rest_avg_price: 0.0,
+                });
+                // Zero out position not in REST
+                self.hydrate_position(&token_id, 0.0, 0.0);
+            }
+        }
+
+        // NOTE: We intentionally do NOT clear seen_trades here.
+        // Clearing it would create a race condition where WebSocket fills that arrive
+        // during or right after reconciliation could be double-counted.
+        // The LRU eviction in mark_trade_seen() handles memory management.
+
+        ReconciliationResult {
+            reconciled_at,
+            positions_checked: rest_map.len(),
+            discrepancies,
+        }
     }
 
     /// Clear all positions (use with caution)
@@ -1057,5 +1233,134 @@ mod tests {
         failed_fill.status = TradeStatus::Failed;
         bridge.on_trade(&failed_fill);
         assert!(tracker.read().get_position("token-5").is_none());
+    }
+
+    // =========================================================================
+    // Reconciliation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_reconcile_corrects_discrepancy() {
+        let mut tracker = PositionTracker::new();
+        // Local tracker thinks we have 100 shares
+        tracker.hydrate_position("token_a", 100.0, 0.50);
+
+        // REST API says we have 80 shares
+        let rest_positions = vec![("token_a".to_string(), 80.0, 0.55)];
+        let result = tracker.reconcile(&rest_positions);
+
+        // Should have found one discrepancy
+        assert_eq!(result.discrepancies.len(), 1);
+        assert!(result.has_discrepancies());
+
+        // Check discrepancy details
+        let d = &result.discrepancies[0];
+        assert_eq!(d.token_id, "token_a");
+        assert_eq!(d.tracked_size, 100.0);
+        assert_eq!(d.rest_size, 80.0);
+        assert!((d.size_diff() - 20.0).abs() < 0.001);
+
+        // Position should now reflect REST value
+        assert!((tracker.get_net_size("token_a") - 80.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_reconcile_zeros_missing_positions() {
+        let mut tracker = PositionTracker::new();
+        // Local tracker has a position REST doesn't know about
+        tracker.hydrate_position("token_a", 100.0, 0.50);
+
+        // REST returns empty - no positions
+        let rest_positions: Vec<(String, f64, f64)> = vec![];
+        let result = tracker.reconcile(&rest_positions);
+
+        // Should have found one discrepancy (zeroed out)
+        assert_eq!(result.discrepancies.len(), 1);
+        let d = &result.discrepancies[0];
+        assert_eq!(d.tracked_size, 100.0);
+        assert_eq!(d.rest_size, 0.0);
+
+        // Position should be zeroed
+        assert!((tracker.get_net_size("token_a")).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_reconcile_preserves_seen_trades() {
+        let mut tracker = PositionTracker::new();
+
+        // Mark some trades as seen
+        tracker.mark_trade_seen("trade_1".to_string());
+        tracker.mark_trade_seen("trade_2".to_string());
+        assert!(tracker.has_seen_trade("trade_1"));
+        assert!(tracker.has_seen_trade("trade_2"));
+
+        // Reconcile with empty REST
+        tracker.reconcile(&[]);
+
+        // Seen trades should be PRESERVED to prevent race conditions
+        // where WebSocket fills could be double-counted if cleared
+        assert!(tracker.has_seen_trade("trade_1"));
+        assert!(tracker.has_seen_trade("trade_2"));
+    }
+
+    #[test]
+    fn test_reconcile_no_discrepancy_within_threshold() {
+        let mut tracker = PositionTracker::new();
+        // Local tracker has 100 shares
+        tracker.hydrate_position("token_a", 100.0, 0.50);
+
+        // REST says 100.005 - within 0.01 threshold
+        let rest_positions = vec![("token_a".to_string(), 100.005, 0.50)];
+        let result = tracker.reconcile(&rest_positions);
+
+        // Should NOT report a discrepancy
+        assert!(!result.has_discrepancies());
+        assert_eq!(result.positions_checked, 1);
+    }
+
+    #[test]
+    fn test_reconcile_adds_new_position_from_rest() {
+        let mut tracker = PositionTracker::new();
+        // Local tracker is empty
+
+        // REST says we have a position
+        let rest_positions = vec![("token_a".to_string(), 50.0, 0.60)];
+        let result = tracker.reconcile(&rest_positions);
+
+        // Should have found one discrepancy (new position)
+        assert_eq!(result.discrepancies.len(), 1);
+        let d = &result.discrepancies[0];
+        assert_eq!(d.tracked_size, 0.0);
+        assert_eq!(d.rest_size, 50.0);
+
+        // Position should now exist
+        assert!((tracker.get_net_size("token_a") - 50.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_reconcile_multiple_positions() {
+        let mut tracker = PositionTracker::new();
+        // Local: token_a=100, token_b=50
+        tracker.hydrate_position("token_a", 100.0, 0.50);
+        tracker.hydrate_position("token_b", 50.0, 0.40);
+
+        // REST: token_a=80, token_c=30 (token_b missing)
+        let rest_positions = vec![
+            ("token_a".to_string(), 80.0, 0.55),
+            ("token_c".to_string(), 30.0, 0.70),
+        ];
+        let result = tracker.reconcile(&rest_positions);
+
+        // Should have 3 discrepancies:
+        // 1. token_a: 100 -> 80
+        // 2. token_b: 50 -> 0 (not in REST)
+        // 3. token_c: 0 -> 30 (new from REST)
+        assert_eq!(result.discrepancies.len(), 3);
+        assert_eq!(result.positions_checked, 2);
+
+        // Verify final positions
+        assert!((tracker.get_net_size("token_a") - 80.0).abs() < 0.001);
+        assert!((tracker.get_net_size("token_b")).abs() < 0.001);
+        assert!((tracker.get_net_size("token_c") - 30.0).abs() < 0.001);
     }
 }

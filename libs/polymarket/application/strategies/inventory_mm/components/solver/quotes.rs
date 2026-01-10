@@ -192,17 +192,74 @@ pub fn calculate_quotes(
         );
     }
 
+    // Calculate profitability caps for weighted bid approach
+    // Only apply cap when ALL conditions are met:
+    // 1. We have position on OTHER side (to maintain combined avg < 1.0)
+    // 2. prof_weight > 0 (feature is enabled)
+    // 3. |delta| <= prof_cap_delta_threshold (we're relatively balanced)
+    //
+    // When imbalanced (|delta| > threshold), SKIP the cap to allow aggressive rebalancing.
+    // The offset/skew mechanisms handle imbalance - the cap should not interfere.
+    let delta_abs = delta.abs();
+    let apply_prof_cap = delta_abs <= config.prof_cap_delta_threshold;
+
+    if !apply_prof_cap && config.prof_weight > 0.0 {
+        debug!(
+            "[Solver] Profitability cap SKIPPED: |delta|={:.2} > threshold={:.2}, allowing aggressive rebalancing",
+            delta_abs, config.prof_cap_delta_threshold
+        );
+    }
+
+    let profitability_cap_up = if inventory.down_avg_price > 0.0 && config.prof_weight > 0.0 && apply_prof_cap {
+        let prof_bid = 1.0 - inventory.down_avg_price;
+        up_ob.best_bid_price().map(|imbalance_bid| {
+            calculate_generated_bid(prof_bid, imbalance_bid, config.prof_weight, config.imbalance_weight)
+        })
+    } else {
+        None // No DOWN position, cap disabled, or imbalanced (rebalancing mode)
+    };
+
+    let profitability_cap_down = if inventory.up_avg_price > 0.0 && config.prof_weight > 0.0 && apply_prof_cap {
+        let prof_bid = 1.0 - inventory.up_avg_price;
+        down_ob.best_bid_price().map(|imbalance_bid| {
+            calculate_generated_bid(prof_bid, imbalance_bid, config.prof_weight, config.imbalance_weight)
+        })
+    } else {
+        None // No UP position, cap disabled, or imbalanced (rebalancing mode)
+    };
+
+    // Log when profitability caps are active
+    if profitability_cap_up.is_some() || profitability_cap_down.is_some() {
+        info!(
+            "[Solver] Profitability caps: UP={:?}, DOWN={:?} (avg_costs: UP={:.3}, DOWN={:.3})",
+            profitability_cap_up, profitability_cap_down,
+            inventory.up_avg_price, inventory.down_avg_price
+        );
+    }
+
     // Build Up quotes
     // Cross-spread validation DISABLED - was too restrictive and blocked rebalancing
     if !skip_up {
         if let Some(best_ask) = up_ob.best_ask_price() {
+            // LOW PRICE FIX: Cap offset to ensure at least one valid price level ($0.01)
+            // When best_ask is very low (e.g., $0.05), normal offset could push price below minimum
+            let max_safe_offset = (best_ask - 0.01).max(0.001);  // Must leave room for $0.01 min price
+            let effective_up_offset = up_offset.min(max_safe_offset);
+            if effective_up_offset < up_offset {
+                debug!(
+                    "[Solver] UP offset capped for low price: {:.3} → {:.3} (best_ask={:.3})",
+                    up_offset, effective_up_offset, best_ask
+                );
+            }
+
             ladder.up_quotes = build_ladder(
                 up_token_id,
                 best_ask,
-                up_offset,
+                effective_up_offset,
                 up_size,
                 config,
                 None,  // No cross-spread validation
+                profitability_cap_up,
             );
         } else {
             debug!("[Solver] UP quotes skipped: no best_ask in UP orderbook");
@@ -215,20 +272,32 @@ pub fn calculate_quotes(
     // Cross-spread validation DISABLED - was too restrictive and blocked rebalancing
     if !skip_down {
         if let Some(best_ask) = down_ob.best_ask_price() {
+            // LOW PRICE FIX: Cap offset to ensure at least one valid price level ($0.01)
+            // When best_ask is very low (e.g., $0.03), normal offset could push price below minimum
+            let max_safe_offset = (best_ask - 0.01).max(0.001);  // Must leave room for $0.01 min price
+            let effective_down_offset = down_offset.min(max_safe_offset);
+            if effective_down_offset < down_offset {
+                debug!(
+                    "[Solver] DOWN offset capped for low price: {:.3} → {:.3} (best_ask={:.3})",
+                    down_offset, effective_down_offset, best_ask
+                );
+            }
+
             ladder.down_quotes = build_ladder(
                 down_token_id,
                 best_ask,
-                down_offset,
+                effective_down_offset,
                 down_size,
                 config,
                 None,  // No cross-spread validation
+                profitability_cap_down,
             );
 
             // Log if DOWN quotes are empty (helps debug why no orders are placed)
             if ladder.down_quotes.is_empty() {
                 tracing::warn!(
-                    "[Solver] DOWN ladder EMPTY! best_ask={:.3}, offset={:.3}, delta={:.2}",
-                    best_ask, down_offset, delta
+                    "[Solver] DOWN ladder EMPTY! best_ask={:.3}, offset={:.3} (effective={:.3}), delta={:.2}",
+                    best_ask, down_offset, effective_down_offset, delta
                 );
             }
         } else {
@@ -253,6 +322,8 @@ pub fn calculate_quotes(
 /// Example: If our orderbook shows UP best_ask = $0.65 but is stale,
 /// and DOWN best_bid = $0.37, we can infer UP is worth ~$0.63 (1 - 0.37).
 /// Any UP bid > $0.63 would cross the effective spread!
+///
+/// Profitability cap limits bid prices to maintain combined avg cost < 1.0.
 fn build_ladder(
     token_id: &str,
     best_ask: f64,
@@ -260,6 +331,7 @@ fn build_ladder(
     order_size: f64,
     config: &SolverConfig,
     opposite_best_bid: Option<f64>,  // For cross-spread validation
+    profitability_cap: Option<f64>,  // For maintaining avg_up + avg_down < 1.0
 ) -> Vec<Quote> {
     let mut quotes = Vec::with_capacity(config.num_levels);
     let mut last_price: Option<f64> = None;
@@ -295,6 +367,17 @@ fn build_ladder(
                     price, cross_max, opposite_best_bid.unwrap_or(0.0)
                 );
                 price = cross_max;
+            }
+        }
+
+        // Apply profitability cap to maintain combined avg cost < 1.0
+        if let Some(cap) = profitability_cap {
+            if price > cap {
+                debug!(
+                    "[Solver] Profitability cap: {:.3} → {:.3}",
+                    price, cap
+                );
+                price = cap;
             }
         }
 
@@ -352,7 +435,7 @@ fn build_ladder(
 }
 
 /// Round price down to tick size, ensuring exactly 2 decimal places
-fn round_to_tick(price: f64, tick_size: f64) -> f64 {
+pub(crate) fn round_to_tick(price: f64, tick_size: f64) -> f64 {
     // Add small epsilon to handle floating point precision errors
     // e.g., 0.47/0.01 = 46.9999... should floor to 47, not 46
     let ticks = ((price / tick_size) + 1e-9).floor();
@@ -365,6 +448,28 @@ fn round_to_tick(price: f64, tick_size: f64) -> f64 {
 /// Round size to whole number (Polymarket requires integer sizes)
 fn round_size(size: f64) -> f64 {
     size.round()
+}
+
+/// Calculate weighted bid for profitability cap.
+///
+/// Combines profitability constraint with market competitiveness:
+/// - prof_bid: Maximum price to keep combined avg cost < 1.0 (1.0 - other_side_avg)
+/// - imbalance_bid: Market best_bid (competitive pricing)
+///
+/// The weighted average balances staying profitable (prof_weight) with
+/// being competitive in the market (imbalance_weight).
+pub(crate) fn calculate_generated_bid(
+    prof_bid: f64,
+    imbalance_bid: f64,
+    prof_weight: f64,
+    imbalance_weight: f64,
+) -> f64 {
+    let total_weight = prof_weight + imbalance_weight;
+    if total_weight == 0.0 {
+        return imbalance_bid;
+    }
+    let weighted = (prof_bid * prof_weight + imbalance_bid * imbalance_weight) / total_weight;
+    round_to_tick(weighted, 0.01)
 }
 
 #[cfg(test)]
@@ -383,6 +488,9 @@ mod tests {
             skew_factor: 1.0,
             min_offset: 0.01,
             max_position: 0.0,  // 0 = unlimited for tests
+            prof_weight: 0.3,
+            imbalance_weight: 0.7,
+            prof_cap_delta_threshold: 0.3,  // Only apply cap when |delta| <= 0.3
         }
     }
 
@@ -420,8 +528,8 @@ mod tests {
     #[test]
     fn test_build_ladder_basic() {
         let config = default_config();
-        // No cross-spread validation (None for opposite_best_bid)
-        let quotes = build_ladder("token", 0.55, 0.01, 100.0, &config, None);
+        // No cross-spread validation (None for opposite_best_bid), no profitability cap
+        let quotes = build_ladder("token", 0.55, 0.01, 100.0, &config, None, None);
 
         assert_eq!(quotes.len(), 3);
         // Level 0: 0.55 - 0.01 - 0 = 0.54
@@ -441,7 +549,7 @@ mod tests {
         // best_ask = 0.65, but opposite_best_bid = 0.37
         // Cross-spread max = 1.0 - 0.37 = 0.63 (no safety margin anymore)
         // Our bid at 0.64 (0.65 - 0.01) should be capped to 0.63
-        let quotes = build_ladder("token", 0.65, 0.01, 100.0, &config, Some(0.37));
+        let quotes = build_ladder("token", 0.65, 0.01, 100.0, &config, Some(0.37), None);
 
         assert!(!quotes.is_empty());
         // All prices should be <= 0.63 (cross-spread max, no safety margin)
@@ -973,5 +1081,143 @@ mod tests {
                 down_bid
             );
         }
+    }
+
+    #[test]
+    fn test_calculate_generated_bid() {
+        // Test the weighted bid calculation
+        // prof_bid = 0.51, imbalance_bid = 0.55
+        // weights: 0.3 and 0.7 (from notebook example)
+        // expected = (0.51 * 0.3 + 0.55 * 0.7) / 1.0 = 0.153 + 0.385 = 0.538
+        // round_to_tick floors to 0.53 (conservative for bids)
+        let result = calculate_generated_bid(0.51, 0.55, 0.3, 0.7);
+        assert!((result - 0.53).abs() < 0.001, "Expected 0.53, got {}", result);
+
+        // Test with equal weights
+        let result = calculate_generated_bid(0.50, 0.60, 0.5, 0.5);
+        assert!((result - 0.55).abs() < 0.001, "Expected 0.55, got {}", result);
+
+        // Test with zero total weight (edge case)
+        let result = calculate_generated_bid(0.50, 0.60, 0.0, 0.0);
+        assert!((result - 0.60).abs() < 0.001, "Expected imbalance_bid 0.60, got {}", result);
+
+        // Test exact result (no rounding needed)
+        // (0.52 * 0.3 + 0.54 * 0.7) = 0.156 + 0.378 = 0.534 → 0.53
+        let result = calculate_generated_bid(0.52, 0.54, 0.3, 0.7);
+        assert!((result - 0.53).abs() < 0.001, "Expected 0.53, got {}", result);
+    }
+
+    #[test]
+    fn test_build_ladder_with_profitability_cap() {
+        let config = default_config();
+        // best_ask = 0.55, offset = 0.01
+        // Normal price would be 0.54, 0.53, 0.52
+        // With profitability cap at 0.52, all should be capped
+        let quotes = build_ladder("token", 0.55, 0.01, 100.0, &config, None, Some(0.52));
+
+        assert_eq!(quotes.len(), 3);
+        // All prices should be <= 0.52 (the profitability cap)
+        for q in &quotes {
+            assert!(q.price <= 0.52, "Price {} exceeds cap 0.52", q.price);
+        }
+        // First quote should be exactly at cap
+        assert!((quotes[0].price - 0.52).abs() < 0.001, "First quote should be at cap");
+    }
+
+    #[test]
+    fn test_build_ladder_cap_below_offset_price() {
+        let config = default_config();
+        // best_ask = 0.55, offset = 0.01
+        // Normal price would be 0.54
+        // With very low cap at 0.45, all should be at 0.45
+        let quotes = build_ladder("token", 0.55, 0.01, 100.0, &config, None, Some(0.45));
+
+        assert!(!quotes.is_empty());
+        // All prices should be 0.45 (same price due to low cap)
+        // Note: ladder logic ensures monotonically decreasing, so may have fewer quotes
+        for q in &quotes {
+            assert!(q.price <= 0.45, "Price {} exceeds cap 0.45", q.price);
+        }
+    }
+
+    #[test]
+    fn test_profitability_cap_with_position() {
+        // Test that profitability cap is applied when we have position on OTHER side
+        let config = default_config();
+
+        // Inventory with DOWN position (avg 0.48), no UP position
+        // profBid_UP = 1.0 - 0.48 = 0.52
+        let inventory = InventorySnapshot {
+            up_size: 0.0,
+            up_avg_price: 0.0,
+            down_size: 100.0,
+            down_avg_price: 0.48,
+        };
+
+        let up_ob = OrderbookSnapshot {
+            best_ask: Some((0.60, 100.0)),
+            best_bid: Some((0.55, 50.0)),  // imbalanceBid = 0.55
+            best_bid_is_ours: false,
+            best_ask_is_ours: false,
+        };
+        let down_ob = OrderbookSnapshot {
+            best_ask: Some((0.40, 100.0)),
+            best_bid: Some((0.38, 50.0)),
+            best_bid_is_ours: false,
+            best_ask_is_ours: false,
+        };
+
+        let ladder = calculate_quotes(0.0, &up_ob, &down_ob, &inventory, &config, "up", "down");
+
+        // UP quotes should have profitability cap applied
+        // generated_bid = (0.52 * 0.3 + 0.55 * 0.7) / 1.0 = 0.541 → floors to 0.54
+        assert!(!ladder.up_quotes.is_empty());
+        for q in &ladder.up_quotes {
+            assert!(q.price <= 0.54, "UP price {} exceeds profitability cap 0.54", q.price);
+        }
+
+        // DOWN quotes should NOT have cap (no UP position)
+        assert!(!ladder.down_quotes.is_empty());
+    }
+
+    #[test]
+    fn test_no_profitability_cap_without_position() {
+        // Test that profitability cap is NOT applied when no position on other side
+        let config = default_config();
+
+        // No inventory at all - market making from scratch
+        let inventory = InventorySnapshot {
+            up_size: 0.0,
+            up_avg_price: 0.0,
+            down_size: 0.0,
+            down_avg_price: 0.0,
+        };
+
+        let up_ob = OrderbookSnapshot {
+            best_ask: Some((0.55, 100.0)),
+            best_bid: Some((0.53, 50.0)),
+            best_bid_is_ours: false,
+            best_ask_is_ours: false,
+        };
+        let down_ob = OrderbookSnapshot {
+            best_ask: Some((0.45, 100.0)),
+            best_bid: Some((0.43, 50.0)),
+            best_bid_is_ours: false,
+            best_ask_is_ours: false,
+        };
+
+        let ladder = calculate_quotes(0.0, &up_ob, &down_ob, &inventory, &config, "up", "down");
+
+        // Both sides should quote without cap (normal market making)
+        assert!(!ladder.up_quotes.is_empty());
+        assert!(!ladder.down_quotes.is_empty());
+
+        // UP quote should be at normal offset price (0.55 - 0.01 = 0.54)
+        assert!((ladder.up_quotes[0].price - 0.54).abs() < 0.001,
+            "UP price {} should be 0.54 without cap", ladder.up_quotes[0].price);
+
+        // DOWN quote should be at normal offset price (0.45 - 0.01 = 0.44)
+        assert!((ladder.down_quotes[0].price - 0.44).abs() < 0.001,
+            "DOWN price {} should be 0.44 without cap", ladder.down_quotes[0].price);
     }
 }

@@ -87,6 +87,9 @@ impl PositionEventCallback for PositionEventLogger {
                     merge.profit_percentage()
                 );
             }
+            PositionEvent::NoOp => {
+                // Duplicate trade - already processed, no action needed
+            }
         }
     }
 }
@@ -255,9 +258,15 @@ async fn main() -> Result<()> {
     // Create REST client for hydration
     let rest_client = RestClient::new(CLOB_URL);
 
+    // Get proxy wallet address (where positions are held)
+    let proxy_wallet: ethers::types::Address = std::env::var("PROXY_WALLET")
+        .map_err(|_| anyhow::anyhow!("PROXY_WALLET not set"))?
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid PROXY_WALLET address"))?;
+
     // Hydrate positions from REST API
     info!("Fetching initial positions from REST API...");
-    match rest_client.get_positions(&auth).await {
+    match rest_client.get_positions(proxy_wallet).await {
         Ok(positions) => {
             let mut tracker = position_tracker.write();
             let mut count = 0;
