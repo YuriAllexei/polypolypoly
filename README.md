@@ -181,6 +181,9 @@ The project uses Docker Compose with **profiles** for flexible deployment:
 **Commands:**
 
 ```bash
+# Run the visualizer
+cargo run --bin mm-visualizer
+
 # Build containers
 docker compose build
 
