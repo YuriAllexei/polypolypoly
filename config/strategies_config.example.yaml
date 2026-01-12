@@ -77,47 +77,56 @@ inventory_mm:
   # Cooldown between merges (seconds)
   merge_cooldown_secs: 120
 
-  # === Solver (Quoting Parameters) ===
+  # === Solver (4-Layer Quoter Parameters) ===
+  # Implements O'Hara Market Microstructure theory with oracle-based adjustments
   solver:
+    # === General Parameters ===
     # Number of bid levels per side
     num_levels: 3
     # Tick size for price rounding
     tick_size: 0.01
-    # Base offset from best ask when delta=0 (aggressive)
-    base_offset: 0.01
-    # Maximum imbalance before stopping quotes on overweight side (80%)
-    max_imbalance: 0.8
-    # Order size per level (tokens)
+    # Base order size when inventory is balanced (tokens)
     order_size: 100.0
+    # Spread adjustment per level (cents)
+    spread_per_level: 1.0
+    # Minimum offset from best_bid to prevent crossing spread
+    min_offset: 0.01
     # Maximum position size per side (UP/DOWN) - stops quoting when reached
     # Set to 0 for unlimited. This is a safety limit for testing.
     max_position: 200.0
-    # Spread adjustment per level (cents)
-    spread_per_level: 1.0
-    # Multiplier for offset scaling with imbalance
-    offset_scaling: 5.0
-    # Skew factor for size adjustment (0.0 = none, 1.0 = moderate, 2.0 = aggressive)
-    skew_factor: 1.0
+    # Maximum imbalance before stopping quotes on overweight side (80%)
+    max_imbalance: 0.8
 
-    # === Spread Crossing Prevention ===
-    # Minimum offset from best_ask to prevent spread crossing
-    # When offsets go negative due to extreme imbalance, this floor prevents
-    # bids from crossing the ask (which would result in immediate TAKER fills).
-    # Must be >= tick_size (0.01) to ensure bid is at least 1 tick below ask.
-    min_offset: 0.01
+    # === Layer 1: Oracle-Adjusted Offset ===
+    # Adjusts quote offset based on ChainLink oracle distance from threshold
+    # Formula: oracle_adj = oracle_distance_pct * oracle_sensitivity
+    # Higher = more aggressive adjustment based on oracle signal
+    oracle_sensitivity: 5.0
 
-    # === Profitability Cap (Weighted Bid) ===
-    # Caps bid prices to maintain avg_cost_up + avg_cost_down < 1.0 for merge profit
-    # generated_bid = (prof_bid * prof_weight + market_bid * imbalance_weight) / total_weight
-    # Profitability weight (default 0.3 = 30%)
-    prof_weight: 0.3
-    # Market competitiveness weight (default 0.7 = 70%)
-    imbalance_weight: 0.7
-    # Max |delta| to apply profitability cap (default 0.15 = only when |delta| <= 15%)
-    # When imbalanced beyond this threshold, cap is DISABLED to allow aggressive rebalancing.
-    # The offset/skew mechanisms handle imbalance instead - cap should not interfere.
-    # Set to 1.0 to always apply cap, 0.0 to never apply cap.
-    prof_cap_delta_threshold: 0.15
+    # === Layer 2: Adverse Selection (Glosten-Milgrom) ===
+    # Widens spread near resolution when informed traders are more likely
+    # Formula: p_informed = p_informed_base * exp(-minutes / time_decay_minutes)
+    #          spread = base_spread * (1 + 3 * p_informed)
+    # Base spread before adverse selection adjustment (e.g., 0.02 = 2 cents)
+    base_spread: 0.02
+    # Base probability of informed trader (e.g., 0.2 = 20%)
+    p_informed_base: 0.2
+    # Time decay constant in minutes (lower = faster increase near resolution)
+    time_decay_minutes: 5.0
+
+    # === Layer 3: Inventory Skew ===
+    # Adjusts offset and size based on inventory imbalance
+    # Offset formula: spread_mult = 1 + gamma_inv * q (where q = delta)
+    # Size formula: size = order_size * exp(-lambda_size * q)
+    # Gamma for offset multiplier (higher = more aggressive offset adjustment)
+    gamma_inv: 1.5
+    # Lambda for size decay (higher = more aggressive size reduction when overweight)
+    lambda_size: 1.5
+
+    # === Layer 4: Edge Check ===
+    # Skips quotes that don't have sufficient edge (profit margin)
+    # Formula: skip if (best_ask - bid_price) < edge_threshold
+    edge_threshold: 0.01
 
   # === Merger (Merge Conditions) ===
   merger:

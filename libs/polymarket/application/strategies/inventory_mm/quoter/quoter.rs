@@ -20,7 +20,8 @@ use crate::application::strategies::inventory_mm::components::{
 use crate::application::strategies::inventory_mm::types::{
     SolverInput, SolverOutput, SolverConfig, InventorySnapshot, OrderbookSnapshot, OrderSnapshot, OpenOrder,
 };
-use crate::infrastructure::{parse_timestamp_to_i64, SharedOrderbooks, UserOrderStatus as OrderStatus};
+use crate::infrastructure::{parse_timestamp_to_i64, SharedOrderbooks, UserOrderStatus as OrderStatus, OracleType};
+use chrono::Utc;
 
 enum TickResult {
     Continue,
@@ -355,6 +356,10 @@ impl Quoter {
             )
         };
 
+        // 4. Get oracle distance and time to resolution
+        let oracle_distance_pct = self.get_oracle_distance();
+        let minutes_to_resolution = self.get_minutes_to_resolution();
+
         SolverInput {
             up_token_id: self.market.up_token_id.clone(),
             down_token_id: self.market.down_token_id.clone(),
@@ -364,7 +369,31 @@ impl Quoter {
             up_orderbook,
             down_orderbook,
             config: self.config.clone(),
+            oracle_distance_pct,
+            minutes_to_resolution,
         }
+    }
+
+    /// Get oracle distance from threshold as a percentage.
+    /// Returns (oracle_price - threshold) / threshold.
+    /// Positive = above threshold (UP favored), negative = below (DOWN favored).
+    fn get_oracle_distance(&self) -> f64 {
+        let prices = self.ctx.oracle_prices.read();
+        if let Some(entry) = prices.get_price(OracleType::ChainLink, &self.market.symbol) {
+            let current_price = entry.value;
+            let threshold = self.market.threshold;
+            if threshold > 0.0 {
+                return (current_price - threshold) / threshold;
+            }
+        }
+        0.0 // Default to neutral if no oracle data
+    }
+
+    /// Get minutes remaining until market resolution.
+    fn get_minutes_to_resolution(&self) -> f64 {
+        let now = Utc::now();
+        let remaining = self.market.end_time - now;
+        (remaining.num_seconds() as f64 / 60.0).max(0.0)
     }
 
     fn tick(&mut self, input: &SolverInput) -> (Option<SolverOutput>, TickResult) {

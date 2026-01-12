@@ -13,6 +13,10 @@ path = "mod.rs"
 name = "redeem-test"
 path = "bin/redeem_test.rs"
 
+[[bin]]
+name = "test-oracle"
+path = "bin/test_oracle.rs"
+
 [dependencies]
 # Workspace dependencies
 hypersockets = { workspace = true }

@@ -6,7 +6,7 @@
 //! When a market enters the delta_t window (time before end), this strategy
 //! spawns a WebSocket tracker to monitor the orderbook in real-time.
 
-mod services;
+pub mod services;
 mod strategy;
 pub mod tracker;
 pub mod types;

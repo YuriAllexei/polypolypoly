@@ -151,82 +151,125 @@ pub struct SolverInput {
 
     /// Configuration
     pub config: SolverConfig,
+
+    /// Oracle distance from threshold: (oracle_price - threshold) / threshold
+    /// Positive = above threshold (UP favored), negative = below (DOWN favored)
+    pub oracle_distance_pct: f64,
+
+    /// Minutes remaining until market resolution
+    pub minutes_to_resolution: f64,
 }
 
-/// Solver configuration parameters
+/// Solver configuration parameters for 4-layer quoter
+///
+/// Implements O'Hara Market Microstructure theory with:
+/// - Layer 1: Oracle-adjusted offset
+/// - Layer 2: Adverse selection (Glosten-Milgrom)
+/// - Layer 3: Inventory skew
+/// - Layer 4: Edge check
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct SolverConfig {
+    // ═══════════════════════════════════════════════════════════════
+    // GENERAL PARAMETERS
+    // ═══════════════════════════════════════════════════════════════
+
     /// Number of bid levels per side (e.g., 3)
     pub num_levels: usize,
 
     /// Tick size for price rounding (e.g., 0.01)
     pub tick_size: f64,
 
-    /// Base offset from best ask when delta=0 (aggressive)
-    pub base_offset: f64,
-
-    /// Maximum imbalance before stopping quotes on overweight side
-    pub max_imbalance: f64,
-
-    /// Order size per level
+    /// Base order size when inventory is balanced
     pub order_size: f64,
 
     /// Spread adjustment per level (cents)
     /// Level 0 = base, Level 1 = base + spread_per_level, etc.
     pub spread_per_level: f64,
 
-    /// Multiplier for offset scaling with imbalance (e.g., 5.0)
-    /// offset = base_offset * (1 + |delta| * offset_scaling)
-    /// Higher = more aggressive backing off on overweight side
-    pub offset_scaling: f64,
-
-    /// Skew factor for size adjustment based on imbalance
-    /// up_size = order_size * (1 - delta * skew_factor)
-    /// down_size = order_size * (1 + delta * skew_factor)
-    /// 0.0 = no skew, 1.0 = moderate, 2.0 = aggressive
-    pub skew_factor: f64,
-
-    /// Minimum offset from best_ask to prevent spread crossing
-    /// When offsets go negative due to extreme imbalance, this floor
-    /// prevents bids from crossing the ask. Must be >= tick_size (0.01).
+    /// Minimum offset from best_bid to prevent crossing spread
     pub min_offset: f64,
 
     /// Maximum position size per side (UP/DOWN) - stops quoting when reached.
-    /// Set to 0.0 for unlimited. This is a safety limit for testing.
+    /// Set to 0.0 for unlimited.
     pub max_position: f64,
 
-    /// Weight for profitability bid in weighted average (default: 0.3)
-    /// Used to cap bid prices for maintaining avg_up + avg_down < 1.0
-    pub prof_weight: f64,
+    /// Maximum imbalance before stopping quotes on overweight side
+    pub max_imbalance: f64,
 
-    /// Weight for imbalance/market bid in weighted average (default: 0.7)
-    /// Higher weight means bids stay closer to market best_bid
-    pub imbalance_weight: f64,
+    // ═══════════════════════════════════════════════════════════════
+    // LAYER 1: ORACLE-ADJUSTED OFFSET
+    // ═══════════════════════════════════════════════════════════════
 
-    /// Maximum |delta| at which profitability cap is applied (default: 0.3)
-    /// When |delta| > this threshold, the profitability cap is DISABLED to allow
-    /// aggressive rebalancing. The offset/skew mechanisms handle imbalance instead.
-    /// Set to 1.0 to always apply cap, 0.0 to never apply cap.
-    pub prof_cap_delta_threshold: f64,
+    /// Sensitivity to oracle price distance from threshold
+    /// Higher = more aggressive adjustment based on oracle
+    /// Formula: oracle_adj = oracle_distance_pct * oracle_sensitivity
+    pub oracle_sensitivity: f64,
+
+    // ═══════════════════════════════════════════════════════════════
+    // LAYER 2: ADVERSE SELECTION (Glosten-Milgrom)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Base spread before adverse selection adjustment (e.g., 0.02 = 2c)
+    pub base_spread: f64,
+
+    /// Base probability of informed trader (e.g., 0.2 = 20%)
+    /// Used in: p_informed = p_informed_base * exp(-minutes / time_decay)
+    pub p_informed_base: f64,
+
+    /// Time decay constant in minutes for informed trader probability
+    /// Lower = faster increase in p_informed near resolution
+    pub time_decay_minutes: f64,
+
+    // ═══════════════════════════════════════════════════════════════
+    // LAYER 3: INVENTORY SKEW
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Inventory skew sensitivity for offset multiplier
+    /// Formula: spread_mult = 1 + gamma_inv * q
+    /// Higher = more aggressive offset adjustment with inventory
+    pub gamma_inv: f64,
+
+    /// Inventory skew sensitivity for size decay
+    /// Formula: size = base_size * exp(-lambda_size * q)
+    /// Higher = more aggressive size reduction when overweight
+    pub lambda_size: f64,
+
+    // ═══════════════════════════════════════════════════════════════
+    // LAYER 4: EDGE CHECK
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Minimum edge (ask - bid) required to place a quote
+    /// Skip quoting if edge < edge_threshold
+    pub edge_threshold: f64,
 }
 
 impl Default for SolverConfig {
     fn default() -> Self {
         Self {
+            // General
             num_levels: 3,
             tick_size: 0.01,
-            base_offset: 0.01,           // Aggressive when delta=0
-            max_imbalance: 0.8,          // Stop quoting at 80% imbalance
-            order_size: 100.0,
+            order_size: 50.0,            // Base size (from notebook)
             spread_per_level: 1.0,       // 1 cent wider per level
-            offset_scaling: 5.0,         // Scale offset 5x with imbalance
-            skew_factor: 1.0,            // Moderate size skew based on delta
-            min_offset: 0.01,            // Min offset = tick_size to prevent spread crossing
-            max_position: 0.0,           // 0 = unlimited (set in config for testing)
-            prof_weight: 0.3,            // 30% weight on profitability constraint
-            imbalance_weight: 0.7,       // 70% weight on market competitiveness
-            prof_cap_delta_threshold: 0.15, // Only apply cap when |delta| <= 0.15
+            min_offset: 0.01,            // Min 1c offset
+            max_position: 0.0,           // 0 = unlimited
+            max_imbalance: 0.8,          // Stop at 80% imbalance
+
+            // Layer 1: Oracle
+            oracle_sensitivity: 5.0,     // 5x multiplier on oracle distance %
+
+            // Layer 2: Adverse Selection
+            base_spread: 0.02,           // 2c base spread
+            p_informed_base: 0.2,        // 20% base informed probability
+            time_decay_minutes: 5.0,     // 5 minute time constant
+
+            // Layer 3: Inventory Skew
+            gamma_inv: 1.5,              // Offset multiplier sensitivity
+            lambda_size: 1.5,            // Size decay sensitivity
+
+            // Layer 4: Edge Check
+            edge_threshold: 0.01,        // Minimum 1c edge required
         }
     }
 }

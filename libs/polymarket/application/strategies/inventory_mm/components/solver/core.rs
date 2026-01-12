@@ -9,27 +9,16 @@ use super::diff::diff_orders;
 
 /// Main solver function.
 ///
-/// Quotes are market-based with profitability caps. Risk is managed via:
-/// - Profitability cap: limits bids to prices that maintain profitable merge
-/// - Offset mechanism: increases when imbalanced, making bids less aggressive
-/// - Max imbalance threshold: stops quoting entirely when too imbalanced
-/// - Skew sizing: reduces size on overweight side
+/// Implements 4-layer quoting framework (O'Hara Market Microstructure):
+/// - Layer 1: Oracle-adjusted offset (react to oracle price vs threshold)
+/// - Layer 2: Adverse selection (widen spread near resolution)
+/// - Layer 3: Inventory skew (adjust offset/size based on imbalance)
+/// - Layer 4: Edge check (skip quotes with insufficient edge)
 pub fn solve(input: &SolverInput) -> SolverOutput {
     let mut output = SolverOutput::new();
 
-    let delta = input.inventory.imbalance();
-
-    // 1. Calculate desired quote ladder for both sides
-    // Quotes are capped at profitability limits
-    let ladder = calculate_quotes(
-        delta,
-        &input.up_orderbook,
-        &input.down_orderbook,
-        &input.inventory,
-        &input.config,
-        &input.up_token_id,
-        &input.down_token_id,
-    );
+    // 1. Calculate desired quote ladder using 4-layer framework
+    let ladder = calculate_quotes(input);
 
     // 2. Diff Up orders: current vs desired
     let (cancel_up, place_up) = diff_orders(
@@ -89,6 +78,8 @@ mod tests {
                 best_ask_is_ours: false,
             },
             config: SolverConfig::default(),
+            oracle_distance_pct: 0.0,      // Neutral oracle
+            minutes_to_resolution: 7.5,    // Mid-market
         }
     }
 

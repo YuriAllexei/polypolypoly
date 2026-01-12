@@ -16,9 +16,12 @@ use super::types::{
     SolverInput, InventorySnapshot, OrderbookSnapshot, OrderSnapshot, OpenOrder,
 };
 use crate::application::strategies::traits::{Strategy, StrategyContext, StrategyResult, StrategyError};
+use crate::application::strategies::up_or_down::{CryptoAsset, Timeframe};
+use crate::application::strategies::up_or_down::services::get_price_to_beat;
 use crate::infrastructure::{
     spawn_order_reconciliation_task, spawn_position_reconciliation_task, ReconciliationConfig,
     SharedOrderbooks, SharedOrderState, SharedPositionTracker, UserOrderStatus as OrderStatus,
+    spawn_oracle_trackers, SharedOraclePrices,
 };
 
 /// Maximum markets to fetch per category from DB
@@ -39,6 +42,9 @@ pub struct InventoryMMStrategy {
     // Reconciliation task handles
     reconciliation_handle: Option<JoinHandle<()>>,
     order_reconciliation_handle: Option<JoinHandle<()>>,
+
+    // Oracle prices (ChainLink for 15-min markets)
+    oracle_prices: Option<SharedOraclePrices>,
 }
 
 impl InventoryMMStrategy {
@@ -50,6 +56,7 @@ impl InventoryMMStrategy {
             tracked_markets: HashSet::new(),
             reconciliation_handle: None,
             order_reconciliation_handle: None,
+            oracle_prices: None,
         }
     }
 
@@ -228,6 +235,25 @@ impl InventoryMMStrategy {
             }
             *count += 1;
 
+            // Fetch price_to_beat (threshold) from Polymarket API
+            // This is the opening price used to determine UP/DOWN resolution
+            let threshold = match self.fetch_threshold(&symbol, &timeframe, &market).await {
+                Ok(price) => {
+                    info!(
+                        "[InventoryMM] Fetched threshold for {} {}: ${}",
+                        symbol, timeframe, price
+                    );
+                    price
+                }
+                Err(e) => {
+                    warn!(
+                        "[InventoryMM] Failed to fetch threshold for {} {}: {}. Using 0.0 (neutral oracle).",
+                        symbol, timeframe, e
+                    );
+                    0.0
+                }
+            };
+
             result.push(MarketInfo::new(
                 market.id.clone(),
                 condition_id,
@@ -236,10 +262,41 @@ impl InventoryMMStrategy {
                 end_date,
                 symbol,
                 timeframe,
+                threshold,
             ));
         }
 
         Ok(result)
+    }
+
+    /// Fetch the price_to_beat (threshold) for a market from Polymarket API.
+    /// This is the opening price used to determine UP/DOWN resolution.
+    async fn fetch_threshold(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+        market: &crate::domain::DbMarket,
+    ) -> anyhow::Result<f64> {
+        // Parse symbol to CryptoAsset
+        let crypto_asset = match symbol.to_uppercase().as_str() {
+            "BTC" => CryptoAsset::Bitcoin,
+            "ETH" => CryptoAsset::Ethereum,
+            "SOL" => CryptoAsset::Solana,
+            "XRP" => CryptoAsset::Xrp,
+            _ => return Err(anyhow::anyhow!("Unknown crypto asset: {}", symbol)),
+        };
+
+        // Parse timeframe to Timeframe enum
+        let tf = match timeframe.to_uppercase().as_str() {
+            "15M" => Timeframe::FifteenMin,
+            "1H" | "1HR" => Timeframe::OneHour,
+            "4H" | "4HR" => Timeframe::FourHour,
+            "DAILY" | "1D" => Timeframe::Daily,
+            _ => return Err(anyhow::anyhow!("Unknown timeframe: {}", timeframe)),
+        };
+
+        // Call the shared get_price_to_beat function
+        get_price_to_beat(tf, crypto_asset, market).await
     }
 }
 
@@ -312,12 +369,32 @@ impl Strategy for InventoryMMStrategy {
             warn!("[InventoryMM] Order reconciliation task already running, skipping spawn");
         }
 
+        // Spawn oracle price trackers (ChainLink + Binance)
+        if self.oracle_prices.is_none() {
+            info!("[InventoryMM] Starting oracle price trackers");
+            match spawn_oracle_trackers(ctx.shutdown_flag.clone()).await {
+                Ok(oracle_prices) => {
+                    self.oracle_prices = Some(oracle_prices);
+                    info!("[InventoryMM] Oracle price trackers started successfully");
+                }
+                Err(e) => {
+                    warn!("[InventoryMM] Failed to start oracle trackers: {}. Quoting will use neutral oracle.", e);
+                }
+            }
+        } else {
+            warn!("[InventoryMM] Oracle trackers already running, skipping spawn");
+        }
+
         info!("[InventoryMM] Strategy initialized");
         Ok(())
     }
 
     async fn start(&mut self, ctx: &StrategyContext) -> StrategyResult<()> {
         info!("[InventoryMM] Starting strategy");
+
+        // Require oracle prices for 4-layer quoting
+        let oracle_prices = self.oracle_prices.clone()
+            .ok_or_else(|| StrategyError::Config("Oracle prices not initialized. Call initialize() first.".to_string()))?;
 
         // Build shared context for quoters
         // NOTE: Each quoter will spawn its own executor thread
@@ -326,6 +403,7 @@ impl Strategy for InventoryMMStrategy {
             ctx.order_state.clone(),
             ctx.position_tracker.clone(),
             ctx.shutdown_flag.clone(),
+            oracle_prices,
         );
 
         let poll_interval = Duration::from_secs(self.config.poll_interval_secs);
@@ -508,6 +586,8 @@ pub fn extract_solver_input(
         up_orderbook,
         down_orderbook,
         config: config.solver.clone(),
+        oracle_distance_pct: 0.0,      // Default neutral for testing
+        minutes_to_resolution: 7.5,    // Default mid-market for testing
     }
 }
 

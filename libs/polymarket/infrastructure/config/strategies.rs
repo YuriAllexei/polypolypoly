@@ -632,14 +632,16 @@ impl StrategiesConfig {
             "  Tick interval: {} ms",
             self.inventory_mm.tick_interval_ms
         );
-        info!("  Solver config:");
+        info!("  Solver config (4-layer quoter):");
         info!("    Num levels: {}", self.inventory_mm.solver.num_levels);
         info!("    Order size: {:.1}", self.inventory_mm.solver.order_size);
-        info!("    Base offset: {:.3}", self.inventory_mm.solver.base_offset);
+        info!("    Base spread: {:.3}", self.inventory_mm.solver.base_spread);
         info!("    Max imbalance: {:.1}%", self.inventory_mm.solver.max_imbalance * 100.0);
         info!("    Max position: {:.1} (0=unlimited)", self.inventory_mm.solver.max_position);
-        info!("    Skew factor: {:.1}", self.inventory_mm.solver.skew_factor);
-        info!("    Offset scaling: {:.1}", self.inventory_mm.solver.offset_scaling);
+        info!("    Oracle sensitivity: {:.1}", self.inventory_mm.solver.oracle_sensitivity);
+        info!("    Gamma inv: {:.1}", self.inventory_mm.solver.gamma_inv);
+        info!("    Lambda size: {:.1}", self.inventory_mm.solver.lambda_size);
+        info!("    Time decay (min): {:.1}", self.inventory_mm.solver.time_decay_minutes);
     }
 }
 

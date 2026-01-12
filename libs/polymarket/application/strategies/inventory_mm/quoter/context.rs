@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
-use crate::infrastructure::{SharedOrderState, SharedPositionTracker};
+use crate::infrastructure::{SharedOrderState, SharedPositionTracker, SharedOraclePrices};
 use crate::infrastructure::client::clob::TradingClient;
 
 /// Information about a specific market that a Quoter is managing.
@@ -24,6 +24,9 @@ pub struct MarketInfo {
     pub symbol: String,
     /// Timeframe (e.g., "15m", "1hr")
     pub timeframe: String,
+    /// Price threshold (price_to_beat) for the market question
+    /// e.g., $97,000 for "Will BTC be above $97,000?"
+    pub threshold: f64,
 }
 
 impl MarketInfo {
@@ -35,6 +38,7 @@ impl MarketInfo {
         end_time: DateTime<Utc>,
         symbol: String,
         timeframe: String,
+        threshold: f64,
     ) -> Self {
         Self {
             market_id,
@@ -44,6 +48,7 @@ impl MarketInfo {
             end_time,
             symbol,
             timeframe,
+            threshold,
         }
     }
 
@@ -73,6 +78,8 @@ pub struct QuoterContext {
     pub position_tracker: SharedPositionTracker,
     /// Shutdown flag for graceful termination
     pub shutdown_flag: Arc<AtomicBool>,
+    /// Shared oracle prices (ChainLink + Binance feeds)
+    pub oracle_prices: SharedOraclePrices,
 }
 
 impl QuoterContext {
@@ -81,12 +88,14 @@ impl QuoterContext {
         order_state: SharedOrderState,
         position_tracker: SharedPositionTracker,
         shutdown_flag: Arc<AtomicBool>,
+        oracle_prices: SharedOraclePrices,
     ) -> Self {
         Self {
             trading,
             order_state,
             position_tracker,
             shutdown_flag,
+            oracle_prices,
         }
     }
 
@@ -112,6 +121,7 @@ mod tests {
             past,
             "BTC".to_string(),
             "15m".to_string(),
+            97000.0,
         );
         assert!(expired_market.is_expired());
 
@@ -123,6 +133,7 @@ mod tests {
             future,
             "ETH".to_string(),
             "1hr".to_string(),
+            3500.0,
         );
         assert!(!active_market.is_expired());
     }
@@ -137,6 +148,7 @@ mod tests {
             Utc::now(),
             "BTC".to_string(),
             "15m".to_string(),
+            97000.0,
         );
         assert_eq!(market.short_desc(), "BTC 15m (0x123456)");
     }

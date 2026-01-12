@@ -89,8 +89,8 @@ impl InventoryMMConfig {
         self
     }
 
-    pub fn with_base_offset(mut self, base_offset: f64) -> Self {
-        self.solver.base_offset = base_offset;
+    pub fn with_base_spread(mut self, base_spread: f64) -> Self {
+        self.solver.base_spread = base_spread;
         self
     }
 
@@ -104,8 +104,13 @@ impl InventoryMMConfig {
         self
     }
 
-    pub fn with_skew_factor(mut self, skew_factor: f64) -> Self {
-        self.solver.skew_factor = skew_factor;
+    pub fn with_gamma_inv(mut self, gamma_inv: f64) -> Self {
+        self.solver.gamma_inv = gamma_inv;
+        self
+    }
+
+    pub fn with_lambda_size(mut self, lambda_size: f64) -> Self {
+        self.solver.lambda_size = lambda_size;
         self
     }
 
