@@ -1,0 +1,29 @@
+# Default quoter parameters for Polymarket 15-minute binary markets
+# These values are starting points - use `model-tuning tune` to optimize
+
+quoter:
+  # Layer 1: Oracle-Adjusted Offset
+  # How much the oracle price affects quote aggressiveness
+  oracle_sensitivity: 5.0
+
+  # Layer 2: Adverse Selection (Glosten-Milgrom)
+  # Base offset from best ask (2 cents)
+  base_spread: 0.02
+  # Base probability of informed trader (20%)
+  p_informed_base: 0.2
+  # Time constant for adverse selection decay
+  time_decay_minutes: 5.0
+
+  # Layer 3: Inventory Skew
+  # How much imbalance affects spread multiplier
+  gamma_inv: 0.5
+  # How much imbalance affects order size
+  lambda_size: 1.0
+  # Base order size when balanced
+  base_size: 50.0
+
+  # Layer 4: Edge Check
+  # Minimum edge required to quote (1 cent)
+  edge_threshold: 0.01
+  # Minimum offset from best ask (1 cent)
+  min_offset: 0.01

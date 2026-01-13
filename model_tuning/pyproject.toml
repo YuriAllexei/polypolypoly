@@ -1,0 +1,74 @@
+[tool.poetry]
+name = "model-tuning"
+version = "0.1.0"
+description = "Market-making quoter model tuning for Polymarket binary markets"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "model_tuning", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pydantic = "^2.0"
+numpy = ">=1.26,<3"
+pandas = "^2.0"
+optuna = "^3.0"
+typer = {extras = ["all"], version = "^0.12"}
+pyyaml = "^6.0"
+rich = "^13.0"
+click = ">=8.0.0,<8.2"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+pytest-cov = "^5.0"
+ruff = "^0.8"
+mypy = "^1.0"
+pre-commit = "^4.0"
+pandas-stubs = "^2.0"
+
+[tool.poetry.scripts]
+model-tuning = "model_tuning.cli.main:app"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "ARG",    # flake8-unused-arguments
+    "SIM",    # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # do not perform function calls in argument defaults
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["model_tuning"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["optuna.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"

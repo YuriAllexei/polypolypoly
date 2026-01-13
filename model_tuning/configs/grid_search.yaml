@@ -1,0 +1,28 @@
+# Grid Search Configuration
+#
+# Define parameter values to test in an exhaustive grid search.
+# Total combinations = product of all grid parameter counts.
+#
+# Example: 3 x 4 x 3 x 3 = 108 combinations
+
+# Parameters to vary (each combination will be tested)
+grid:
+  # Layer 2: Adverse Selection
+  base_spread: [0.01, 0.02, 0.03]  # Base offset from best ask
+
+  # Layer 3: Inventory Skew
+  gamma_inv: [0.3, 0.5, 0.7, 1.0]  # Spread multiplier sensitivity
+
+  # Layer 1: Oracle
+  oracle_sensitivity: [3.0, 5.0, 10.0]  # Cents per 1% price difference
+
+  # Layer 4: Edge Check
+  edge_threshold: [0.005, 0.01, 0.02]  # Minimum edge to quote
+
+# Parameters to hold constant (not varied in grid)
+fixed:
+  p_informed_base: 0.2  # Base informed trader probability
+  time_decay_minutes: 5.0  # Time constant for adverse selection
+  lambda_size: 1.0  # Size adjustment sensitivity
+  base_size: 50.0  # Base order size
+  min_offset: 0.01  # Minimum offset from ask
