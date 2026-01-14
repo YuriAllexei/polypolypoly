@@ -9,9 +9,9 @@ pub mod types;
 pub mod quoter;
 
 // Re-exports for convenience
-pub use config::{InventoryMMConfig, MarketSpec};
+pub use config::{InventoryMMConfig, MarketSpec, DataLoggingConfig};
 pub use strategy::{InventoryMMStrategy, extract_solver_input};
-pub use components::{solve, Executor, ExecutorHandle, QuoterExecutorHandle, Merger, MergerConfig, MergeDecision};
+pub use components::{solve, Executor, ExecutorHandle, QuoterExecutorHandle, Merger, MergerConfig, MergeDecision, MarketDataLogger, MarketTick};
 pub use types::{
     SolverInput, SolverOutput, SolverConfig,
     InventorySnapshot, OrderbookSnapshot, OrderSnapshot, OpenOrder,

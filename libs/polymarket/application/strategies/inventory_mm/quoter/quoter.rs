@@ -16,10 +16,12 @@ use crate::application::strategies::inventory_mm::components::{
     solve, Merger, MergerConfig, InFlightTracker, OpenOrderInfo, ExecutorError,
     TakerTask, TakerConfig, price_to_key,
     Executor, ExecutorHandle, QuoterExecutorHandle,
+    MarketDataLogger, MarketTick,
 };
 use crate::application::strategies::inventory_mm::types::{
     SolverInput, SolverOutput, SolverConfig, InventorySnapshot, OrderbookSnapshot, OrderSnapshot, OpenOrder,
 };
+use crate::application::strategies::inventory_mm::config::DataLoggingConfig;
 use crate::infrastructure::{parse_timestamp_to_i64, SharedOrderbooks, UserOrderStatus as OrderStatus, OracleType};
 use chrono::Utc;
 
@@ -65,6 +67,12 @@ pub struct Quoter {
     executor_handle: Option<ExecutorHandle>,
     /// Per-market executor (for operations) - spawned in run()
     executor: Option<QuoterExecutorHandle>,
+    /// Data logging config (for backtesting CSV export)
+    data_logging_config: DataLoggingConfig,
+    /// Data logger instance (created in run() if enabled)
+    data_logger: Option<MarketDataLogger>,
+    /// Dry-run mode: log data but don't execute any orders
+    dry_run: bool,
 }
 
 impl Quoter {
@@ -77,6 +85,7 @@ impl Quoter {
         snapshot_timeout_secs: u64,
         merge_cooldown_secs: u64,
         ctx: QuoterContext,
+        data_logging_config: DataLoggingConfig,
     ) -> Self {
         Self {
             market,
@@ -93,6 +102,9 @@ impl Quoter {
             last_logged_delta: None,
             executor_handle: None,  // Spawned in run()
             executor: None,         // Spawned in run()
+            dry_run: data_logging_config.dry_run,
+            data_logging_config,
+            data_logger: None,      // Created in run() if enabled
         }
     }
 
@@ -117,7 +129,30 @@ impl Quoter {
         let market_desc = self.market.short_desc();
         info!("[Quoter:{}] Starting with {}ms tick interval", market_desc, self.tick_interval_ms);
 
-        // 0. Spawn per-market executor (own thread for order execution)
+        // 0. Initialize data logger if enabled
+        if self.data_logging_config.enabled {
+            match MarketDataLogger::new(
+                &self.data_logging_config.output_dir,
+                &self.market.symbol,
+                &self.market.timeframe,
+                &self.market.market_id,
+            ) {
+                Ok(logger) => {
+                    info!("[Quoter:{}] Data logging enabled: {:?}", market_desc, logger.file_path());
+                    self.data_logger = Some(logger);
+                }
+                Err(e) => {
+                    warn!("[Quoter:{}] Failed to create data logger: {}", market_desc, e);
+                }
+            }
+        }
+
+        // Log dry-run mode if enabled
+        if self.dry_run {
+            info!("[Quoter:{}] DRY-RUN MODE: Collecting data only, no orders will be placed", market_desc);
+        }
+
+        // 1. Spawn per-market executor (own thread for order execution)
         // This ensures markets don't block each other during execution
         let executor_handle = Executor::spawn_with_order_state(
             Arc::clone(&self.ctx.trading),
@@ -198,6 +233,18 @@ impl Quoter {
 
             // Build input from shared state
             let input = self.extract_input();
+
+            // Log market tick data if data logging is enabled
+            if self.data_logger.is_some() {
+                let oracle_price = self.get_oracle_price();
+                let threshold = self.market.threshold;
+                if let Some(ref mut logger) = self.data_logger {
+                    let tick = MarketTick::from_input(&input, oracle_price, threshold);
+                    if let Err(e) = logger.log_tick(&tick) {
+                        warn!("[Quoter:{}] Failed to log tick: {}", market_desc, e);
+                    }
+                }
+            }
 
             // Log strategy state only when delta changes significantly (reduces spam)
             let delta = input.inventory.imbalance();
@@ -389,6 +436,15 @@ impl Quoter {
         0.0 // Default to neutral if no oracle data
     }
 
+    /// Get current oracle price (for data logging).
+    fn get_oracle_price(&self) -> f64 {
+        let prices = self.ctx.oracle_prices.read();
+        if let Some(entry) = prices.get_price(OracleType::ChainLink, &self.market.symbol) {
+            return entry.value;
+        }
+        self.market.threshold // Fallback to threshold if no oracle data
+    }
+
     /// Get minutes remaining until market resolution.
     fn get_minutes_to_resolution(&self) -> f64 {
         let now = Utc::now();
@@ -397,6 +453,18 @@ impl Quoter {
     }
 
     fn tick(&mut self, input: &SolverInput) -> (Option<SolverOutput>, TickResult) {
+        // DRY-RUN MODE: Skip all order execution, just log what would happen
+        if self.dry_run {
+            let output = solve(input);
+            debug!(
+                "[Quoter:{}] DRY-RUN: Would place {} orders, cancel {}",
+                self.market.short_desc(),
+                output.limit_orders.len(),
+                output.cancellations.len()
+            );
+            return (Some(output), TickResult::Continue);
+        }
+
         // NUCLEAR CANCEL: If orders are severely out of sync, cancel ALL for the token.
         // This handles cases where individual cancellations aren't keeping up.
         // Note: We cap PRICE LEVELS to num_levels, but allow multiple orders per level.
@@ -853,6 +921,16 @@ impl Quoter {
         if let Some(client) = ws_client {
             if let Err(e) = client.shutdown().await {
                 warn!("[Quoter:{}] Failed to shutdown WebSocket: {}", market_desc, e);
+            }
+        }
+
+        // Close data logger if enabled
+        if let Some(logger) = self.data_logger.take() {
+            let tick_count = logger.tick_count();
+            if let Err(e) = logger.close() {
+                warn!("[Quoter:{}] Failed to close data logger: {}", market_desc, e);
+            } else {
+                info!("[Quoter:{}] Data logger closed ({} ticks)", market_desc, tick_count);
             }
         }
 

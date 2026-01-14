@@ -1,0 +1,10 @@
+quoter:
+  base_size: 147.78790016965087
+  base_spread: 0.04787967867677593
+  edge_threshold: 0.018594581568291416
+  gamma_inv: 0.5415112502990191
+  lambda_size: 2.097694378749043
+  min_offset: 0.022994980821741503
+  oracle_sensitivity: 1.1193233024891396
+  p_informed_base: 0.4106344206696741
+  time_decay_minutes: 8.010000042772184

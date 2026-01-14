@@ -197,6 +197,30 @@ pub struct SolverConfig {
     /// Maximum imbalance before stopping quotes on overweight side
     pub max_imbalance: f64,
 
+    /// Maximum inventory delta (absolute difference between UP and DOWN tokens)
+    /// When |up_qty - down_qty| exceeds this, stop quoting the overweight side
+    /// This is a HARD LIMIT on directional exposure. Set to 0.0 for unlimited.
+    pub max_delta: f64,
+
+    // ═══════════════════════════════════════════════════════════════
+    // DEFENSIVE LAYERS
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Maximum combined average cost (quote_price + other_side_avg).
+    /// Block quotes that would exceed this ceiling.
+    /// Set to 0.0 to disable. Default: 0.93 (7% minimum margin)
+    pub max_combined_avg: f64,
+
+    /// Enable profitable imbalance check.
+    /// When imbalanced, ensure the overweight side is profitable if it wins.
+    /// Default: true
+    pub profitable_imbalance_check: bool,
+
+    /// Minimum minutes to resolution before stopping all quotes.
+    /// In final minutes, adverse selection is extreme - stop quoting entirely.
+    /// Set to 0.0 to disable. Default: 4.0 minutes
+    pub min_minutes_to_quote: f64,
+
     // ═══════════════════════════════════════════════════════════════
     // LAYER 1: ORACLE-ADJUSTED OFFSET
     // ═══════════════════════════════════════════════════════════════
@@ -255,6 +279,12 @@ impl Default for SolverConfig {
             min_offset: 0.01,            // Min 1c offset
             max_position: 0.0,           // 0 = unlimited
             max_imbalance: 0.8,          // Stop at 80% imbalance
+            max_delta: 30.0,             // Stop quoting overweight side at 30 token delta
+
+            // Defensive Layers
+            max_combined_avg: 0.93,          // Block if quote_price + other_avg > 93%
+            profitable_imbalance_check: true, // Enable profitable imbalance check
+            min_minutes_to_quote: 4.0,       // Stop quoting in final 4 minutes
 
             // Layer 1: Oracle
             oracle_sensitivity: 5.0,     // 5x multiplier on oracle distance %

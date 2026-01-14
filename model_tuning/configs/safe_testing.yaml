@@ -1,0 +1,20 @@
+# Safe testing config - matches config/strategies_config.yaml
+# Conservative values for initial live testing
+
+quoter:
+  # Layer 1: Oracle-Adjusted Offset
+  oracle_sensitivity: 3.0  # Lower sensitivity for safety
+
+  # Layer 2: Adverse Selection
+  base_spread: 0.03        # Wider base spread (3c vs 2c)
+  p_informed_base: 0.2
+  time_decay_minutes: 5.0
+
+  # Layer 3: Inventory Skew
+  gamma_inv: 1.0           # Lower to avoid hitting 0.1 floor
+  lambda_size: 1.0
+  base_size: 10.0          # Small size for testing
+
+  # Layer 4: Edge Check
+  edge_threshold: 0.02     # Require 2c edge
+  min_offset: 0.01

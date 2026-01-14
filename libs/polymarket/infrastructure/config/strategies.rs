@@ -637,6 +637,7 @@ impl StrategiesConfig {
         info!("    Order size: {:.1}", self.inventory_mm.solver.order_size);
         info!("    Base spread: {:.3}", self.inventory_mm.solver.base_spread);
         info!("    Max imbalance: {:.1}%", self.inventory_mm.solver.max_imbalance * 100.0);
+        info!("    Max delta: {:.0} tokens (0=unlimited)", self.inventory_mm.solver.max_delta);
         info!("    Max position: {:.1} (0=unlimited)", self.inventory_mm.solver.max_position);
         info!("    Oracle sensitivity: {:.1}", self.inventory_mm.solver.oracle_sensitivity);
         info!("    Gamma inv: {:.1}", self.inventory_mm.solver.gamma_inv);

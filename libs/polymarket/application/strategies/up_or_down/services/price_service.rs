@@ -21,7 +21,10 @@ use tracing::{debug, info};
 #[derive(Debug, Deserialize)]
 struct CryptoPriceResponse {
     #[serde(rename = "openPrice")]
-    open_price: f64,
+    open_price: Option<f64>,
+    /// True when the market just started and price isn't recorded yet
+    #[serde(default)]
+    incomplete: bool,
 }
 
 // =============================================================================
@@ -110,7 +113,18 @@ pub async fn get_price_to_beat(
             if status == 200 {
                 let data: CryptoPriceResponse = serde_json::from_str(&response_body)
                     .map_err(|e| format!("Failed to parse response: {} - body: {}", e, response_body))?;
-                Ok(data.open_price)
+
+                // Handle null openPrice (market just started, price not recorded yet)
+                match data.open_price {
+                    Some(price) => Ok(price),
+                    None => {
+                        if data.incomplete {
+                            Err("Market just started - openPrice not yet recorded (incomplete=true). Retry in a few seconds.".to_string())
+                        } else {
+                            Err(format!("API returned null openPrice - body: {}", response_body))
+                        }
+                    }
+                }
             } else {
                 Err(format!("API returned error status {}: {}", status, response_body))
             }

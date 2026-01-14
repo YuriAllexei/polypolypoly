@@ -78,6 +78,7 @@ services:
       - STRATEGIES_CONFIG_PATH=${STRATEGIES_CONFIG_PATH:-/etc/polymarket/strategies_config.yaml}
     volumes:
       - ./config/strategies_config.yaml:/etc/polymarket/strategies_config.yaml
+      - ./data:/usr/local/bin/data
 
   postgres:
     image: postgres:16-alpine

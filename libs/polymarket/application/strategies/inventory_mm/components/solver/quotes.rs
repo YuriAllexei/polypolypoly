@@ -26,6 +26,19 @@ pub fn calculate_quotes(input: &SolverInput) -> QuoteLadder {
     let config = &input.config;
     let mut ladder = QuoteLadder::new();
 
+    // ═══════════════════════════════════════════════════════════════
+    // DEFENSIVE LAYER 4: TIME GUARD
+    // Stop all quoting in final minutes when adverse selection peaks
+    // ═══════════════════════════════════════════════════════════════
+    if config.min_minutes_to_quote > 0.0 && input.minutes_to_resolution < config.min_minutes_to_quote {
+        info!(
+            "[Solver] Time guard: {:.1} min < {:.1} min threshold, stopping all quotes",
+            input.minutes_to_resolution,
+            config.min_minutes_to_quote
+        );
+        return ladder;
+    }
+
     // Calculate inventory imbalance: (up - down) / (up + down)
     let q = input.inventory.imbalance();
 
@@ -99,13 +112,120 @@ pub fn calculate_quotes(input: &SolverInput) -> QuoteLadder {
     );
 
     // ═══════════════════════════════════════════════════════════════
-    // SKIP LOGIC: Max imbalance and position limits
+    // SKIP LOGIC: Max imbalance, delta limits, and position limits
     // ═══════════════════════════════════════════════════════════════
     let is_building_up_from_scratch = input.inventory.up_size.abs() < config.order_size;
     let is_building_down_from_scratch = input.inventory.down_size.abs() < config.order_size;
 
     let mut skip_up = q >= config.max_imbalance && !is_building_up_from_scratch;
     let mut skip_down = q <= -config.max_imbalance && !is_building_down_from_scratch;
+
+    // ═══════════════════════════════════════════════════════════════
+    // DELTA-BASED SKIP: Hard limit on directional exposure
+    // Stop quoting the overweight side when absolute delta exceeds limit
+    // This prevents accumulating too much of one side regardless of %
+    // ═══════════════════════════════════════════════════════════════
+    if config.max_delta > 0.0 {
+        let delta = input.inventory.up_size - input.inventory.down_size;
+
+        if delta > config.max_delta {
+            // Too much UP, stop UP quotes to let DOWN catch up
+            skip_up = true;
+            info!(
+                "[Solver] Delta limit: UP-DOWN={:.0} > {:.0}, skipping UP",
+                delta, config.max_delta
+            );
+        } else if delta < -config.max_delta {
+            // Too much DOWN, stop DOWN quotes to let UP catch up
+            skip_down = true;
+            info!(
+                "[Solver] Delta limit: UP-DOWN={:.0} < -{:.0}, skipping DOWN",
+                delta, config.max_delta
+            );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // DEFENSIVE LAYER 1: COMBINED COST CEILING
+    // Block quotes where marginal cost + other side avg is too high
+    // Uses 0.50 as effective_avg when no position on other side
+    // ═══════════════════════════════════════════════════════════════
+    if config.max_combined_avg > 0.0 {
+        // Effective avg for each side (use 0.50 if no position)
+        let down_eff_avg = if input.inventory.down_size.abs() < 1e-9 {
+            0.50
+        } else {
+            input.inventory.down_avg_price
+        };
+        let up_eff_avg = if input.inventory.up_size.abs() < 1e-9 {
+            0.50
+        } else {
+            input.inventory.up_avg_price
+        };
+
+        // Check UP quotes: UP bid price + DOWN avg > ceiling?
+        if let Some(up_bid) = input.up_orderbook.best_bid_price() {
+            let combined = up_bid + down_eff_avg;
+            if combined > config.max_combined_avg {
+                skip_up = true;
+                info!(
+                    "[Solver] Combined ceiling: UP {:.2} + DOWN_avg {:.2} = {:.2} > {:.2}, skipping UP",
+                    up_bid, down_eff_avg, combined, config.max_combined_avg
+                );
+            }
+        }
+
+        // Check DOWN quotes: DOWN bid price + UP avg > ceiling?
+        if let Some(down_bid) = input.down_orderbook.best_bid_price() {
+            let combined = down_bid + up_eff_avg;
+            if combined > config.max_combined_avg {
+                skip_down = true;
+                info!(
+                    "[Solver] Combined ceiling: DOWN {:.2} + UP_avg {:.2} = {:.2} > {:.2}, skipping DOWN",
+                    down_bid, up_eff_avg, combined, config.max_combined_avg
+                );
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // DEFENSIVE LAYER 3: PROFITABLE IMBALANCE CHECK
+    // Ensure imbalance is profitable if overweight side wins
+    // If more DOWN: max_down_avg = 1 - (up_qty/down_qty) * up_avg
+    // If more UP: max_up_avg = 1 - (down_qty/up_qty) * down_avg
+    // ═══════════════════════════════════════════════════════════════
+    if config.profitable_imbalance_check {
+        let up_qty = input.inventory.up_size.abs();
+        let down_qty = input.inventory.down_size.abs();
+
+        // More DOWN than UP - check if DOWN avg is too high
+        if down_qty > up_qty && down_qty > 1e-9 {
+            let up_avg = if up_qty < 1e-9 { 0.0 } else { input.inventory.up_avg_price };
+            let max_down_avg = 1.0 - (up_qty / down_qty) * up_avg;
+
+            if input.inventory.down_avg_price > max_down_avg {
+                skip_down = true;
+                info!(
+                    "[Solver] Unprofitable imbalance: DOWN_avg {:.3} > breakeven {:.3}, skipping DOWN",
+                    input.inventory.down_avg_price, max_down_avg
+                );
+            }
+        }
+
+        // More UP than DOWN - check if UP avg is too high
+        if up_qty > down_qty && up_qty > 1e-9 {
+            let down_avg = if down_qty < 1e-9 { 0.0 } else { input.inventory.down_avg_price };
+            let max_up_avg = 1.0 - (down_qty / up_qty) * down_avg;
+
+            if input.inventory.up_avg_price > max_up_avg {
+                skip_up = true;
+                info!(
+                    "[Solver] Unprofitable imbalance: UP_avg {:.3} > breakeven {:.3}, skipping UP",
+                    input.inventory.up_avg_price, max_up_avg
+                );
+            }
+        }
+    }
 
     // Position limits
     if config.max_position > 0.0 {
@@ -264,7 +384,14 @@ mod tests {
     };
 
     fn default_config() -> SolverConfig {
-        SolverConfig::default()
+        SolverConfig {
+            // Disable defensive layers for backward-compatible tests
+            max_combined_avg: 0.0,           // Disabled
+            profitable_imbalance_check: false, // Disabled
+            min_minutes_to_quote: 0.0,       // Disabled
+            max_delta: 0.0,                  // Disabled for tests
+            ..SolverConfig::default()
+        }
     }
 
     fn default_input() -> SolverInput {
@@ -576,5 +703,126 @@ mod tests {
                 input.config.edge_threshold
             );
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // DEFENSIVE LAYER TESTS
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_time_guard_blocks_near_resolution() {
+        let mut input = default_input();
+        input.minutes_to_resolution = 3.0; // Less than 4.0 threshold
+        input.config.min_minutes_to_quote = 4.0;
+
+        let ladder = calculate_quotes(&input);
+
+        assert!(ladder.up_quotes.is_empty(), "Time guard should block UP");
+        assert!(ladder.down_quotes.is_empty(), "Time guard should block DOWN");
+    }
+
+    #[test]
+    fn test_time_guard_allows_when_enough_time() {
+        let mut input = default_input();
+        input.minutes_to_resolution = 5.0; // More than 4.0 threshold
+        input.config.min_minutes_to_quote = 4.0;
+
+        let ladder = calculate_quotes(&input);
+
+        // Should have quotes when above time threshold
+        assert!(!ladder.up_quotes.is_empty() || !ladder.down_quotes.is_empty(),
+            "Should have quotes when above time threshold");
+    }
+
+    #[test]
+    fn test_combined_ceiling_blocks_expensive() {
+        let mut input = default_input();
+        // Set up a scenario where combined cost exceeds ceiling
+        input.inventory.up_avg_price = 0.55;
+        input.inventory.down_avg_price = 0.50;
+        input.up_orderbook.best_bid = Some((0.50, 100.0)); // 0.50 + 0.50 = 1.00 > 0.93
+        input.down_orderbook.best_bid = Some((0.45, 100.0)); // 0.45 + 0.55 = 1.00 > 0.93
+        input.config.max_combined_avg = 0.93;
+
+        let ladder = calculate_quotes(&input);
+
+        assert!(ladder.up_quotes.is_empty(), "Combined ceiling should block UP");
+        assert!(ladder.down_quotes.is_empty(), "Combined ceiling should block DOWN");
+    }
+
+    #[test]
+    fn test_combined_ceiling_allows_cheap() {
+        let mut input = default_input();
+        // Set up a scenario where combined cost is under ceiling
+        input.inventory.up_avg_price = 0.40;
+        input.inventory.down_avg_price = 0.40;
+        input.up_orderbook.best_bid = Some((0.50, 100.0)); // 0.50 + 0.40 = 0.90 < 0.93
+        input.up_orderbook.best_ask = Some((0.55, 100.0));
+        input.down_orderbook.best_bid = Some((0.50, 100.0)); // 0.50 + 0.40 = 0.90 < 0.93
+        input.down_orderbook.best_ask = Some((0.55, 100.0));
+        input.config.max_combined_avg = 0.93;
+
+        let ladder = calculate_quotes(&input);
+
+        assert!(!ladder.up_quotes.is_empty(), "Should allow UP when under ceiling");
+        assert!(!ladder.down_quotes.is_empty(), "Should allow DOWN when under ceiling");
+    }
+
+    #[test]
+    fn test_profitable_imbalance_blocks_bad_down_avg() {
+        let mut input = default_input();
+        // Heavy DOWN imbalance with bad DOWN avg
+        // max_down_avg = 1 - (up_qty/down_qty) * up_avg = 1 - (20/80) * 0.40 = 0.90
+        // down_avg = 0.95 > 0.90 => BLOCK
+        input.inventory.up_size = 20.0;
+        input.inventory.up_avg_price = 0.40;
+        input.inventory.down_size = 80.0;
+        input.inventory.down_avg_price = 0.95; // Too high!
+        input.config.profitable_imbalance_check = true;
+
+        let ladder = calculate_quotes(&input);
+
+        assert!(ladder.down_quotes.is_empty(), "Profitable imbalance should block DOWN");
+        // UP should still be allowed (we need to rebalance)
+        assert!(!ladder.up_quotes.is_empty(), "UP should be allowed for rebalancing");
+    }
+
+    #[test]
+    fn test_profitable_imbalance_allows_good_avg() {
+        let mut input = default_input();
+        // Heavy DOWN imbalance with good DOWN avg
+        // max_down_avg = 1 - (20/80) * 0.40 = 0.90
+        // down_avg = 0.50 < 0.90 => ALLOW
+        input.inventory.up_size = 20.0;
+        input.inventory.up_avg_price = 0.40;
+        input.inventory.down_size = 80.0;
+        input.inventory.down_avg_price = 0.50; // Good avg
+        input.config.profitable_imbalance_check = true;
+        // Need to allow high imbalance for this test
+        input.config.max_imbalance = 1.0; // Allow any imbalance
+
+        let ladder = calculate_quotes(&input);
+
+        // Both should be allowed
+        assert!(!ladder.up_quotes.is_empty(), "UP should be allowed");
+        assert!(!ladder.down_quotes.is_empty(), "DOWN should be allowed with good avg");
+    }
+
+    #[test]
+    fn test_no_position_uses_default_avg() {
+        let mut input = default_input();
+        // UP position exists, no DOWN position
+        input.inventory.up_size = 50.0;
+        input.inventory.up_avg_price = 0.55;
+        input.inventory.down_size = 0.0; // No DOWN
+        input.inventory.down_avg_price = 0.0;
+        // UP bid + default 0.50 = still needs to be checked
+        input.up_orderbook.best_bid = Some((0.45, 100.0)); // 0.45 + 0.50 = 0.95 > 0.93
+        input.config.max_combined_avg = 0.93;
+
+        let ladder = calculate_quotes(&input);
+
+        // Should use 0.50 default for down_eff_avg
+        assert!(ladder.up_quotes.is_empty(), "Should use default 0.50 avg and block");
     }
 }

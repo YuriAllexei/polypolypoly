@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
-use tracing::{info, warn, debug};
+use tracing::{info, warn, debug, error};
 
 use super::config::InventoryMMConfig;
 use super::quoter::{Quoter, QuoterContext, MarketInfo};
@@ -73,6 +73,7 @@ impl InventoryMMStrategy {
         let tick_interval_ms = self.config.tick_interval_ms;
         let snapshot_timeout_secs = self.config.snapshot_timeout_secs;
         let merge_cooldown_secs = self.config.merge_cooldown_secs;
+        let data_logging_config = self.config.data_logging.clone();
 
         // Register the token pair for this market (enables merge detection)
         ctx.position_tracker.write().register_token_pair(
@@ -95,6 +96,7 @@ impl InventoryMMStrategy {
                 snapshot_timeout_secs,
                 merge_cooldown_secs,
                 ctx,
+                data_logging_config,
             );
             quoter.run().await;
         });
@@ -237,6 +239,7 @@ impl InventoryMMStrategy {
 
             // Fetch price_to_beat (threshold) from Polymarket API
             // This is the opening price used to determine UP/DOWN resolution
+            // CRITICAL: Without threshold, oracle adjustment doesn't work - skip market if fetch fails
             let threshold = match self.fetch_threshold(&symbol, &timeframe, &market).await {
                 Ok(price) => {
                     info!(
@@ -246,11 +249,11 @@ impl InventoryMMStrategy {
                     price
                 }
                 Err(e) => {
-                    warn!(
-                        "[InventoryMM] Failed to fetch threshold for {} {}: {}. Using 0.0 (neutral oracle).",
+                    error!(
+                        "[InventoryMM] Failed to fetch threshold for {} {}: {}. SKIPPING MARKET - oracle adjustment requires threshold.",
                         symbol, timeframe, e
                     );
-                    0.0
+                    continue; // Skip this market - can't run strategy without threshold
                 }
             };
 
@@ -271,6 +274,7 @@ impl InventoryMMStrategy {
 
     /// Fetch the price_to_beat (threshold) for a market from Polymarket API.
     /// This is the opening price used to determine UP/DOWN resolution.
+    /// Retries up to 3 times with exponential backoff.
     async fn fetch_threshold(
         &self,
         symbol: &str,
@@ -295,8 +299,29 @@ impl InventoryMMStrategy {
             _ => return Err(anyhow::anyhow!("Unknown timeframe: {}", timeframe)),
         };
 
-        // Call the shared get_price_to_beat function
-        get_price_to_beat(tf, crypto_asset, market).await
+        // Retry up to 5 times with longer delays for new markets
+        // New markets may have openPrice=null for ~30+ seconds after start
+        let mut last_error = None;
+        for attempt in 1..=5 {
+            match get_price_to_beat(tf, crypto_asset, market).await {
+                Ok(price) => return Ok(price),
+                Err(e) => {
+                    warn!(
+                        "[InventoryMM] Threshold fetch attempt {}/5 failed for {} {}: {}",
+                        attempt, symbol, timeframe, e
+                    );
+                    last_error = Some(e);
+                    if attempt < 5 {
+                        // Longer delays: 3s, 5s, 7s, 9s (~24s total wait)
+                        // This gives time for new markets to record opening price
+                        let delay = std::time::Duration::from_secs(1 + attempt as u64 * 2);
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Unknown error fetching threshold")))
     }
 }
 

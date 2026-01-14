@@ -25,6 +25,9 @@ class ObjectiveType(str, Enum):
     BALANCED = "balanced"
     """Weighted combination of PnL, Sharpe, and fill rate."""
 
+    MARKET_MAKING = "market_making"
+    """Optimizes for balanced market making - heavily penalizes one-sided accumulation."""
+
 
 class QuoterOptimizer:
     """Optuna-based hyperparameter optimizer for InventoryMMQuoter.
@@ -118,6 +121,36 @@ class QuoterOptimizer:
             balance_score = (1 - abs(metrics.final_imbalance)) * 20
 
             return pnl_score + sharpe_score + fill_score + balance_score
+
+        elif self.objective == ObjectiveType.MARKET_MAKING:
+            # Market making objective: rewards balanced trading, penalizes one-sided accumulation
+            imbalance = abs(metrics.final_imbalance)
+
+            # HARD PENALTY: If imbalance > 80%, return negative score
+            if imbalance > 0.8:
+                return -10000.0 * imbalance
+
+            # Prefer realized PnL (actual profit) over unrealized (paper profit)
+            realized_weight = 3.0  # Realized PnL is 3x more valuable
+            pnl_score = (metrics.realized_pnl * realized_weight) + metrics.unrealized_pnl
+
+            # Balance multiplier: 1.0 at 0% imbalance, 0.2 at 50% imbalance
+            balance_multiplier = max(0.1, 1.0 - (imbalance * 1.6))
+            pnl_score *= balance_multiplier
+
+            # Reward having pairs (can merge and realize profit)
+            pairs_bonus = metrics.final_pairs * 0.5
+
+            # Reward both-sided fills (UP and DOWN)
+            if metrics.up_fills > 0 and metrics.down_fills > 0:
+                both_sides_bonus = min(metrics.up_fills, metrics.down_fills) * 0.1
+            else:
+                both_sides_bonus = -1000.0  # Heavy penalty for one-sided only
+
+            # Sharpe bonus (risk-adjusted returns)
+            sharpe_bonus = (metrics.sharpe_ratio or 0) * 5
+
+            return pnl_score + pairs_bonus + both_sides_bonus + sharpe_bonus
 
         return metrics.total_pnl
 

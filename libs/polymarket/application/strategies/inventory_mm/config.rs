@@ -43,6 +43,33 @@ pub struct InventoryMMConfig {
     // === Taker ===
     #[serde(default)]
     pub taker: TakerConfig,
+
+    // === Data Logging (for backtesting) ===
+    #[serde(default)]
+    pub data_logging: DataLoggingConfig,
+}
+
+/// Configuration for market data logging (for Python backtesting).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DataLoggingConfig {
+    /// Enable data logging to CSV
+    pub enabled: bool,
+    /// Output directory for CSV files
+    pub output_dir: String,
+    /// Dry-run mode: collect data but don't place any orders
+    /// When true, the quoter will log ticks but skip all order execution
+    pub dry_run: bool,
+}
+
+impl Default for DataLoggingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            output_dir: "data/market_ticks".to_string(),
+            dry_run: false,
+        }
+    }
 }
 
 impl Default for InventoryMMConfig {
@@ -59,6 +86,7 @@ impl Default for InventoryMMConfig {
             solver: SolverConfig::default(),
             merger: MergerConfig::default(),
             taker: TakerConfig::default(),
+            data_logging: DataLoggingConfig::default(),
         }
     }
 }
@@ -96,6 +124,11 @@ impl InventoryMMConfig {
 
     pub fn with_max_imbalance(mut self, max_imbalance: f64) -> Self {
         self.solver.max_imbalance = max_imbalance;
+        self
+    }
+
+    pub fn with_max_delta(mut self, max_delta: f64) -> Self {
+        self.solver.max_delta = max_delta;
         self
     }
 

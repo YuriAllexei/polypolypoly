@@ -62,13 +62,28 @@ def _df_to_ticks(df: pd.DataFrame) -> list[MarketTick]:
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
 
+    # Parse timestamp - handle both ISO strings and numeric values
+    if df["timestamp"].dtype == "object":
+        # ISO timestamp string - convert to datetime then to minutes from start
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        start_time = df["timestamp"].iloc[0]
+        df["timestamp_minutes"] = (df["timestamp"] - start_time).dt.total_seconds() / 60
+    else:
+        df["timestamp_minutes"] = df["timestamp"]
+
+    # Handle threshold=0 by inferring from oracle_price (use first row's oracle_price as proxy)
+    threshold_val = float(df["threshold"].iloc[0])
+    if threshold_val == 0.0:
+        # Use median oracle price as threshold estimate
+        threshold_val = float(df["oracle_price"].median())
+
     ticks = []
     for _, row in df.iterrows():
         ticks.append(
             MarketTick(
-                timestamp=float(row["timestamp"]),
+                timestamp=float(row["timestamp_minutes"]),
                 oracle_price=float(row["oracle_price"]),
-                threshold=float(row["threshold"]),
+                threshold=threshold_val,
                 best_ask_up=float(row["best_ask_up"]),
                 best_bid_up=float(row["best_bid_up"]),
                 best_ask_down=float(row["best_ask_down"]),
