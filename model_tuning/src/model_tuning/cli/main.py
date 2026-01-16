@@ -484,6 +484,170 @@ def grid_search(
         rprint(f"\n[green]Saved all {len(df_full)} results to {output}[/green]")
 
 
+@app.command()
+def simulate(
+    orderbooks: Annotated[
+        Path,
+        typer.Option("--orderbooks", "-o", help="Path to orderbooks JSON file"),
+    ],
+    fills: Annotated[
+        Path,
+        typer.Option("--fills", "-f", help="Path to fills JSON file"),
+    ],
+    oracle: Annotated[
+        Path,
+        typer.Option("--oracle", "-r", help="Path to oracle JSON file"),
+    ],
+    config: Annotated[
+        Optional[Path],
+        typer.Option("--config", "-c", help="Path to quoter config YAML"),
+    ] = None,
+    resolution: Annotated[
+        Optional[float],
+        typer.Option("--resolution", help="Resolution timestamp (Unix)"),
+    ] = None,
+    output: Annotated[
+        Optional[Path],
+        typer.Option("--output", help="Save position history to CSV"),
+    ] = None,
+    graphs: Annotated[
+        bool,
+        typer.Option("--graphs", "-g", help="Generate simulation report graph"),
+    ] = False,
+    graph_output: Annotated[
+        Optional[Path],
+        typer.Option("--graph-output", help="Path for graph output (default: simulation_report.png)"),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Verbose output"),
+    ] = False,
+) -> None:
+    """Run simulation against real orderbook data.
+
+    Simulates quoter performance using historical orderbook snapshots,
+    fills, and oracle prices from Polymarket.
+    """
+    from model_tuning.simulation import (
+        RealDataSimulator,
+        SimulationResult,
+        load_simulation_data,
+    )
+
+    # Load data
+    rprint(f"[blue]Loading orderbooks from {orderbooks}...[/blue]")
+    rprint(f"[blue]Loading fills from {fills}...[/blue]")
+    rprint(f"[blue]Loading oracle from {oracle}...[/blue]")
+
+    orderbook_data, fill_data, oracle_data = load_simulation_data(
+        orderbooks, fills, oracle
+    )
+
+    rprint(f"[green]Loaded {len(orderbook_data)} orderbook snapshots[/green]")
+    rprint(f"[green]Loaded {len(fill_data)} fills[/green]")
+    rprint(f"[green]Loaded {len(oracle_data)} oracle snapshots[/green]")
+
+    # Load quoter config
+    if config:
+        with open(config) as f:
+            config_dict = yaml.safe_load(f)
+        params = QuoterParams(**config_dict.get("quoter", {}))
+    else:
+        params = QuoterParams()
+
+    if verbose:
+        rprint("\n[bold]Quoter Parameters:[/bold]")
+        for key, value in params.model_dump().items():
+            rprint(f"  {key}: {value}")
+
+    # Run simulation
+    quoter = InventoryMMQuoter(params)
+    simulator = RealDataSimulator()
+
+    rprint("\n[blue]Running simulation...[/blue]")
+    result = simulator.run(
+        quoter=quoter,
+        orderbooks=orderbook_data,
+        fills=fill_data,
+        oracle=oracle_data,
+        resolution_timestamp=resolution,
+    )
+
+    # Display results
+    _display_simulation_results(result, verbose)
+
+    # Save to CSV if requested
+    if output:
+        import pandas as pd
+
+        df = pd.DataFrame([ps.model_dump() for ps in result.position_history])
+        df.to_csv(output, index=False)
+        rprint(f"\n[green]Saved position history to {output}[/green]")
+
+    # Generate graphs if requested
+    if graphs:
+        from model_tuning.simulation import generate_simulation_report
+
+        graph_path = graph_output or Path("simulation_report.png")
+        rprint(f"\n[blue]Generating simulation report graph...[/blue]")
+        generate_simulation_report(result, graph_path)
+        rprint(f"[green]Saved graph to {graph_path}[/green]")
+
+
+def _display_simulation_results(result: "SimulationResult", verbose: bool = False) -> None:  # type: ignore[name-defined]
+    """Display simulation results in a formatted table."""
+    from model_tuning.simulation import SimulationResult
+
+    inv = result.final_inventory
+
+    table = Table(show_header=True, header_style="bold", title="Simulation Results")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+
+    # Position summary
+    table.add_row("UP Position", f"{inv.up_qty:.1f} @ {inv.up_avg:.3f}")
+    table.add_row("DOWN Position", f"{inv.down_qty:.1f} @ {inv.down_avg:.3f}")
+    table.add_row("Pairs", f"{inv.pairs:.1f}")
+    table.add_row("Combined Avg", f"{inv.combined_avg:.3f}")
+
+    # PnL
+    pnl_color = "green" if inv.potential_profit > 0 else "red"
+    table.add_row(
+        "Potential Profit/Pair",
+        f"[{pnl_color}]${inv.potential_profit:.4f}[/{pnl_color}]",
+    )
+    table.add_row(
+        "Total Potential PnL",
+        f"[{pnl_color}]${result.final_pnl_potential:.2f}[/{pnl_color}]",
+    )
+
+    # Fill summary
+    table.add_row("Total Fills", f"{result.total_fills}")
+    table.add_row("UP Fills", f"{result.up_fills}")
+    table.add_row("DOWN Fills", f"{result.down_fills}")
+    table.add_row("Total Volume", f"{result.total_volume:.1f}")
+
+    # Imbalance
+    imb_color = "yellow" if abs(inv.imbalance) > 0.2 else "green"
+    table.add_row(
+        "Imbalance",
+        f"[{imb_color}]{inv.imbalance:+.1%}[/{imb_color}]",
+    )
+
+    console.print(table)
+
+    if verbose and result.matched_fills:
+        rprint(
+            f"\n[bold]Sample Fills ({min(10, len(result.matched_fills))} "
+            f"of {result.total_fills}):[/bold]"
+        )
+        for mf in result.matched_fills[:10]:
+            rprint(
+                f"  {mf.outcome.upper()} {mf.size:.1f} @ {mf.price:.3f} "
+                f"(market: {mf.original_fill.price:.3f})"
+            )
+
+
 @app.callback()
 def main() -> None:
     """Model Tuning CLI for Polymarket quoter optimization."""

@@ -16,6 +16,9 @@ typer = {extras = ["all"], version = "^0.12"}
 pyyaml = "^6.0"
 rich = "^13.0"
 click = ">=8.0.0,<8.2"
+matplotlib = "^3.8"
+websockets = "^12.0"
+aiohttp = "^3.9"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

@@ -1,0 +1,487 @@
+"""WebSocket fetcher for live fill, oracle, and orderbook data from Polymarket.
+
+Subscribes to orders_matched activity, crypto prices, and orderbook updates
+for a given market slug and saves data to JSON files compatible with the simulator.
+"""
+
+import argparse
+import asyncio
+import json
+import signal
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import aiohttp
+import websockets
+from rich import print as rprint
+from websockets.typing import Origin
+
+LIVE_DATA_WS_URL = "wss://ws-live-data.polymarket.com/"
+ORDERBOOK_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+PING_INTERVAL_SECONDS = 8
+
+
+class DataFetcher:
+    """Fetches live fill, oracle, and orderbook data from Polymarket WebSockets.
+
+    Subscribes to orders_matched activity, crypto_prices_chainlink, and orderbook
+    updates for a given market slug. Saves to sim_data/<slug>/.
+    """
+
+    def __init__(self, slug: str) -> None:
+        """Initialize the fetcher.
+
+        Args:
+            slug: Market slug (e.g., "btc-updown-15m-1768511700")
+        """
+        self.slug = slug
+        self.output_dir = Path("sim_data") / slug
+
+        # Paths
+        self.fills_path = self.output_dir / "fills.json"
+        self.oracle_path = self.output_dir / "oracle.json"
+        self.orderbook_raw_path = self.output_dir / "orderbooks_raw.json"
+
+        # Data storage
+        self.fills: list[dict[str, Any]] = []
+        self.oracle: list[dict[str, Any]] = []
+        self.initial_snapshots: dict[str, dict[str, Any]] = {}
+        self.price_changes: list[dict[str, Any]] = []
+
+        # Token IDs (fetched at start)
+        self.up_token_id: str | None = None
+        self.down_token_id: str | None = None
+
+        # Threshold (fetched at start)
+        self.threshold: float = 0.0
+
+        # Control
+        self._running = True
+
+    async def _fetch_market_info(self) -> tuple[str, str, str]:
+        """Fetch market info including token IDs and end date.
+
+        Returns:
+            Tuple of (up_token_id, down_token_id, end_date_iso)
+        """
+        url = f"https://gamma-api.polymarket.com/markets/slug/{self.slug}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                data = await response.json()
+                token_ids = json.loads(data["clobTokenIds"])
+                end_date = data["endDate"]  # ISO format string
+                # First is Up, second is Down (matches outcomes order)
+                return token_ids[0], token_ids[1], end_date
+
+    async def _fetch_threshold(self, end_date_iso: str) -> float:
+        """Fetch the threshold (open price) from crypto-price API.
+
+        Args:
+            end_date_iso: Market end date in ISO format (e.g., "2026-01-16T05:00:00Z")
+
+        Returns:
+            The open price (threshold) for this market
+        """
+        # Parse end_date and compute start_date (15 minutes before)
+        end_dt = datetime.fromisoformat(end_date_iso.replace("Z", "+00:00"))
+        start_dt = end_dt - timedelta(minutes=15)
+
+        # Format for API
+        event_start_time = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_date = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Extract symbol (uppercase)
+        symbol = self.slug.split("-")[0].upper()
+
+        url = (
+            f"https://polymarket.com/api/crypto/crypto-price"
+            f"?eventStartTime={event_start_time}"
+            f"&variant=fifteen"
+            f"&endDate={end_date}"
+            f"&symbol={symbol}"
+        )
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                data = await response.json()
+                return float(data["openPrice"])
+
+    def _extract_symbol(self) -> str:
+        """Extract crypto symbol from slug.
+
+        "btc-updown-15m-1768511700" → "btc/usd"
+        """
+        parts = self.slug.split("-")
+        return f"{parts[0]}/usd"
+
+    def _build_live_data_subscribe_message(self) -> str:
+        """Build the WebSocket subscription message for fills and oracle."""
+        fills_filters = json.dumps({"event_slug": self.slug}, separators=(",", ":"))
+        oracle_filters = json.dumps({"symbol": self._extract_symbol()}, separators=(",", ":"))
+        message = {
+            "action": "subscribe",
+            "subscriptions": [
+                {"topic": "activity", "type": "orders_matched", "filters": fills_filters},
+                {"topic": "crypto_prices_chainlink", "type": "update", "filters": oracle_filters},
+            ],
+        }
+        return json.dumps(message, separators=(",", ":"))
+
+    def _build_orderbook_subscribe_message(self) -> str:
+        """Build the WebSocket subscription message for orderbook."""
+        message = {
+            "assets_ids": [self.up_token_id, self.down_token_id],
+            "type": "market",
+        }
+        return json.dumps(message, separators=(",", ":"))
+
+    def _transform_fill_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Transform WebSocket payload to simulator RealFill format."""
+        timestamp = payload["timestamp"]
+        if timestamp < 1e12:  # If in seconds, convert to ms
+            timestamp = timestamp * 1000
+        return {
+            "price": payload["price"],
+            "size": payload["size"],
+            "side": payload["side"].lower(),
+            "timestamp": timestamp,
+            "outcome": payload["outcome"].lower(),
+        }
+
+    def _transform_oracle_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Transform WebSocket payload to simulator OracleSnapshot format."""
+        return {
+            "price": payload["value"],
+            "threshold": self.threshold,
+            "timestamp": payload["timestamp"],
+        }
+
+    def _transform_initial_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Transform initial orderbook snapshot."""
+        return {
+            "timestamp": int(snapshot["timestamp"]),
+            "bids": [
+                {"price": float(level["price"]), "size": float(level["size"])}
+                for level in snapshot.get("bids", [])
+            ],
+            "asks": [
+                {"price": float(level["price"]), "size": float(level["size"])}
+                for level in snapshot.get("asks", [])
+            ],
+        }
+
+    def _transform_price_change(
+        self, change: dict[str, Any], timestamp: int
+    ) -> dict[str, Any]:
+        """Transform a single price change."""
+        return {
+            "timestamp": timestamp,
+            "asset_id": change["asset_id"],
+            "price": float(change["price"]),
+            "size": float(change["size"]),
+            "side": change["side"].lower(),
+        }
+
+    def _save_fills(self) -> None:
+        """Save fills to JSON file."""
+        with open(self.fills_path, "w") as f:
+            json.dump(self.fills, f, indent=2)
+
+    def _save_oracle(self) -> None:
+        """Save oracle data to JSON file."""
+        with open(self.oracle_path, "w") as f:
+            json.dump(self.oracle, f, indent=2)
+
+    def _save_orderbook_raw(self) -> None:
+        """Save orderbook raw data (initial + deltas) to JSON file."""
+        data = {
+            "up_token_id": self.up_token_id,
+            "down_token_id": self.down_token_id,
+            "initial_snapshots": self.initial_snapshots,
+            "price_changes": self.price_changes,
+        }
+        with open(self.orderbook_raw_path, "w") as f:
+            json.dump(data, f)
+
+    async def _ping_loop(
+        self, websocket: websockets.WebSocketClientProtocol, name: str
+    ) -> None:
+        """Send PING every 8 seconds to keep connection alive."""
+        while self._running:
+            try:
+                await asyncio.sleep(PING_INTERVAL_SECONDS)
+                await websocket.send("PING")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                rprint(f"[yellow]{name} ping error: {e}[/yellow]")
+                break
+
+    async def _connect_live_data(self) -> None:
+        """Connect to live data WebSocket for fills and oracle."""
+        rprint(f"[blue]Connecting to {LIVE_DATA_WS_URL}...[/blue]")
+
+        ping_task: asyncio.Task[None] | None = None
+        try:
+            async with websockets.connect(
+                LIVE_DATA_WS_URL,
+                origin=Origin("https://polymarket.com"),
+                user_agent_header="Mozilla/5.0",
+                ping_interval=None,
+            ) as websocket:
+                rprint("[green]Live data connected![/green]")
+
+                # Subscribe
+                subscribe_msg = self._build_live_data_subscribe_message()
+                await websocket.send(subscribe_msg)
+                rprint(f"[blue]Subscribed to orders_matched for {self.slug}[/blue]")
+                rprint(f"[blue]Subscribed to crypto_prices for {self._extract_symbol()}[/blue]")
+
+                # Start ping task
+                ping_task = asyncio.create_task(self._ping_loop(websocket, "LiveData"))
+
+                # Process messages
+                while self._running:
+                    try:
+                        message = await websocket.recv()
+
+                        if isinstance(message, str) and message in ("PONG", "pong"):
+                            continue
+                        if not message:
+                            continue
+
+                        try:
+                            data = json.loads(message)
+                        except json.JSONDecodeError:
+                            continue
+
+                        msg_type = data.get("type")
+                        topic = data.get("topic")
+                        payload = data.get("payload")
+
+                        if not payload:
+                            continue
+
+                        if msg_type == "orders_matched":
+                            fill = self._transform_fill_payload(payload)
+                            self.fills.append(fill)
+                            rprint(
+                                f"[green]Fill:[/green] {fill['outcome'].upper()} "
+                                f"{fill['size']} @ {fill['price']:.3f} ({fill['side']})"
+                            )
+                            self._save_fills()
+
+                        elif msg_type == "update" and topic == "crypto_prices_chainlink":
+                            oracle_data = self._transform_oracle_payload(payload)
+                            self.oracle.append(oracle_data)
+                            rprint(
+                                f"[cyan]Oracle:[/cyan] ${oracle_data['price']:,.2f} "
+                                f"@ {oracle_data['timestamp']:.0f}"
+                            )
+                            self._save_oracle()
+
+                    except websockets.ConnectionClosed:
+                        rprint("[yellow]Live data connection closed[/yellow]")
+                        break
+
+        except Exception as e:
+            rprint(f"[red]Live data error: {e}[/red]")
+
+        finally:
+            if ping_task:
+                ping_task.cancel()
+                try:
+                    await ping_task
+                except asyncio.CancelledError:
+                    pass
+
+    async def _connect_orderbook(self) -> None:
+        """Connect to orderbook WebSocket for order book updates."""
+        rprint(f"[blue]Connecting to {ORDERBOOK_WS_URL}...[/blue]")
+
+        ping_task: asyncio.Task[None] | None = None
+        try:
+            async with websockets.connect(
+                ORDERBOOK_WS_URL,
+                origin=Origin("https://polymarket.com"),
+                user_agent_header="Mozilla/5.0",
+                ping_interval=None,
+            ) as websocket:
+                rprint("[green]Orderbook connected![/green]")
+
+                # Subscribe
+                subscribe_msg = self._build_orderbook_subscribe_message()
+                await websocket.send(subscribe_msg)
+                rprint("[blue]Subscribed to orderbook updates[/blue]")
+
+                # Start ping task
+                ping_task = asyncio.create_task(self._ping_loop(websocket, "Orderbook"))
+
+                # Process messages
+                while self._running:
+                    try:
+                        message = await websocket.recv()
+
+                        if isinstance(message, str) and message in ("PONG", "pong"):
+                            continue
+                        if not message:
+                            continue
+
+                        try:
+                            data = json.loads(message)
+                        except json.JSONDecodeError:
+                            continue
+
+                        # Initial snapshot is a list of 2 books
+                        if isinstance(data, list):
+                            for snapshot in data:
+                                if snapshot.get("event_type") == "book":
+                                    asset_id = snapshot["asset_id"]
+                                    self.initial_snapshots[asset_id] = (
+                                        self._transform_initial_snapshot(snapshot)
+                                    )
+                                    side = "UP" if asset_id == self.up_token_id else "DOWN"
+                                    rprint(f"[magenta]Initial {side} orderbook received[/magenta]")
+                            self._save_orderbook_raw()
+                            continue
+
+                        # Price change updates
+                        event_type = data.get("event_type")
+                        if event_type == "price_change":
+                            timestamp = int(data["timestamp"])
+                            for change in data.get("price_changes", []):
+                                transformed = self._transform_price_change(change, timestamp)
+                                self.price_changes.append(transformed)
+                            # Save periodically (every 100 changes)
+                            if len(self.price_changes) % 100 == 0:
+                                self._save_orderbook_raw()
+                                rprint(
+                                    f"[dim]Orderbook: {len(self.price_changes)} price changes[/dim]"
+                                )
+
+                    except websockets.ConnectionClosed:
+                        rprint("[yellow]Orderbook connection closed[/yellow]")
+                        break
+
+        except Exception as e:
+            rprint(f"[red]Orderbook error: {e}[/red]")
+
+        finally:
+            if ping_task:
+                ping_task.cancel()
+                try:
+                    await ping_task
+                except asyncio.CancelledError:
+                    pass
+
+    async def _schedule_auto_stop(self, end_date_iso: str) -> None:
+        """Schedule automatic stop 15 seconds before market ends.
+
+        Args:
+            end_date_iso: Market end date in ISO format
+        """
+        # Parse end date
+        end_dt = datetime.fromisoformat(end_date_iso.replace("Z", "+00:00"))
+
+        # Calculate seconds until 15 seconds before market end
+        now = datetime.now(end_dt.tzinfo)
+        stop_dt = end_dt - timedelta(seconds=15)
+        seconds_until_stop = (stop_dt - now).total_seconds()
+
+        if seconds_until_stop <= 0:
+            rprint("[yellow]Market ending soon, stopping immediately[/yellow]")
+            self.stop()
+            return
+
+        rprint(f"[blue]Will stop in {seconds_until_stop:.0f}s (15s before market end)[/blue]")
+
+        # Sleep until stop time
+        await asyncio.sleep(seconds_until_stop)
+
+        rprint("[yellow]Market ending soon, stopping...[/yellow]")
+        self.stop()
+
+    async def connect(self) -> None:
+        """Connect to all WebSockets and stream data.
+
+        Runs live data and orderbook connections concurrently.
+        """
+        # Create output directory
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Fetch market info (token IDs + end date)
+        rprint("[blue]Fetching market info...[/blue]")
+        self.up_token_id, self.down_token_id, end_date = await self._fetch_market_info()
+        rprint(f"[green]Up token: {self.up_token_id[:20]}...[/green]")
+        rprint(f"[green]Down token: {self.down_token_id[:20]}...[/green]")
+
+        # Fetch threshold (open price)
+        rprint("[blue]Fetching threshold...[/blue]")
+        self.threshold = await self._fetch_threshold(end_date)
+        rprint(f"[green]Threshold: ${self.threshold:,.2f}[/green]")
+
+        rprint(f"[blue]Saving to {self.output_dir}/[/blue]")
+
+        try:
+            # Run all tasks concurrently:
+            # - Live data WebSocket
+            # - Orderbook WebSocket
+            # - Auto-stop timer (stops 15s before market end)
+            await asyncio.gather(
+                self._connect_live_data(),
+                self._connect_orderbook(),
+                self._schedule_auto_stop(end_date),
+            )
+        finally:
+            # Final saves
+            if self.fills:
+                self._save_fills()
+                rprint(f"[green]Final: {len(self.fills)} fills[/green]")
+            if self.oracle:
+                self._save_oracle()
+                rprint(f"[green]Final: {len(self.oracle)} oracle snapshots[/green]")
+            if self.price_changes or self.initial_snapshots:
+                self._save_orderbook_raw()
+                rprint(f"[green]Final: {len(self.price_changes)} orderbook changes[/green]")
+
+    def stop(self) -> None:
+        """Signal the fetcher to stop."""
+        self._running = False
+
+
+async def main(slug: str) -> None:
+    """Main entry point for the fetcher.
+
+    Args:
+        slug: Market slug to subscribe to
+    """
+    fetcher = DataFetcher(slug)
+
+    # Handle Ctrl+C gracefully
+    loop = asyncio.get_event_loop()
+
+    def signal_handler() -> None:
+        rprint("\n[yellow]Shutting down...[/yellow]")
+        fetcher.stop()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, signal_handler)
+
+    await fetcher.connect()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Fetch live fill, oracle, and orderbook data from Polymarket"
+    )
+    parser.add_argument("slug", help="Market slug (e.g., btc-updown-15m-1768511700)")
+
+    args = parser.parse_args()
+
+    rprint("[bold]Polymarket Data Fetcher[/bold]")
+    rprint(f"Slug: {args.slug}")
+    rprint(f"Output: sim_data/{args.slug}/")
+    rprint("")
+
+    asyncio.run(main(args.slug))
