@@ -22,6 +22,7 @@
 //! }
 //! ```
 
+mod candlestick_api;
 mod chainlink_types;
 mod chainlink_ws;
 mod oracle_ws;
@@ -29,6 +30,9 @@ mod price_manager;
 mod types;
 
 // Re-export main types and functions
+pub use candlestick_api::{
+    create_shared_candlestick_client, Candle, CandlestickApiClient, SharedCandlestickClient,
+};
 pub use chainlink_types::{ChainLinkMessage, ChainLinkReport, ChainLinkWsMessage, DecodedPrice, FeedIdMap};
 pub use chainlink_ws::{spawn_chainlink_tracker, ChainLinkAuth, ChainLinkRoute};
 pub use oracle_ws::{

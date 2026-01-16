@@ -1,17 +1,17 @@
 //! Price service for the Up or Down strategy.
 //!
-//! Handles fetching prices from Polymarket's crypto price API
-//! and reading oracle prices from the shared price manager.
+//! Handles fetching prices from ChainLink Candlestick API (primary)
+//! or Polymarket's crypto price API (fallback).
 //!
 //! Uses dedicated OS threads for HTTP requests to avoid blocking the tokio runtime.
 
 use crate::domain::DbMarket;
-use crate::infrastructure::SharedOraclePrices;
+use crate::infrastructure::{CandlestickApiClient, SharedOraclePrices};
 use crate::application::strategies::up_or_down::types::{CryptoAsset, OracleSource, Timeframe};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 // =============================================================================
 // API Types
@@ -28,13 +28,13 @@ struct CryptoPriceResponse {
 }
 
 // =============================================================================
-// Price to Beat (Polymarket API)
+// Price to Beat (ChainLink Candlestick API - Primary)
 // =============================================================================
 
-/// Get the opening price ("price to beat") from Polymarket's crypto price API.
+/// Get the opening price ("price to beat") from ChainLink Candlestick API.
 ///
-/// This fetches the reference price used to determine if the crypto asset
-/// went "up" or "down" during the market's timeframe.
+/// For a market ending at time T with duration D, the price_to_beat is the
+/// candle close price at time T-D (the market start time).
 ///
 /// # Arguments
 /// * `timeframe` - The market timeframe (15M, 1H, 4H, Daily)
@@ -42,8 +42,65 @@ struct CryptoPriceResponse {
 /// * `market` - The market containing the end_date
 ///
 /// # Returns
-/// The opening price as f64, or an error if the request fails
-pub async fn get_price_to_beat(
+/// The candle close price as f64, or an error if the request fails
+fn get_price_to_beat_from_chainlink(
+    timeframe: Timeframe,
+    crypto_asset: CryptoAsset,
+    market: &DbMarket,
+) -> anyhow::Result<f64> {
+    // Get symbol for ChainLink API (e.g., "BTCUSD")
+    let symbol = crypto_asset
+        .oracle_symbol()
+        .ok_or_else(|| anyhow::anyhow!("Cannot get price for unknown crypto asset"))?;
+    let chainlink_symbol = format!("{}USD", symbol);
+
+    // Get resolution string for ChainLink API
+    let resolution = match timeframe {
+        Timeframe::FiveMin => "5m",
+        Timeframe::FifteenMin => "15m",
+        Timeframe::OneHour => "1h",
+        Timeframe::FourHour => "4h",
+        Timeframe::Daily => "1d",
+        Timeframe::Unknown => return Err(anyhow::anyhow!("Unknown timeframe")),
+    };
+
+    // Get duration from timeframe
+    let duration = timeframe
+        .duration()
+        .ok_or_else(|| anyhow::anyhow!("Cannot calculate duration for timeframe: {}", timeframe))?;
+
+    // Parse end_date from market
+    let end_date = DateTime::parse_from_rfc3339(&market.end_date)
+        .map_err(|e| anyhow::anyhow!("Failed to parse market end_date: {}", e))?
+        .with_timezone(&Utc);
+
+    // Calculate event start time (this is when the candle closes that we need)
+    let event_start_time = end_date - duration;
+    let start_timestamp = event_start_time.timestamp();
+
+    info!(
+        "[ChainLink] Fetching price_to_beat for {} {} market starting at {}",
+        crypto_asset, timeframe, event_start_time
+    );
+
+    // Create client and fetch
+    let client = CandlestickApiClient::from_env()?;
+    let price = client.get_open_price_at(&chainlink_symbol, resolution, start_timestamp)?;
+
+    info!(
+        "[ChainLink] Got price_to_beat for {}: ${:.2}",
+        chainlink_symbol, price
+    );
+
+    Ok(price)
+}
+
+// =============================================================================
+// Price to Beat (Polymarket API - Fallback)
+// =============================================================================
+
+/// Get the opening price from Polymarket's crypto price API (fallback).
+fn get_price_to_beat_from_polymarket(
     timeframe: Timeframe,
     crypto_asset: CryptoAsset,
     market: &DbMarket,
@@ -86,64 +143,116 @@ pub async fn get_price_to_beat(
         variant = variant,
         event_start_time = %event_start_time_str,
         end_date = %end_date_str,
-        "Fetching price to beat from Polymarket API"
+        "Fetching price to beat from Polymarket API (fallback)"
     );
 
-    // Use dedicated OS thread with ureq to avoid blocking tokio runtime
+    info!("⏳ [Polymarket] Fetching price to beat from {}", url);
+
+    let response = ureq::get(&url)
+        .set("User-Agent", "polymarket-strategy")
+        .set("Accept", "application/json")
+        .timeout(Duration::from_secs(15))
+        .call()
+        .map_err(|e| anyhow::anyhow!("HTTP request failed: {}", e))?;
+
+    let status = response.status();
+    let response_body = response
+        .into_string()
+        .map_err(|e| anyhow::anyhow!("Failed to read response: {}", e))?;
+
+    info!("📥 [Polymarket] Got response: status={}, body_len={}", status, response_body.len());
+
+    if status == 200 {
+        let data: CryptoPriceResponse = serde_json::from_str(&response_body)
+            .map_err(|e| anyhow::anyhow!("Failed to parse response: {} - body: {}", e, response_body))?;
+
+        match data.open_price {
+            Some(price) => {
+                debug!(open_price = price, "Retrieved price to beat from Polymarket");
+                Ok(price)
+            }
+            None => {
+                if data.incomplete {
+                    Err(anyhow::anyhow!("Market just started - openPrice not yet recorded (incomplete=true)"))
+                } else {
+                    Err(anyhow::anyhow!("API returned null openPrice - body: {}", response_body))
+                }
+            }
+        }
+    } else {
+        Err(anyhow::anyhow!("API returned error status {}: {}", status, response_body))
+    }
+}
+
+// =============================================================================
+// Price to Beat (Public API)
+// =============================================================================
+
+/// Get the opening price ("price to beat") for a market.
+///
+/// Tries ChainLink Candlestick API first (more reliable), then falls back
+/// to Polymarket's crypto price API if ChainLink fails.
+///
+/// # Arguments
+/// * `timeframe` - The market timeframe (15M, 1H, 4H, Daily)
+/// * `crypto_asset` - The cryptocurrency being tracked (BTC, ETH, SOL, XRP)
+/// * `market` - The market containing the end_date
+///
+/// # Returns
+/// The opening price as f64, or an error if both sources fail
+pub async fn get_price_to_beat(
+    timeframe: Timeframe,
+    crypto_asset: CryptoAsset,
+    market: &DbMarket,
+) -> anyhow::Result<f64> {
+    // Clone data for the blocking thread
+    let tf = timeframe;
+    let asset = crypto_asset;
+    let market_end_date = market.end_date.clone();
+    let market_clone = DbMarket {
+        end_date: market_end_date,
+        ..market.clone()
+    };
+
+    // Use dedicated OS thread to avoid blocking tokio runtime
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     std::thread::spawn(move || {
-        info!("⏳ [Price thread] Fetching price to beat from {}", url);
+        // Try ChainLink first
+        let result = match get_price_to_beat_from_chainlink(tf, asset, &market_clone) {
+            Ok(price) => {
+                info!("✅ [Price] Got price_to_beat from ChainLink: ${:.2}", price);
+                Ok(price)
+            }
+            Err(chainlink_err) => {
+                warn!(
+                    "⚠️ [Price] ChainLink failed: {}. Trying Polymarket fallback...",
+                    chainlink_err
+                );
 
-        let result = (|| -> std::result::Result<f64, String> {
-            let response = ureq::get(&url)
-                .set("User-Agent", "polymarket-strategy")
-                .set("Accept", "application/json")
-                .timeout(Duration::from_secs(15))
-                .call()
-                .map_err(|e| format!("HTTP request failed: {}", e))?;
-
-            let status = response.status();
-            let response_body = response
-                .into_string()
-                .map_err(|e| format!("Failed to read response: {}", e))?;
-
-            info!("📥 [Price thread] Got response: status={}, body_len={}", status, response_body.len());
-
-            if status == 200 {
-                let data: CryptoPriceResponse = serde_json::from_str(&response_body)
-                    .map_err(|e| format!("Failed to parse response: {} - body: {}", e, response_body))?;
-
-                // Handle null openPrice (market just started, price not recorded yet)
-                match data.open_price {
-                    Some(price) => Ok(price),
-                    None => {
-                        if data.incomplete {
-                            Err("Market just started - openPrice not yet recorded (incomplete=true). Retry in a few seconds.".to_string())
-                        } else {
-                            Err(format!("API returned null openPrice - body: {}", response_body))
-                        }
+                // Fall back to Polymarket
+                match get_price_to_beat_from_polymarket(tf, asset, &market_clone) {
+                    Ok(price) => {
+                        info!("✅ [Price] Got price_to_beat from Polymarket fallback: ${:.2}", price);
+                        Ok(price)
+                    }
+                    Err(polymarket_err) => {
+                        Err(anyhow::anyhow!(
+                            "Both sources failed - ChainLink: {}, Polymarket: {}",
+                            chainlink_err,
+                            polymarket_err
+                        ))
                     }
                 }
-            } else {
-                Err(format!("API returned error status {}: {}", status, response_body))
             }
-        })();
+        };
 
         let _ = tx.send(result);
     });
 
     // Wait for the dedicated thread to complete
-    let result = rx.await
-        .map_err(|_| anyhow::anyhow!("Price thread channel closed unexpectedly"))?;
-
-    match result {
-        Ok(open_price) => {
-            debug!(open_price = open_price, "Retrieved price to beat");
-            Ok(open_price)
-        }
-        Err(e) => Err(anyhow::anyhow!("Failed to fetch crypto price: {}", e)),
-    }
+    rx.await
+        .map_err(|_| anyhow::anyhow!("Price thread channel closed unexpectedly"))?
 }
 
 // =============================================================================

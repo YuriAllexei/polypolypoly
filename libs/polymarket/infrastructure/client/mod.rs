@@ -21,7 +21,7 @@ pub use binance::{
 pub use clob::{RestClient, WebSocketClient, Market, Outcome, OrderBook, PriceLevel, Side, OrderType, OrderArgs, TradingClient, TradingError};
 pub use data::{DataApiClient, Position, PositionFilters, PositionSortBy, SortDirection};
 pub use gamma::{GammaClient, GammaEvent, GammaMarket, GammaTag, GammaFilters};
-pub use oracle::{spawn_oracle_trackers, OraclePriceManager, SharedOraclePrices, OracleType, PriceEntry};
+pub use oracle::{spawn_oracle_trackers, OraclePriceManager, SharedOraclePrices, OracleType, PriceEntry, CandlestickApiClient};
 pub use sports::{spawn_sports_live_data_tracker, SportsLiveData, SportsLiveDataMessage, SportsRoute};
 // Note: OrderManager and related types moved to infrastructure::order_manager
 pub use redeem::{

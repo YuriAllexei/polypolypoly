@@ -25,6 +25,7 @@ pub use client::{
     gamma::{GammaClient, GammaEvent, GammaFilters, GammaMarket, GammaTag},
     oracle::{
         spawn_oracle_trackers, OraclePriceManager, OracleType, PriceEntry, SharedOraclePrices,
+        CandlestickApiClient,
     },
     binance::{
         spawn_binance_tracker, BinanceAsset, BinancePriceEntry, BinancePriceManager,
