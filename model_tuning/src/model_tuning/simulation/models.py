@@ -124,3 +124,114 @@ class OrderbookHistoryEntry(BaseModel):
     timestamp: float = Field(description="Unix timestamp")
     best_ask_up: float = Field(description="Best ask for UP token")
     best_ask_down: float = Field(description="Best ask for DOWN token")
+
+
+class EnhancedPositionState(BaseModel):
+    """Position state with full PnL tracking (merged + directional).
+
+    Extends PositionState with:
+    - Merged PnL: profit from balanced pairs
+    - Directional PnL: mark-to-market value of excess inventory
+    """
+
+    # Basic position fields
+    timestamp: float
+    up_qty: float
+    down_qty: float
+    up_avg: float
+    down_avg: float
+    pairs: float
+    combined_avg: float
+    potential_profit: float
+
+    # PnL fields
+    merged_pnl: float = Field(description="pairs * (1 - combined_avg)")
+    directional_qty: float = Field(description="abs(up_qty - down_qty)")
+    excess_side: Literal["up", "down", "balanced"] = Field(
+        description="Which side has excess inventory"
+    )
+    directional_market_price: float = Field(
+        description="Best bid for the excess side (mark-to-market price)"
+    )
+    directional_avg_cost: float = Field(
+        description="Average cost of the excess side"
+    )
+    directional_pnl: float = Field(
+        description="directional_qty * (market_price - avg_cost)"
+    )
+
+    @property
+    def total_pnl(self) -> float:
+        """Total PnL = merged + directional."""
+        return self.merged_pnl + self.directional_pnl
+
+    @property
+    def net_qty(self) -> float:
+        """Net quantity = up_qty - down_qty (positive means long UP)."""
+        return self.up_qty - self.down_qty
+
+    @classmethod
+    def from_inventory_and_orderbook(
+        cls,
+        inventory: Inventory,
+        orderbook: "OrderbookSnapshot",
+        timestamp: float,
+    ) -> "EnhancedPositionState":
+        """Create EnhancedPositionState from Inventory and orderbook.
+
+        Args:
+            inventory: Current inventory state
+            orderbook: Current orderbook (for mark-to-market prices)
+            timestamp: Current timestamp
+
+        Returns:
+            EnhancedPositionState with full PnL calculations
+        """
+        # Basic fields from inventory
+        pairs = inventory.pairs
+        combined_avg = inventory.combined_avg
+        potential_profit = inventory.potential_profit
+
+        # Merged PnL: profit from balanced pairs
+        merged_pnl = pairs * (1.0 - combined_avg)
+
+        # Directional position
+        directional_qty = abs(inventory.up_qty - inventory.down_qty)
+
+        if inventory.up_qty > inventory.down_qty:
+            excess_side: Literal["up", "down", "balanced"] = "up"
+            directional_market_price = orderbook.up.best_bid or 0.0
+            directional_avg_cost = inventory.up_avg
+        elif inventory.down_qty > inventory.up_qty:
+            excess_side = "down"
+            directional_market_price = orderbook.down.best_bid or 0.0
+            directional_avg_cost = inventory.down_avg
+        else:
+            excess_side = "balanced"
+            directional_market_price = 0.0
+            directional_avg_cost = 0.0
+
+        # Directional PnL: mark-to-market value of excess
+        if directional_qty > 0:
+            directional_pnl = directional_qty * (
+                directional_market_price - directional_avg_cost
+            )
+        else:
+            directional_pnl = 0.0
+
+        return cls(
+            timestamp=timestamp,
+            up_qty=inventory.up_qty,
+            down_qty=inventory.down_qty,
+            up_avg=inventory.up_avg,
+            down_avg=inventory.down_avg,
+            pairs=pairs,
+            combined_avg=combined_avg,
+            potential_profit=potential_profit,
+            merged_pnl=merged_pnl,
+            directional_qty=directional_qty,
+            excess_side=excess_side,
+            directional_market_price=directional_market_price,
+            directional_avg_cost=directional_avg_cost,
+            directional_pnl=directional_pnl,
+        )

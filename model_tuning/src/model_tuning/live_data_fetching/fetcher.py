@@ -7,6 +7,7 @@ for a given market slug and saves data to JSON files compatible with the simulat
 import argparse
 import asyncio
 import json
+import os
 import signal
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -14,12 +15,20 @@ from typing import Any
 
 import aiohttp
 import websockets
+from dotenv import load_dotenv
 from rich import print as rprint
 from websockets.typing import Origin
+
+# Load .env file from project root
+load_dotenv(Path(__file__).parent.parent.parent.parent.parent / ".env")
+load_dotenv()  # Also check current directory
 
 LIVE_DATA_WS_URL = "wss://ws-live-data.polymarket.com/"
 ORDERBOOK_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 PING_INTERVAL_SECONDS = 8
+
+# Chainlink Candlestick API
+CHAINLINK_API_URL = "https://priceapi.dataengine.chain.link"
 
 
 class DataFetcher:
@@ -79,8 +88,35 @@ class DataFetcher:
                 # First is Up, second is Down (matches outcomes order)
                 return token_ids[0], token_ids[1], end_date
 
+    async def _get_chainlink_token(self, session: aiohttp.ClientSession) -> str:
+        """Get JWT token from Chainlink API.
+
+        Requires CHAINLINK_CLIENT_ID and CHAINLINK_CANDLESTICK_API_KEY env vars.
+
+        Returns:
+            JWT access token
+        """
+        client_id = os.environ.get("CHAINLINK_CLIENT_ID")
+        api_key = os.environ.get("CHAINLINK_CANDLESTICK_API_KEY")
+
+        if not client_id or not api_key:
+            raise ValueError(
+                "CHAINLINK_CLIENT_ID and CHAINLINK_CANDLESTICK_API_KEY must be set"
+            )
+
+        url = f"{CHAINLINK_API_URL}/api/v1/authorize"
+        payload = {"login": client_id, "password": api_key}
+
+        async with session.post(url, json=payload) as response:
+            data = await response.json()
+            if data.get("s") != "ok":
+                raise ValueError(f"Chainlink auth failed: {data.get('errmsg', 'unknown')}")
+            return data["d"]["access_token"]
+
     async def _fetch_threshold(self, end_date_iso: str) -> float:
-        """Fetch the threshold (open price) from crypto-price API.
+        """Fetch the threshold (price to beat) from Chainlink Candlestick API.
+
+        Uses the candle OPEN price at market start time (15 minutes before end).
 
         Args:
             end_date_iso: Market end date in ISO format (e.g., "2026-01-16T05:00:00Z")
@@ -91,12 +127,65 @@ class DataFetcher:
         # Parse end_date and compute start_date (15 minutes before)
         end_dt = datetime.fromisoformat(end_date_iso.replace("Z", "+00:00"))
         start_dt = end_dt - timedelta(minutes=15)
+        start_ts = int(start_dt.timestamp())
 
-        # Format for API
+        # Extract symbol (e.g., "btc" -> "BTCUSD")
+        symbol = self.slug.split("-")[0].upper() + "USD"
+
+        timeout = aiohttp.ClientTimeout(total=15)
+
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                # Get JWT token
+                token = await self._get_chainlink_token(session)
+
+                # Fetch candles around the start timestamp
+                from_ts = start_ts - 900  # 15 min before
+                to_ts = start_ts + 900    # 15 min after
+
+                url = (
+                    f"{CHAINLINK_API_URL}/api/v1/history"
+                    f"?symbol={symbol}&resolution=15m&from={from_ts}&to={to_ts}"
+                )
+
+                headers = {"Authorization": f"Bearer {token}"}
+
+                async with session.get(url, headers=headers) as response:
+                    data = await response.json()
+
+                    if data.get("s") != "ok":
+                        raise ValueError(f"Chainlink history failed: {data.get('errmsg')}")
+
+                    timestamps = data.get("t", [])
+                    opens = data.get("o", [])
+
+                    if not timestamps or not opens:
+                        raise ValueError("No candle data returned")
+
+                    # Find the candle at or before start_ts
+                    best_idx = 0
+                    for i, ts in enumerate(timestamps):
+                        if ts <= start_ts:
+                            best_idx = i
+
+                    # Chainlink returns prices in 18-decimal format
+                    price = opens[best_idx] / 1e18
+
+                    rprint(f"[green]Chainlink price at {start_ts}: ${price:,.2f}[/green]")
+                    return price
+
+        except Exception as e:
+            rprint(f"[red]Chainlink API error: {e}[/red]")
+            rprint("[yellow]Falling back to Polymarket API...[/yellow]")
+            return await self._fetch_threshold_fallback(end_date_iso)
+
+    async def _fetch_threshold_fallback(self, end_date_iso: str) -> float:
+        """Fallback: fetch threshold from Polymarket API."""
+        end_dt = datetime.fromisoformat(end_date_iso.replace("Z", "+00:00"))
+        start_dt = end_dt - timedelta(minutes=15)
+
         event_start_time = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_date = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        # Extract symbol (uppercase)
         symbol = self.slug.split("-")[0].upper()
 
         url = (
@@ -107,10 +196,21 @@ class DataFetcher:
             f"&symbol={symbol}"
         )
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                data = await response.json()
-                return float(data["openPrice"])
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Referer": "https://polymarket.com/",
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    data = await response.json()
+                    return float(data["openPrice"])
+        except Exception as e:
+            rprint(f"[red]Fallback API also failed: {e}[/red]")
+            rprint("[yellow]Using 0 as threshold - will update from first oracle[/yellow]")
+            return 0.0
 
     def _extract_symbol(self) -> str:
         """Extract crypto symbol from slug.
@@ -447,10 +547,55 @@ class DataFetcher:
         rprint("[yellow]Market ending soon, stopping...[/yellow]")
         self.stop()
 
+    async def _connect_live_data_with_retry(self) -> None:
+        """Connect to live data WebSocket with automatic reconnection."""
+        retry_delay = 1
+        max_retry_delay = 30
+
+        while not self._shutdown_event.is_set():
+            try:
+                await self._connect_live_data()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                if self._shutdown_event.is_set():
+                    break
+                rprint(f"[yellow]Live data disconnected: {e}. Reconnecting in {retry_delay}s...[/yellow]")
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, max_retry_delay)
+            else:
+                # Connection closed normally, reset delay
+                retry_delay = 1
+                if not self._shutdown_event.is_set():
+                    rprint("[yellow]Live data connection closed. Reconnecting...[/yellow]")
+
+    async def _connect_orderbook_with_retry(self) -> None:
+        """Connect to orderbook WebSocket with automatic reconnection."""
+        retry_delay = 1
+        max_retry_delay = 30
+
+        while not self._shutdown_event.is_set():
+            try:
+                await self._connect_orderbook()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                if self._shutdown_event.is_set():
+                    break
+                rprint(f"[yellow]Orderbook disconnected: {e}. Reconnecting in {retry_delay}s...[/yellow]")
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, max_retry_delay)
+            else:
+                # Connection closed normally, reset delay
+                retry_delay = 1
+                if not self._shutdown_event.is_set():
+                    rprint("[yellow]Orderbook connection closed. Reconnecting...[/yellow]")
+
     async def connect(self) -> None:
         """Connect to all WebSockets and stream data.
 
-        Runs live data and orderbook connections concurrently.
+        Runs live data and orderbook connections concurrently with auto-reconnect.
+        Only stops when auto-stop triggers or user presses Ctrl+C.
         """
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -468,30 +613,20 @@ class DataFetcher:
 
         rprint(f"[blue]Saving to {self.output_dir}/[/blue]")
 
-        # Create tasks
-        live_data_task = asyncio.create_task(self._connect_live_data())
-        orderbook_task = asyncio.create_task(self._connect_orderbook())
+        # Create tasks with retry wrappers
+        live_data_task = asyncio.create_task(self._connect_live_data_with_retry())
+        orderbook_task = asyncio.create_task(self._connect_orderbook_with_retry())
         auto_stop_task = asyncio.create_task(self._schedule_auto_stop(end_date))
 
         tasks = [live_data_task, orderbook_task, auto_stop_task]
 
         try:
-            # Wait for any task to complete (auto-stop, error, or shutdown)
-            done, pending = await asyncio.wait(
-                tasks,
-                return_when=asyncio.FIRST_COMPLETED
-            )
-
-            # Signal shutdown and cancel remaining tasks
-            self.stop()
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            # Wait for auto-stop task to complete (it's the only one that should end normally)
+            await auto_stop_task
         except asyncio.CancelledError:
-            # Handle cancellation from external source (e.g., Ctrl+C)
+            rprint("[yellow]Received shutdown signal[/yellow]")
+        finally:
+            # Signal shutdown and cancel all tasks
             self.stop()
             for task in tasks:
                 if not task.done():
@@ -500,7 +635,7 @@ class DataFetcher:
                         await task
                     except asyncio.CancelledError:
                         pass
-        finally:
+
             # Final saves
             if self.fills:
                 self._save_fills()

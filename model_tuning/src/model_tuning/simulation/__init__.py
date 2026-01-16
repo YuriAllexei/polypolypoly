@@ -4,6 +4,10 @@ This module provides tools for backtesting the quoter against real
 orderbook data and historical fills from Polymarket.
 """
 
+from model_tuning.simulation.fill_driven_simulator import (
+    FillDrivenSimulationResult,
+    FillDrivenSimulator,
+)
 from model_tuning.simulation.loaders import (
     load_fills_from_json,
     load_oracle_from_json,
@@ -13,6 +17,7 @@ from model_tuning.simulation.loaders import (
     load_simulation_data_from_raw,
 )
 from model_tuning.simulation.models import (
+    EnhancedPositionState,
     MatchedFill,
     Orderbook,
     OrderbookHistoryEntry,
@@ -22,11 +27,20 @@ from model_tuning.simulation.models import (
     PositionState,
     RealFill,
 )
+from model_tuning.simulation.orderbook_reconstructor import OrderbookReconstructor
+from model_tuning.simulation.quoters import (
+    BrainDeadQuoter,
+    SimpleQuote,
+    SimulationQuoter,
+)
 from model_tuning.simulation.simulator import (
     RealDataSimulator,
     SimulationResult,
 )
-from model_tuning.simulation.visualize import generate_simulation_report
+from model_tuning.simulation.visualize import (
+    generate_fill_driven_report,
+    generate_simulation_report,
+)
 
 __all__ = [
     # Loaders
@@ -44,10 +58,21 @@ __all__ = [
     "RealFill",
     "OracleSnapshot",
     "PositionState",
+    "EnhancedPositionState",
     "MatchedFill",
-    # Simulator
+    # Orderbook Reconstructor
+    "OrderbookReconstructor",
+    # Quoters
+    "BrainDeadQuoter",
+    "SimpleQuote",
+    "SimulationQuoter",
+    # Original Simulator
     "RealDataSimulator",
     "SimulationResult",
+    # Fill-Driven Simulator
+    "FillDrivenSimulator",
+    "FillDrivenSimulationResult",
     # Visualization
     "generate_simulation_report",
+    "generate_fill_driven_report",
 ]
