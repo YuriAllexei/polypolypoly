@@ -57,7 +57,12 @@ class DataFetcher:
         self.threshold: float = 0.0
 
         # Control
-        self._running = True
+        self._shutdown_event = asyncio.Event()
+
+    @property
+    def _running(self) -> bool:
+        """Check if still running (for backwards compat)."""
+        return not self._shutdown_event.is_set()
 
     async def _fetch_market_info(self) -> tuple[str, str, str]:
         """Fetch market info including token IDs and end date.
@@ -208,10 +213,18 @@ class DataFetcher:
         self, websocket: websockets.WebSocketClientProtocol, name: str
     ) -> None:
         """Send PING every 8 seconds to keep connection alive."""
-        while self._running:
+        while not self._shutdown_event.is_set():
             try:
-                await asyncio.sleep(PING_INTERVAL_SECONDS)
+                # Use wait_for so we can check shutdown event frequently
+                await asyncio.wait_for(
+                    asyncio.sleep(PING_INTERVAL_SECONDS),
+                    timeout=PING_INTERVAL_SECONDS
+                )
+                if self._shutdown_event.is_set():
+                    break
                 await websocket.send("PING")
+            except asyncio.TimeoutError:
+                continue  # Check shutdown event and loop
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -242,9 +255,13 @@ class DataFetcher:
                 ping_task = asyncio.create_task(self._ping_loop(websocket, "LiveData"))
 
                 # Process messages
-                while self._running:
+                while not self._shutdown_event.is_set():
                     try:
-                        message = await websocket.recv()
+                        # Short timeout so we can check shutdown event frequently
+                        message = await asyncio.wait_for(
+                            websocket.recv(),
+                            timeout=1.0
+                        )
 
                         if isinstance(message, str) and message in ("PONG", "pong"):
                             continue
@@ -281,10 +298,20 @@ class DataFetcher:
                             )
                             self._save_oracle()
 
+                    except asyncio.TimeoutError:
+                        continue  # Check shutdown event and loop
+                    except asyncio.CancelledError:
+                        rprint("[yellow]Live data task cancelled[/yellow]")
+                        break
                     except websockets.ConnectionClosed:
                         rprint("[yellow]Live data connection closed[/yellow]")
                         break
 
+                # Graceful close
+                await websocket.close()
+
+        except asyncio.CancelledError:
+            rprint("[yellow]Live data task cancelled[/yellow]")
         except Exception as e:
             rprint(f"[red]Live data error: {e}[/red]")
 
@@ -319,9 +346,13 @@ class DataFetcher:
                 ping_task = asyncio.create_task(self._ping_loop(websocket, "Orderbook"))
 
                 # Process messages
-                while self._running:
+                while not self._shutdown_event.is_set():
                     try:
-                        message = await websocket.recv()
+                        # Short timeout so we can check shutdown event frequently
+                        message = await asyncio.wait_for(
+                            websocket.recv(),
+                            timeout=1.0
+                        )
 
                         if isinstance(message, str) and message in ("PONG", "pong"):
                             continue
@@ -360,10 +391,20 @@ class DataFetcher:
                                     f"[dim]Orderbook: {len(self.price_changes)} price changes[/dim]"
                                 )
 
+                    except asyncio.TimeoutError:
+                        continue  # Check shutdown event and loop
+                    except asyncio.CancelledError:
+                        rprint("[yellow]Orderbook task cancelled[/yellow]")
+                        break
                     except websockets.ConnectionClosed:
                         rprint("[yellow]Orderbook connection closed[/yellow]")
                         break
 
+                # Graceful close
+                await websocket.close()
+
+        except asyncio.CancelledError:
+            rprint("[yellow]Orderbook task cancelled[/yellow]")
         except Exception as e:
             rprint(f"[red]Orderbook error: {e}[/red]")
 
@@ -396,8 +437,12 @@ class DataFetcher:
 
         rprint(f"[blue]Will stop in {seconds_until_stop:.0f}s (15s before market end)[/blue]")
 
-        # Sleep until stop time
-        await asyncio.sleep(seconds_until_stop)
+        try:
+            # Sleep until stop time
+            await asyncio.sleep(seconds_until_stop)
+        except asyncio.CancelledError:
+            rprint("[yellow]Auto-stop cancelled[/yellow]")
+            return
 
         rprint("[yellow]Market ending soon, stopping...[/yellow]")
         self.stop()
@@ -423,16 +468,38 @@ class DataFetcher:
 
         rprint(f"[blue]Saving to {self.output_dir}/[/blue]")
 
+        # Create tasks
+        live_data_task = asyncio.create_task(self._connect_live_data())
+        orderbook_task = asyncio.create_task(self._connect_orderbook())
+        auto_stop_task = asyncio.create_task(self._schedule_auto_stop(end_date))
+
+        tasks = [live_data_task, orderbook_task, auto_stop_task]
+
         try:
-            # Run all tasks concurrently:
-            # - Live data WebSocket
-            # - Orderbook WebSocket
-            # - Auto-stop timer (stops 15s before market end)
-            await asyncio.gather(
-                self._connect_live_data(),
-                self._connect_orderbook(),
-                self._schedule_auto_stop(end_date),
+            # Wait for any task to complete (auto-stop, error, or shutdown)
+            done, pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED
             )
+
+            # Signal shutdown and cancel remaining tasks
+            self.stop()
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        except asyncio.CancelledError:
+            # Handle cancellation from external source (e.g., Ctrl+C)
+            self.stop()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
         finally:
             # Final saves
             if self.fills:
@@ -447,7 +514,7 @@ class DataFetcher:
 
     def stop(self) -> None:
         """Signal the fetcher to stop."""
-        self._running = False
+        self._shutdown_event.set()
 
 
 async def main(slug: str) -> None:
