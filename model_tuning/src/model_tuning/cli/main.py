@@ -648,6 +648,117 @@ def _display_simulation_results(result: "SimulationResult", verbose: bool = Fals
             )
 
 
+@app.command()
+def fetch(
+    slug: Annotated[
+        str,
+        typer.Argument(help="Market slug (e.g., btc-updown-15m-1768582800)"),
+    ],
+) -> None:
+    """Fetch live data from Polymarket WebSockets.
+
+    Connects to Polymarket and collects fills, oracle prices, and orderbook
+    updates. Data is saved to sim_data/<slug>/.
+
+    Example: poetry run model-tuning fetch btc-updown-15m-1768582800
+    """
+    import asyncio
+
+    from model_tuning.live_data_fetching.fetcher import DataFetcher
+
+    rprint("[bold]Polymarket Data Fetcher[/bold]")
+    rprint(f"Market: {slug}")
+    rprint(f"Output: sim_data/{slug}/")
+    rprint("")
+
+    fetcher = DataFetcher(slug)
+    asyncio.run(fetcher.connect())
+
+    rprint("\n[green]Data collection complete![/green]")
+    rprint(f"Run '[bold]poetry run model-tuning sim {slug}[/bold]' to analyze")
+
+
+@app.command()
+def sim(
+    slug: Annotated[
+        str,
+        typer.Argument(help="Market slug (data must exist in sim_data/<slug>/)"),
+    ],
+    offset: Annotated[
+        float,
+        typer.Option("--offset", "-o", help="Quote offset from best bid"),
+    ] = 0.02,
+    size: Annotated[
+        float,
+        typer.Option("--size", "-s", help="Quote size"),
+    ] = 50.0,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Show detailed fill history"),
+    ] = False,
+) -> None:
+    """Run fill-driven simulation on collected data.
+
+    Uses BrainDeadQuoter (best_bid - offset) to simulate market making.
+
+    Example: poetry run model-tuning sim btc-updown-15m-1768582800
+    """
+    from model_tuning.simulation import (
+        BrainDeadQuoter,
+        FillDrivenSimulator,
+        OrderbookReconstructor,
+        generate_fill_driven_report,
+        load_fills_from_json,
+        load_oracle_from_json,
+    )
+
+    data_dir = Path("sim_data") / slug
+
+    if not data_dir.exists():
+        rprint(f"[red]Error: Data not found: {data_dir}[/red]")
+        rprint(f"Run '[bold]poetry run model-tuning fetch {slug}[/bold]' first")
+        raise typer.Exit(1)
+
+    # Load data
+    rprint(f"[blue]Loading data from {data_dir}/[/blue]")
+    reconstructor = OrderbookReconstructor.from_file(data_dir / "orderbooks_raw.json")
+    fills = load_fills_from_json(data_dir / "fills.json")
+    oracle = load_oracle_from_json(data_dir / "oracle.json")
+    rprint(f"  {len(fills)} fills, {len(oracle)} oracle snapshots")
+
+    # Run simulation
+    rprint(f"\n[blue]Running simulation (offset={offset}, size={size})...[/blue]")
+    quoter = BrainDeadQuoter(offset=offset, size=size)
+    result = FillDrivenSimulator().run(quoter, reconstructor, fills, oracle)
+
+    # Display results
+    inv = result.final_inventory
+    table = Table(show_header=True, header_style="bold", title="Simulation Results")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+
+    table.add_row("Fills Matched", f"{result.total_fills_matched} / {result.total_fills_considered}")
+    table.add_row("Volume", f"{result.total_volume:.1f}")
+    table.add_row("UP Position", f"{inv.up_qty:.1f} @ ${inv.up_avg:.4f}")
+    table.add_row("DOWN Position", f"{inv.down_qty:.1f} @ ${inv.down_avg:.4f}")
+    table.add_row("Pairs", f"{inv.pairs:.1f}")
+
+    total_color = "green" if result.final_total_pnl >= 0 else "red"
+    table.add_row("Total PnL", f"[{total_color}][bold]${result.final_total_pnl:.2f}[/bold][/{total_color}]")
+    console.print(table)
+
+    if verbose and result.matched_fills:
+        rprint(f"\n[bold]Matched Fills:[/bold]")
+        for mf in result.matched_fills[:15]:
+            rprint(f"  {mf.outcome.upper()} {mf.size:.1f} @ ${mf.price:.3f}")
+
+    # Generate report
+    if result.position_history:
+        output_path = data_dir / "simulation_report.png"
+        generate_fill_driven_report(result, output_path, title=f"Simulation: {slug}")
+        rprint(f"\n[green]Report: {output_path}[/green]")
+
+
 @app.callback()
 def main() -> None:
     """Model Tuning CLI for Polymarket quoter optimization."""

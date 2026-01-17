@@ -19,7 +19,11 @@ click = ">=8.0.0,<8.2"
 matplotlib = "^3.8"
 websockets = "^12.0"
 aiohttp = "^3.9"
+<<<<<<< HEAD
 python-dotenv = "^1.2.1"
+=======
+python-dotenv = "^1.0"
+>>>>>>> 5adf99133649dc64c8d3b15ffb39ada6ae34fdaf
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
