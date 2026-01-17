@@ -119,15 +119,16 @@ class DataFetcher:
         Uses the candle OPEN price at market start time (15 minutes before end).
 
         Args:
-            end_date_iso: Market end date in ISO format (e.g., "2026-01-16T05:00:00Z")
+            end_date_iso: Market end date in ISO format (not used - we use slug instead)
 
         Returns:
             The open price (threshold) for this market
         """
-        # Parse end_date and compute start_date (15 minutes before)
-        end_dt = datetime.fromisoformat(end_date_iso.replace("Z", "+00:00"))
-        start_dt = end_dt - timedelta(minutes=15)
-        start_ts = int(start_dt.timestamp())
+        # Use the slug directly to get exact timestamps
+        # Slug format: btc-updown-15m-1768662900
+        # The last part is the market START timestamp (not end!)
+        # Price to beat = OPEN of the candle starting at this timestamp
+        start_ts = int(self.slug.split("-")[-1])
 
         # Extract symbol (e.g., "btc" -> "BTCUSD")
         symbol = self.slug.split("-")[0].upper() + "USD"
@@ -162,16 +163,29 @@ class DataFetcher:
                     if not timestamps or not opens:
                         raise ValueError("No candle data returned")
 
-                    # Find the candle at or before start_ts
-                    best_idx = 0
+                    # Debug: show what we got
+                    rprint(f"[dim]Looking for candle at timestamp: {start_ts}[/dim]")
+                    rprint(f"[dim]Available candles: {[int(t) for t in timestamps]}[/dim]")
+
+                    # Find the candle with exact timestamp match (market start time)
+                    # The price to beat = OPEN price of candle starting at market start
+                    price = None
                     for i, ts in enumerate(timestamps):
-                        if ts <= start_ts:
-                            best_idx = i
+                        if int(ts) == start_ts:
+                            price = opens[i] / 1e18
+                            rprint(f"[green]Found exact match at {start_ts}[/green]")
+                            break
 
-                    # Chainlink returns prices in 18-decimal format
-                    price = opens[best_idx] / 1e18
+                    # Fallback: find closest candle at or before start_ts
+                    if price is None:
+                        best_idx = 0
+                        for i, ts in enumerate(timestamps):
+                            if int(ts) <= start_ts:
+                                best_idx = i
+                        price = opens[best_idx] / 1e18
+                        rprint(f"[yellow]No exact candle at {start_ts}, using closest: {int(timestamps[best_idx])}[/yellow]")
 
-                    rprint(f"[green]Chainlink price at {start_ts}: ${price:,.2f}[/green]")
+                    rprint(f"[green]Chainlink price to beat: ${price:,.2f}[/green]")
                     return price
 
         except Exception as e:
